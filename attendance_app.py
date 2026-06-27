@@ -30,7 +30,7 @@ XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 # ───────────────────────────── cached heavy work ─────────────────────────────
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Marking new sessions…")
 def _mark(roster_bytes, l2_bytes, attendee_files, mode):
     """Run the marker once per unique input set. values_only=True so formula-based
     attendance columns keep their values through the save (the dashboard reads
@@ -39,7 +39,7 @@ def _mark(roster_bytes, l2_bytes, attendee_files, mode):
                             mode=mode, values_only=True)
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner="Building dashboard…")
 def _compute(roster_bytes):
     return dc.compute(roster_bytes)
 
@@ -54,11 +54,14 @@ def _sheet_map(roster_bytes):
     return dc.batch_sheet_map(roster_bytes)
 
 
-@st.cache_data(ttl=600, show_spinner="Reading live data from Google Drive…")
+@st.cache_data(show_spinner="Reading live data from Google Drive… (one-time)")
 def _fetch_live(nonce):
-    """Pull roster/L2/attendee data from Drive. `nonce` is hashed into the cache
-    key so bumping it on Refresh forces a fresh pull; the 10-min TTL also keeps
-    it from going stale on its own."""
+    """Pull roster/L2/attendee data from Drive ONCE and keep it cached.
+
+    New sessions are only added on weekends, so there's deliberately NO time-based
+    expiry — the data stays cached (shared across all viewers) until someone clicks
+    '🔄 Refresh from Google', which bumps `nonce` and clears the cache. This is what
+    stops the app from re-fetching on every little interaction."""
     return live_data.load_live()
 
 
