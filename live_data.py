@@ -29,11 +29,15 @@ Only the `google-*` packages in requirements.txt are needed for this; they are
 imported lazily so upload-only use never has to install them locally.
 """
 from __future__ import annotations
-import datetime
 import io
 import re
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+# Never let a single Drive request hang the whole app forever (the #1 cause of an
+# app "stuck loading"). Any socket with no progress for this long raises instead.
+socket.setdefaulttimeout(60)
 
 # Drive/Sheets MIME types we care about
 _SHEET_MIME = "application/vnd.google-apps.spreadsheet"
@@ -134,20 +138,34 @@ def _list_children(svc, folder_id: str) -> list[dict]:
 
 def _existing_sessions(roster_bytes: bytes) -> dict:
     """{batch_key -> set(mm_dd)} of session columns already present in the roster,
-    so we can skip re-fetching sessions that are already marked."""
+    so we can skip re-fetching sessions that are already marked.
+
+    Uses openpyxl read-only mode and reads only the top rows of each sheet — far
+    lighter on memory than a full load (matters on Streamlit's small instances).
+    """
     import attendance_core as ac
     from openpyxl import load_workbook
-    wb = load_workbook(io.BytesIO(roster_bytes), data_only=True)
+    wb = load_workbook(io.BytesIO(roster_bytes), read_only=True, data_only=True)
+
+    def _has(row, needle):
+        return any(isinstance(v, str) and needle in v.strip().lower() for v in row)
+
     out: dict = {}
     for name in wb.sheetnames:
         k = ac._sheet_key(name)
         if not k:
             continue
         ws = wb[name]
-        hr = ac._header_row(ws)
+        top = list(ws.iter_rows(min_row=1, max_row=3, max_col=200, values_only=True))
+        row1 = top[0] if top else ()
+        row2 = top[1] if len(top) > 1 else ()
+        hr = 2 if (_has(row2, "registered number") or _has(row2, "payment")) else 1
         dates = set()
-        for c in range(11, (ws.max_column or 1) + 1):
-            d = ac._mmdd(ws.cell(1, c).value) or (ac._mmdd(ws.cell(2, c).value) if hr == 2 else None)
+        width = max(len(row1), len(row2))
+        for c in range(10, width):              # 0-based: session columns start at K (index 10)
+            v1 = row1[c] if c < len(row1) else None
+            v2 = row2[c] if (hr == 2 and c < len(row2)) else None
+            d = ac._mmdd(v1) or (ac._mmdd(v2) if hr == 2 else None)
             if d:
                 dates.add(d)
         out[k] = dates
@@ -156,7 +174,7 @@ def _existing_sessions(roster_bytes: bytes) -> dict:
 
 
 def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
-                        mark_all: bool = False, max_workers: int = 12):
+                        mark_all: bool = False, max_workers: int = 8):
     """Download attendee files only for sessions NOT already marked in the roster.
 
     The Shared Drive holds the full history (hundreds of dated session folders),
@@ -200,16 +218,24 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                 entries.append((f"{name}/{f['name']}", f["id"],
                                 f["name"].lower().endswith(".zip")))
 
-    # 3) download in parallel
+    # 3) download (parallel, but resilient — one slow/failed file can't hang or
+    #    sink the whole batch; the 60s socket timeout caps any single request)
     out: list[tuple[str, bytes]] = []
+    failed = 0
     if entries:
         def _dl(e):
             path, fid, is_zip = e
-            data = _download(_thread_drive().files().get_media(
-                fileId=fid, supportsAllDrives=True))
-            return path, is_zip, data
-        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            try:
+                data = _download(_thread_drive().files().get_media(
+                    fileId=fid, supportsAllDrives=True))
+                return path, is_zip, data
+            except Exception:
+                return path, is_zip, None
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(entries))) as ex:
             for path, is_zip, data in ex.map(_dl, entries):
+                if data is None:
+                    failed += 1
+                    continue
                 if is_zip:
                     prefix = (path.rsplit("/", 1)[0] + "/") if "/" in path else ""
                     with zipfile.ZipFile(_io.BytesIO(data)) as z:
@@ -219,7 +245,7 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                 else:
                     out.append((path, data))
 
-    info = dict(new_folders=len(to_fetch), files=len(out),
+    info = dict(new_folders=len(to_fetch), files=len(out), failed=failed,
                 skipped_already_marked=skipped_done, skipped_no_sheet=skipped_nosheet)
     return out, info
 
