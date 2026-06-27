@@ -6,3 +6,7 @@ altair>=5.0
 # so manual-upload use works without these installed locally):
 google-api-python-client>=2.0
 google-auth>=2.0
+# Dashboard live reads (gspread resolves COUNTIF formula cells to Present/Absent
+# via FORMATTED_VALUE) + Plotly charts:
+gspread>=6.0
+plotly>=5.18

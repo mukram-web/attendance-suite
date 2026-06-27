@@ -23,6 +23,9 @@ import streamlit as st
 import attendance_core as ac
 import dashboard_core as dc
 import live_data
+import data as ddata          # new dashboard data layer (aliased; 'data' is used as a local below)
+import sheets as dsheets      # gspread / xlsx source adapter
+import dash_view              # Plotly drill-down dashboard UI
 
 st.set_page_config(page_title="Be10X Attendance", page_icon="📊", layout="wide")
 
@@ -42,6 +45,32 @@ def _mark(roster_bytes, l2_bytes, attendee_files, mode):
 @st.cache_data(show_spinner="Building dashboard…")
 def _compute(roster_bytes):
     return dc.compute(roster_bytes)
+
+
+@st.cache_data(show_spinner="Loading attendance from Google Sheets…")
+def _dash_live(nonce):
+    """New dashboard data, read live via gspread (FORMATTED_VALUE resolves
+    formula cells). Cached with no TTL — refresh-only, like the rest."""
+    roster, l2 = dsheets.load_sheets()
+    return ddata.build(roster, l2)
+
+
+@st.cache_data(show_spinner="Building attendance dashboard…")
+def _dash_from_bytes(roster_bytes, l2_bytes):
+    """Fallback when not live: build the new dashboard from the in-memory roster
+    (and optional L2) the rest of the app already loaded — no extra read."""
+    import io as _io
+    from openpyxl import load_workbook
+
+    def _tabs(b):
+        wb = load_workbook(_io.BytesIO(b), read_only=True, data_only=True)
+        out = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
+               for ws in wb.worksheets}
+        wb.close()
+        return out
+
+    l2_lookup = dsheets.build_l2_lookup(_tabs(l2_bytes)) if l2_bytes else {}
+    return ddata.build(_tabs(roster_bytes), l2_lookup)
 
 
 @st.cache_data(show_spinner=False)
@@ -207,25 +236,8 @@ st.download_button(
 st.caption("The complete marked workbook — every batch, all sessions, Present/Absent.")
 
 
-# ───────────────────────────── sidebar filters (need data) ───────────────────
+# Batch list for the Roster tab (the new Dashboard has its own selector).
 all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
-with st.sidebar:
-    st.header("③ Filters")
-    sel_batches = st.multiselect("Batches", all_batches, default=all_batches)
-    idx_topic = (marked.groupby("SessionIdx")["Topic"]
-                 .agg(lambda s: next((t for t in s if t), "")).to_dict())
-    max_idx = int(marked["SessionIdx"].max())
-    sess_options = ["Overall (average)"] + [
-        f"Session {i}" + (f" — {idx_topic.get(i,'')}" if idx_topic.get(i) else "")
-        for i in range(1, max_idx + 1)
-    ]
-    sess_choice = st.selectbox("Session focus", sess_options, index=0)
-
-if not sel_batches:
-    st.warning("Pick at least one batch in the sidebar.")
-    st.stop()
-
-view = marked[marked["Batch"].isin(sel_batches)].copy()
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
@@ -235,80 +247,15 @@ tab_dash, tab_roster, tab_log = st.tabs(
 
 # ============================ TAB 1 — DASHBOARD ==============================
 with tab_dash:
-    if sess_choice.startswith("Overall"):
-        focus_label = "Overall (avg across sessions)"
-        by_batch = (view.groupby("Batch")
-                    .agg(Pct=(PCT, "mean"), Present=(PRES, "sum"),
-                         Den=(DEN, "first"), Sessions=("SessionIdx", "nunique"))
-                    .reset_index())
-        by_batch["Pct"] = by_batch["Pct"].round(1)
+    # New AI CAP dashboard: present % of total strength, per-batch drill-down,
+    # closing-type panel, L2 topics. Live via gspread; else from the loaded roster.
+    if live_ready and not live_failed:
+        DATA, summary = _dash_live(st.session_state.nonce)
+        note = f"🟢 Live from Google Sheets · refreshed {datetime.now():%d %b %Y, %H:%M}"
     else:
-        sidx = int(sess_choice.split(" ")[1].split("—")[0].strip())
-        focus_label = sess_choice
-        sub = view[view["SessionIdx"] == sidx]
-        by_batch = (sub.groupby("Batch")
-                    .agg(Pct=(PCT, "first"), Present=(PRES, "first"), Den=(DEN, "first"))
-                    .reset_index())
-    by_batch = by_batch.sort_values("Pct", ascending=False)
-
-    total_strength = int(view.groupby("Batch")[DEN].first().sum())
-    avg_pct = round(by_batch["Pct"].mean(), 1) if not by_batch.empty else 0
-    best = by_batch.iloc[0] if not by_batch.empty else None
-    worst = by_batch.iloc[-1] if not by_batch.empty else None
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric(f"Total {den_label}", f"{total_strength:,}")
-    k2.metric("Avg attendance", f"{avg_pct:.0f}%")
-    if best is not None:
-        k3.metric("Top batch", best["Batch"], f"{best['Pct']:.0f}%")
-    if worst is not None:
-        k4.metric("Weakest batch", worst["Batch"], f"{worst['Pct']:.0f}%")
-    st.markdown(f"**Showing:** {focus_label} · basis = _{basis.lower()}_")
-
-    st.subheader("Attendance % by batch")
-    bar = (alt.Chart(by_batch)
-           .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
-           .encode(
-               x=alt.X("Batch:N", sort=list(by_batch["Batch"]), title=None),
-               y=alt.Y("Pct:Q", title="% present", scale=alt.Scale(domain=[0, 100])),
-               color=alt.Color("Pct:Q", scale=alt.Scale(scheme="blues"), legend=None),
-               tooltip=["Batch", alt.Tooltip("Pct", title="% present"),
-                        alt.Tooltip("Present", title="present"),
-                        alt.Tooltip("Den", title=den_label)],
-           ).properties(height=340))
-    labels = bar.mark_text(dy=-6, fontSize=11).encode(text=alt.Text("Pct:Q", format=".0f"))
-    st.altair_chart(bar + labels, width='stretch')
-
-    st.subheader("Heatmap — batch × session")
-    st.caption("Each cell = % present. Sessions follow the same topic order across batches.")
-    heat = (alt.Chart(view).mark_rect().encode(
-        x=alt.X("SessionIdx:O", title="Session #"),
-        y=alt.Y("Batch:N", sort=all_batches, title=None),
-        color=alt.Color(f"{PCT}:Q", scale=alt.Scale(scheme="blues"), title="% present"),
-        tooltip=["Batch", "SessionIdx", alt.Tooltip("Topic"),
-                 alt.Tooltip(PCT, title="% present"), alt.Tooltip(PRES, title="present"),
-                 alt.Tooltip(DEN, title=den_label)],
-    ).properties(height=28 * len(sel_batches) + 40))
-    st.altair_chart(heat, width='stretch')
-
-    st.subheader("Attendance trend across sessions")
-    trend = (alt.Chart(view).mark_line(point=True).encode(
-        x=alt.X("SessionIdx:Q", title="Session #"),
-        y=alt.Y(f"{PCT}:Q", title="% present", scale=alt.Scale(domain=[0, 100])),
-        color=alt.Color("Batch:N", sort=all_batches),
-        tooltip=["Batch", "SessionIdx", alt.Tooltip("Topic"),
-                 alt.Tooltip(PCT, title="% present")],
-    ).properties(height=360))
-    st.altair_chart(trend, width='stretch')
-
-    st.subheader("Per-session detail")
-    show = view[["Batch", "SessionIdx", "SessionLabel", "Topic", PRES, DEN, PCT]].rename(
-        columns={PRES: "Present", DEN: den_label.title(), PCT: "% Present",
-                 "SessionLabel": "Session"})
-    st.dataframe(show, width='stretch', hide_index=True)
-    st.download_button("⬇️ Download this view (CSV)",
-                       show.to_csv(index=False).encode("utf-8"),
-                       file_name="attendance_dashboard.csv", mime="text/csv")
+        DATA, summary = _dash_from_bytes(marked_bytes, l2_bytes)
+        note = "📤 Built from the uploaded roster"
+    dash_view.render(DATA, summary, note)
 
 # ============================ TAB 2 — ROSTER =================================
 with tab_roster:
