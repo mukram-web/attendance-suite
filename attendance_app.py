@@ -194,6 +194,15 @@ if attendee_files and report:
                f"{len({r['batch'] for r in report})} batch(es) "
                f"({new_n} new, {len(report)-new_n} re-marked).")
 
+# Prominent: the full marked roster (all sessions) — same deliverable as the original marker
+st.download_button(
+    "⬇️ Download marked roster — ALL sessions (.xlsx)",
+    data=marked_bytes,
+    file_name="Master_Batch_Rosters_marked.xlsx",
+    mime=XLSX_MIME, type="primary", key="dl_top",
+)
+st.caption("The complete marked workbook — every batch, all sessions, Present/Absent.")
+
 
 # ───────────────────────────── sidebar filters (need data) ───────────────────
 all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
@@ -344,7 +353,7 @@ with tab_roster:
         "⬇️ Download the full marked roster (.xlsx)",
         data=marked_bytes,
         file_name="Master_Batch_Rosters_marked.xlsx",
-        mime=XLSX_MIME, type="primary",
+        mime=XLSX_MIME, type="primary", key="dl_roster",
     )
 
 # ============================ TAB 3 — MARKING LOG ============================
