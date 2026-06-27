@@ -48,11 +48,15 @@ def _compute(roster_bytes):
 
 
 @st.cache_data(show_spinner="Loading attendance from Google Sheets…")
-def _dash_live(nonce):
+def _dash_live(nonce, l2_bytes):
     """New dashboard data, read live via gspread (FORMATTED_VALUE resolves
-    formula cells). Cached with no TTL — refresh-only, like the rest."""
-    roster, l2 = dsheets.load_sheets()
-    return ddata.build(roster, l2)
+    formula cells). Session topics come primarily from the reliable Webinar-ID
+    join (ALL attendee filenames ⋈ L2), falling back to L2-by-date. Cached,
+    refresh-only."""
+    roster, l2_date = dsheets.load_sheets()
+    names = live_data.list_attendee_names()                       # all filenames, one query
+    topics = dsheets.webinar_topic_lookup([(n, None) for n in names], l2_bytes)
+    return ddata.build(roster, {**l2_date, **topics})   # Webinar-ID topics win on overlap
 
 
 @st.cache_data(show_spinner="Building attendance dashboard…")
@@ -250,7 +254,7 @@ with tab_dash:
     # New AI CAP dashboard: present % of total strength, per-batch drill-down,
     # closing-type panel, L2 topics. Live via gspread; else from the loaded roster.
     if live_ready and not live_failed:
-        DATA, summary = _dash_live(st.session_state.nonce)
+        DATA, summary = _dash_live(st.session_state.nonce, l2_bytes)
         note = f"🟢 Live from Google Sheets · refreshed {datetime.now():%d %b %Y, %H:%M}"
     else:
         DATA, summary = _dash_from_bytes(marked_bytes, l2_bytes)

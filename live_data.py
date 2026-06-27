@@ -136,6 +136,44 @@ def _list_children(svc, folder_id: str) -> list[dict]:
     return items
 
 
+def list_attendee_names(folder_id: str | None = None) -> list:
+    """All attendee filenames across the Shared Drive — names only, no downloads.
+
+    One Drive query (`name contains 'attendee_'`) over the whole Shared Drive, so
+    it's fast even with 500+ session folders. The filenames carry the Webinar ID
+    and date, which is all the dashboard's topic join needs. Falls back to a
+    recursive name-only walk for a plain (non-Shared-Drive) folder.
+    """
+    import streamlit as st
+    fid = folder_id or st.secrets["drive"].get("attendee_folder_id")
+    if not fid:
+        return []
+    svc = _drive_service()
+    names: list = []
+    if str(fid).startswith("0A"):                       # Shared Drive root → whole-drive search
+        token = None
+        while True:
+            resp = svc.files().list(
+                q="name contains 'attendee_' and trashed = false",
+                corpora="drive", driveId=fid,
+                includeItemsFromAllDrives=True, supportsAllDrives=True,
+                fields="nextPageToken, files(name)", pageSize=1000, pageToken=token,
+            ).execute()
+            names += [f["name"] for f in resp.get("files", [])]
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+    else:                                               # plain folder → recurse names only
+        def walk(f):
+            for c in _list_children(svc, f):
+                if c["mimeType"] == _FOLDER_MIME:
+                    walk(c["id"])
+                elif "attendee" in c["name"].lower():
+                    names.append(c["name"])
+        walk(fid)
+    return names
+
+
 def _existing_sessions(roster_bytes: bytes) -> dict:
     """{batch_key -> set(mm_dd)} of session columns already present in the roster,
     so we can skip re-fetching sessions that are already marked.

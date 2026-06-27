@@ -47,6 +47,39 @@ def _hdr_idx(header, *needles):
     return None
 
 
+def webinar_topic_lookup(attendee_files, l2_bytes) -> dict:
+    """The RELIABLE topic map: join Zoom attendee files ⋈ L2 on **Webinar ID**.
+
+    Each attendee file is named `attendee_<WebinarID>_<date>.csv`, and L2 maps
+    Webinar ID → (batches, Session/Topic Name). So this gives an exact
+    {(batch_label, mm_dd): topic, mm_dd: topic} map — the same Webinar-ID join the
+    marker uses, which is far more dependable than fuzzy date matching. Returns {}
+    if there are no attendee files or no L2 (e.g. upload mode without a zip).
+    """
+    import attendance_core as ac
+    if not l2_bytes or not attendee_files:
+        return {}
+    wid_map = ac.parse_l2(l2_bytes)              # {webinar_id: (frozenset((track, num)), topic)}
+    lookup: dict = {}
+    for name, _data in attendee_files:
+        pf = ac._parse_filename(str(name).split("/")[-1])   # (webinar_id, "YYYY_MM_DD")
+        if not pf:
+            continue
+        wid, ymd = pf
+        info = wid_map.get(wid)
+        if not info:
+            continue
+        _keys, topic = info
+        topic = (topic or "").strip()
+        if not topic:
+            continue
+        mm = f"{int(ymd[5:7]):02d}_{int(ymd[8:10]):02d}"
+        for _track, num in _keys:
+            lookup[(f"B{num}", mm)] = topic          # batch-specific (preferred)
+        lookup.setdefault(mm, topic)                 # date-only fallback
+    return lookup
+
+
 def build_l2_lookup(l2_tabs: dict[str, list[list]]) -> dict:
     """Build {(batch_label, mm_dd): topic, mm_dd: topic} from the L2 monthly tabs.
 
