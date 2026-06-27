@@ -1,0 +1,660 @@
+<title>AttendaSync — Go Live from Google Drive</title>
+<style>
+  :root{
+    /* palette — deep slate-indigo ground, warm paper, one confident teal accent */
+    --ink:        #1d2138;   /* near-black, slight indigo bias */
+    --ink-soft:   #44496a;
+    --paper:      #f7f5f0;   /* warm paper neutral */
+    --paper-2:    #efeada;
+    --card:       #fffefb;
+    --line:       #e2ddd0;   /* warm hairline */
+    --line-soft:  #ece8dc;
+    --accent:     #128576;   /* teal-green = "connected / go live" */
+    --accent-deep:#0c6055;
+    --accent-wash:#e3f1ee;
+    --robot:      #4d4f8a;   /* the service-account "robot" voice */
+    --robot-wash: #ecedf6;
+    --warn:       #b06d05;   /* amber — gotchas */
+    --warn-wash:  #fbf0d9;
+    --danger:     #b53d31;   /* muted red — destructive / one-shot */
+    --danger-wash:#f8e4e0;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "Source Code Pro", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, "Segoe UI", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  }
+
+  *{ box-sizing:border-box; }
+
+  body{ margin:0; }  /* harness wraps content; keep ground here */
+
+  .page{
+    background:
+      radial-gradient(120% 80% at 100% -10%, #eef4f2 0%, rgba(238,244,242,0) 55%),
+      var(--paper);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:17px;
+    line-height:1.62;
+    -webkit-font-smoothing:antialiased;
+    min-height:100%;
+  }
+
+  .wrap{
+    max-width:1080px;
+    margin:0 auto;
+    padding:0 24px 96px;
+    display:grid;
+    grid-template-columns: 1fr;
+    gap:0;
+  }
+
+  /* ---------- hero ---------- */
+  .hero{
+    margin:0 -24px 0;
+    padding:64px 24px 52px;
+    background:
+      linear-gradient(155deg, #1b1f37 0%, #232a4d 60%, #1d3b3a 130%);
+    color:#f4f2ec;
+    position:relative;
+    overflow:hidden;
+  }
+  .hero::after{
+    content:"";
+    position:absolute; inset:0;
+    background:
+      radial-gradient(40% 70% at 88% 18%, rgba(18,133,118,.45) 0%, rgba(18,133,118,0) 60%);
+    pointer-events:none;
+  }
+  .hero-inner{ max-width:760px; margin:0 auto; position:relative; }
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:12.5px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:#7fd8c9;
+    margin:0 0 18px;
+    display:flex; align-items:center; gap:10px;
+  }
+  .eyebrow .dot{ width:7px; height:7px; border-radius:50%; background:#5fcdb9; box-shadow:0 0 0 4px rgba(95,205,185,.2); }
+  .hero h1{
+    font-size:clamp(34px, 5.4vw, 50px);
+    line-height:1.04;
+    letter-spacing:-.02em;
+    font-weight:800;
+    margin:0 0 18px;
+    text-wrap:balance;
+  }
+  .hero h1 .live{ color:#6fd6c4; }
+  .hero p.lede{
+    font-size:19px;
+    line-height:1.55;
+    color:#d6d3c8;
+    margin:0 0 8px;
+    max-width:60ch;
+  }
+  .hero .reassure{
+    margin-top:26px;
+    font-size:15px;
+    color:#aeb6c4;
+    border-left:2px solid rgba(111,214,196,.5);
+    padding-left:16px;
+    max-width:58ch;
+  }
+
+  /* ---------- contents rail ---------- */
+  .toc{
+    margin:34px 0 8px;
+    padding:18px 22px;
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:14px;
+    box-shadow:0 1px 0 rgba(29,33,56,.03);
+  }
+  .toc h2{
+    font-family:var(--mono);
+    font-size:11.5px; letter-spacing:.2em; text-transform:uppercase;
+    color:var(--ink-soft); margin:0 0 12px;
+  }
+  .toc ol{ margin:0; padding:0; list-style:none; display:grid; gap:8px; counter-reset:t; }
+  .toc li{ counter-increment:t; }
+  .toc a{
+    display:flex; align-items:baseline; gap:12px;
+    text-decoration:none; color:var(--ink);
+    padding:6px 8px; border-radius:8px; transition:background .15s, color .15s;
+  }
+  .toc a:hover{ background:var(--accent-wash); color:var(--accent-deep); }
+  .toc a::before{
+    content:counter(t);
+    font-family:var(--mono); font-size:13px; font-weight:600;
+    color:#fff; background:var(--accent);
+    min-width:24px; height:24px; border-radius:7px;
+    display:inline-flex; align-items:center; justify-content:center;
+    flex:0 0 auto;
+  }
+  .toc a:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; }
+  .toc .est{ margin-left:auto; font-size:13px; color:var(--ink-soft); font-family:var(--mono); }
+
+  /* ---------- sections ---------- */
+  section.step{ margin-top:54px; scroll-margin-top:20px; }
+  .step-head{
+    display:flex; align-items:flex-start; gap:18px; margin-bottom:6px;
+    padding-bottom:18px; border-bottom:2px solid var(--line);
+  }
+  .step-num{
+    font-family:var(--mono); font-weight:700; font-size:20px;
+    color:#fff; background:var(--ink);
+    width:46px; height:46px; border-radius:12px; flex:0 0 auto;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .step.s1 .step-num{ background:var(--ink); }
+  .step.s2 .step-num{ background:var(--robot); }
+  .step.s3 .step-num{ background:var(--accent-deep); }
+  .step.s4 .step-num{ background:var(--accent); }
+  .step-head h2{
+    font-size:clamp(23px,3.2vw,30px);
+    line-height:1.15; letter-spacing:-.015em; font-weight:800;
+    margin:2px 0 4px; text-wrap:balance;
+  }
+  .step-head .sub{ margin:0; color:var(--ink-soft); font-size:15.5px; }
+
+  .body{ max-width:72ch; }
+
+  /* numbered instruction list */
+  ol.steps{ counter-reset:s; list-style:none; margin:26px 0 0; padding:0; }
+  ol.steps > li{
+    counter-increment:s;
+    position:relative;
+    padding:0 0 22px 52px;
+    margin:0;
+  }
+  ol.steps > li::before{
+    content:counter(s);
+    position:absolute; left:0; top:-2px;
+    font-family:var(--mono); font-size:14px; font-weight:600;
+    color:var(--accent-deep);
+    width:32px; height:32px; border-radius:9px;
+    background:var(--accent-wash); border:1px solid #cfe7e1;
+    display:flex; align-items:center; justify-content:center;
+  }
+  ol.steps > li::after{
+    content:""; position:absolute; left:15px; top:34px; bottom:6px;
+    width:2px; background:var(--line-soft);
+  }
+  ol.steps > li:last-child::after{ display:none; }
+  ol.steps > li > strong{ color:var(--ink); }
+  ol.steps p{ margin:.4em 0 0; }
+
+  /* breadcrumb / menu path chips */
+  .path{
+    font-family:var(--mono); font-size:13.5px;
+    background:var(--paper-2); border:1px solid var(--line);
+    padding:2px 7px; border-radius:6px; white-space:nowrap;
+    color:var(--ink);
+  }
+  .btn-lbl{
+    font-family:var(--mono); font-size:13px; font-weight:600;
+    background:var(--ink); color:#fff; padding:2px 9px; border-radius:6px;
+    white-space:nowrap;
+  }
+  code.inl{
+    font-family:var(--mono); font-size:14px;
+    background:#fff; border:1px solid var(--line);
+    padding:1px 6px; border-radius:5px;
+    word-break:break-word;
+  }
+
+  /* callouts */
+  .call{
+    margin:22px 0; padding:16px 18px 16px 18px;
+    border-radius:12px; border:1px solid; font-size:15.5px; line-height:1.55;
+    display:grid; grid-template-columns:auto 1fr; gap:14px; align-items:start;
+  }
+  .call .ic{
+    font-family:var(--mono); font-weight:700; font-size:12px; letter-spacing:.04em;
+    text-transform:uppercase; padding:4px 8px; border-radius:7px; white-space:nowrap;
+    align-self:start;
+  }
+  .call p{ margin:0; }
+  .call p + p{ margin-top:8px; }
+  .call.robot { background:var(--robot-wash);  border-color:#d3d5ee; color:#2f3163; }
+  .call.robot .ic{ background:var(--robot); color:#fff; }
+  .call.warn  { background:var(--warn-wash);   border-color:#eed7a6; color:#6f4503; }
+  .call.warn .ic{ background:var(--warn); color:#fff; }
+  .call.danger{ background:var(--danger-wash); border-color:#eebbb3; color:#7c281e; }
+  .call.danger .ic{ background:var(--danger); color:#fff; }
+  .call.ok    { background:var(--accent-wash); border-color:#bfe2db; color:var(--accent-deep); }
+  .call.ok .ic{ background:var(--accent); color:#fff; }
+  .call b{ font-weight:700; }
+  .call code{ font-family:var(--mono); font-size:13.5px; background:rgba(255,255,255,.6); padding:1px 5px; border-radius:5px; }
+
+  /* code block */
+  .code{
+    margin:22px 0; border-radius:13px; overflow:hidden;
+    border:1px solid #2a2f4a;
+    box-shadow:0 8px 24px -16px rgba(29,33,56,.5);
+  }
+  .code-bar{
+    display:flex; align-items:center; gap:10px;
+    background:#1a1e34; color:#cdd2e6;
+    padding:9px 14px; font-family:var(--mono); font-size:12.5px;
+    letter-spacing:.04em; border-bottom:1px solid #2a2f4a;
+  }
+  .code-bar .fname{ color:#7fd8c9; }
+  .code-bar .tag{ margin-left:auto; font-size:11px; color:#8b91ac; text-transform:uppercase; letter-spacing:.12em; }
+  .code pre{
+    margin:0; padding:18px 16px; overflow-x:auto;
+    background:#15182b; color:#e7e9f3;
+    font-family:var(--mono); font-size:13.5px; line-height:1.7;
+    tab-size:2;
+  }
+  .code pre .k{ color:#7fd8c9; }      /* keys */
+  .code pre .s{ color:#e8c98a; }      /* strings */
+  .code pre .c{ color:#7d83a3; font-style:italic; } /* comments */
+  .code pre .t{ color:#c3a0e6; }      /* table header */
+
+  /* id-finder mini diagram */
+  .urlbox{
+    margin:20px 0; padding:18px; border-radius:12px;
+    background:var(--card); border:1px solid var(--line);
+  }
+  .urlbox .label{ font-family:var(--mono); font-size:11.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-soft); margin:0 0 12px; }
+  .urlstr{
+    font-family:var(--mono); font-size:14px; line-height:2.1;
+    word-break:break-all; color:var(--ink-soft);
+  }
+  .urlstr .id{
+    background:#ffe9a8; color:#5a4300; padding:2px 5px; border-radius:5px;
+    box-shadow:0 0 0 2px #ffe9a8; font-weight:600;
+  }
+  .urlstr .ann{
+    display:block; margin-top:6px; font-family:var(--sans); font-size:13.5px; color:var(--warn);
+  }
+
+  /* file table */
+  .files{ margin:18px 0; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .files table{ border-collapse:collapse; width:100%; font-size:15px; }
+  .files th, .files td{ text-align:left; padding:11px 14px; border-bottom:1px solid var(--line-soft); vertical-align:top; }
+  .files th{ background:var(--paper-2); font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-soft); font-weight:600; }
+  .files tr:last-child td{ border-bottom:0; }
+  .files td code{ font-family:var(--mono); font-size:13px; color:var(--accent-deep); }
+
+  /* checklist / done */
+  .done{
+    margin-top:26px; padding:20px 22px; border-radius:14px;
+    background:var(--accent-wash); border:1px solid #bfe2db;
+  }
+  .done h3{ margin:0 0 12px; font-size:17px; color:var(--accent-deep); display:flex; align-items:center; gap:9px; }
+  .done ul{ margin:0; padding:0; list-style:none; display:grid; gap:9px; }
+  .done li{ display:flex; gap:11px; align-items:flex-start; font-size:15.5px; }
+  .done li .chk{ color:var(--accent); font-weight:700; flex:0 0 auto; margin-top:1px; }
+
+  /* troubleshooting */
+  .trouble{ margin-top:54px; }
+  .trouble h2{ font-size:26px; letter-spacing:-.015em; margin:0 0 8px; }
+  .tcard{
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:16px 18px; margin-top:14px;
+  }
+  .tcard .symptom{ font-weight:700; color:var(--danger); margin:0 0 6px; font-size:15.5px; }
+  .tcard .symptom::before{ content:"⚠ "; }
+  .tcard .fix{ margin:0; font-size:15px; color:var(--ink-soft); }
+  .tcard .fix b{ color:var(--ink); }
+
+  .sources{
+    margin-top:48px; padding-top:20px; border-top:1px solid var(--line);
+    font-size:13px; color:var(--ink-soft); line-height:1.8;
+  }
+  .sources h3{ font-family:var(--mono); font-size:11.5px; letter-spacing:.18em; text-transform:uppercase; margin:0 0 10px; color:var(--ink); }
+  .sources a{ color:var(--accent-deep); word-break:break-all; }
+
+  a{ color:var(--accent-deep); }
+  a:focus-visible{ outline:2px solid var(--accent); outline-offset:2px; border-radius:3px; }
+
+  @media (max-width:640px){
+    .page{ font-size:16px; }
+    .call{ grid-template-columns:1fr; gap:8px; }
+    .step-head{ gap:12px; }
+    .toc .est{ display:none; }
+  }
+  @media (prefers-reduced-motion:reduce){
+    *{ transition:none !important; }
+  }
+</style>
+
+<div class="page">
+<div class="wrap">
+
+  <header class="hero">
+    <div class="hero-inner">
+      <p class="eyebrow"><span class="dot"></span> AttendaSync · Setup Guide</p>
+      <h1>Make your app read <span class="live">live</span> from Google Drive</h1>
+      <p class="lede">Right now AttendaSync needs you to upload three files by hand. This guide hires a little robot helper that fetches your roster, schedule, and Zoom data straight from Drive — so the app stays up to date on its own.</p>
+      <p class="reassure">You do not need to know how to code. Every step is a click in a web page or a value you copy and paste. Take it one numbered step at a time — there are four. Set aside about 30–40 minutes the first time.</p>
+    </div>
+  </header>
+
+  <nav class="toc" aria-label="Contents">
+    <h2>What you'll do</h2>
+    <ol>
+      <li><a href="#s1">Create the robot helper in Google Cloud <span class="est">~15 min</span></a></li>
+      <li><a href="#s2">Share your 3 Drive items with the robot <span class="est">~10 min</span></a></li>
+      <li><a href="#s3">Paste the key &amp; file IDs into Streamlit <span class="est">~10 min</span></a></li>
+      <li><a href="#s4">Deploy, then confirm it's live <span class="est">~5 min</span></a></li>
+    </ol>
+  </nav>
+
+  <div class="call robot" style="margin-top:24px;">
+    <span class="ic">Robot</span>
+    <div>
+      <p><b>The big idea, in one breath.</b> Google won't let your app log in as <em>you</em>. Instead you create a <b>service account</b> — a robot Google login with its own email address and its own password-file (a <b>JSON key</b>). You give that key to Streamlit, and you <em>share</em> your three Drive items with the robot's email, exactly like sharing with a colleague. The robot can then read those three items and nothing else.</p>
+    </div>
+  </div>
+
+  <!-- ============ STEP 1 ============ -->
+  <section class="step s1" id="s1">
+    <div class="step-head">
+      <div class="step-num">1</div>
+      <div>
+        <h2>Create the robot helper in Google Cloud</h2>
+        <p class="sub">Make a project, switch on two Google services, create the robot, and download its key.</p>
+      </div>
+    </div>
+    <div class="body">
+
+      <ol class="steps">
+        <li>
+          <strong>Sign in to the Google Cloud Console.</strong>
+          <p>Go to <a href="https://console.cloud.google.com">console.cloud.google.com</a> and sign in with your normal Google account. This is a free control panel — you will <em>not</em> be charged for what we do here.</p>
+        </li>
+        <li>
+          <strong>Create a project.</strong>
+          <p>Click the <span class="path">Menu ☰</span> (top-left) → <span class="path">IAM &amp; Admin</span> → <span class="path">Create a Project</span> (or use the project picker at the top and click <span class="btn-lbl">NEW PROJECT</span>). Type a <b>Project name</b> like <code class="inl">AttendaSync Drive</code>. For <b>Location</b>, a personal Gmail account will simply show "No organization" — that's fine. Click <span class="btn-lbl">Create</span> and wait a minute for it to finish.</p>
+        </li>
+        <li>
+          <strong>Turn on the Google Drive API.</strong>
+          <p>Make sure your new project is selected in the picker at the top. Then open this link in the same browser tab:</p>
+          <p><a href="https://console.cloud.google.com/apis/library/drive.googleapis.com">console.cloud.google.com/apis/library/drive.googleapis.com</a> → click the blue <span class="btn-lbl">Enable</span> button.</p>
+        </li>
+        <li>
+          <strong>Turn on the Google Sheets API too.</strong>
+          <p>Your roster and L2 schedule are real Google Sheets, so the app needs this one as well:</p>
+          <p><a href="https://console.cloud.google.com/apis/library/sheets.googleapis.com">console.cloud.google.com/apis/library/sheets.googleapis.com</a> → click <span class="btn-lbl">Enable</span>.</p>
+        </li>
+        <li>
+          <strong>Create the service account (your robot).</strong>
+          <p>Go to <span class="path">Menu ☰</span> → <span class="path">IAM &amp; Admin</span> → <span class="path">Service Accounts</span>, then click <span class="btn-lbl">+ CREATE SERVICE ACCOUNT</span>. Give it a name like <code class="inl">attendasync-reader</code> and click <span class="btn-lbl">CREATE AND CONTINUE</span>.</p>
+        </li>
+        <li>
+          <strong>Skip the two optional steps.</strong>
+          <p>The next screen asks to "grant access to project" (a role). You do <b>not</b> need one — the robot will get access by file-sharing instead. Just click <span class="btn-lbl">CONTINUE</span>, then <span class="btn-lbl">DONE</span>. Your robot now appears in the list.</p>
+        </li>
+        <li>
+          <strong>Copy the robot's email address.</strong>
+          <p>In the Service Accounts list, copy the value in the <b>Email</b> column. It looks like <code class="inl">attendasync-reader@attendasync-drive.iam.gserviceaccount.com</code>. <b>Keep this somewhere handy</b> — you'll paste it three times in Step 2.</p>
+        </li>
+        <li>
+          <strong>Download the key file (JSON).</strong>
+          <p>Click the robot's email to open it → the <span class="path">KEYS</span> tab → <span class="btn-lbl">ADD KEY</span> → <span class="path">Create new key</span> → choose <b>JSON</b> → <span class="btn-lbl">CREATE</span>. A <code class="inl">.json</code> file downloads to your computer. You'll open it in Step 3.</p>
+        </li>
+      </ol>
+
+      <div class="call danger">
+        <span class="ic">One copy</span>
+        <div>
+          <p><b>That JSON file is downloaded only once and can never be downloaded again.</b> Treat it like a password: don't email it, don't put it in a shared folder, and never upload it to GitHub. If you ever lose it, just come back to the KEYS tab, delete the old key, and create a fresh one.</p>
+        </div>
+      </div>
+
+      <div class="call warn">
+        <span class="ic">Gotcha</span>
+        <div>
+          <p><b>If the "Create new key" button is blocked</b> with a message about a policy (<code>Key creation is not allowed on this service account</code>), your Google account is a managed Workspace/organization account. Google blocks key creation by default for organizations created on or after <b>3 May 2024</b>. A free personal Gmail account is <em>not</em> affected. If you hit this, an admin of your organization has to set the policy <code>iam.disableServiceAccountKeyCreation</code> to "Not enforced" — the easiest fix is often to do this whole step with a personal Gmail account instead.</p>
+        </div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ STEP 2 ============ -->
+  <section class="step s2" id="s2">
+    <div class="step-head">
+      <div class="step-num">2</div>
+      <div>
+        <h2>Share your 3 Drive items with the robot</h2>
+        <p class="sub">The robot starts with an empty Drive. It can only see what you explicitly share with it.</p>
+      </div>
+    </div>
+    <div class="body">
+
+      <p>You have three things in Drive that AttendaSync needs. For <b>each one</b>, you'll do two tiny jobs: <b>(A)</b> share it with the robot's email, and <b>(B)</b> grab its file ID from the address bar.</p>
+
+      <div class="files">
+        <table>
+          <thead><tr><th>Drive item</th><th>What it is</th><th>Goes into the setting</th></tr></thead>
+          <tbody>
+            <tr><td>Master Roster</td><td>Google Sheet</td><td><code>roster_id</code></td></tr>
+            <tr><td>L2 Weekly Sessions</td><td>Google Sheet</td><td><code>l2_id</code></td></tr>
+            <tr><td>Zoom Attendee Reports</td><td>a single <code>.zip</code> file</td><td><code>attendee_zip_id</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p><strong>A · Share each item</strong></p>
+      <ol class="steps">
+        <li>
+          <strong>Open the item in Google Drive</strong> and click the <span class="btn-lbl">Share</span> button (top-right). For the Sheets you can open the sheet itself; for the <code class="inl">.zip</code> file, right-click it in Drive and choose <span class="path">Share</span>.
+        </li>
+        <li>
+          <strong>Paste the robot's email</strong> into the "Add people" box (the address you saved in Step 1).
+        </li>
+        <li>
+          <strong>Set the role to <span class="path">Viewer</span></strong> in the dropdown next to it. Viewer (read-only) is all the robot needs.
+        </li>
+        <li>
+          <strong>Untick "Notify people," then click <span class="btn-lbl">Share</span>.</strong>
+          <p>The robot has no inbox, so there's no point emailing it. Repeat this for all three items.</p>
+        </li>
+      </ol>
+
+      <div class="call ok">
+        <span class="ic">Tip</span>
+        <div><p>If all three items live in one Drive <b>folder</b>, you can share the folder once and every item inside inherits the access — sharing cascades to the contents. You still need each item's individual file ID below.</p></div>
+      </div>
+
+      <p style="margin-top:34px;"><strong>B · Find each file's ID in its URL</strong></p>
+      <p>Open the item in your browser and look at the address bar. The ID is the long random string after <code class="inl">/d/</code> (for Sheets) or after <code class="inl">?id=</code> / inside the link (for the zip). Copy <em>only</em> that string — not the slashes around it.</p>
+
+      <div class="urlbox">
+        <p class="label">A Google Sheet URL</p>
+        <div class="urlstr">
+          https://docs.google.com/spreadsheets/d/<span class="id">1A2b3C4d5E6f7G8h9IjK0LmN0pQrStUvWxYz</span>/edit#gid=0
+          <span class="ann">↑ copy this highlighted part — that's your <code style="font-family:var(--mono)">roster_id</code> or <code style="font-family:var(--mono)">l2_id</code></span>
+        </div>
+      </div>
+
+      <div class="urlbox">
+        <p class="label">A Drive file (the .zip) — open it, then look at the address bar</p>
+        <div class="urlstr">
+          https://drive.google.com/file/d/<span class="id">1Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe</span>/view
+          <span class="ann">↑ this highlighted part is your <code style="font-family:var(--mono)">attendee_zip_id</code></span>
+        </div>
+      </div>
+
+      <div class="call warn">
+        <span class="ic">Gotcha</span>
+        <div><p><b>The robot sees the file by its ID, not by its name.</b> When you replace the Zoom <code>.zip</code> after each session, <b>upload a new version of the same file</b> (in Drive: right-click → "Manage versions" → upload new version) so the ID stays the same. If you instead delete it and upload a brand-new file, you'll get a <em>new</em> ID and must update <code>attendee_zip_id</code> in Step 3 — and re-share the new file with the robot.</p></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ STEP 3 ============ -->
+  <section class="step s3" id="s3">
+    <div class="step-head">
+      <div class="step-num">3</div>
+      <div>
+        <h2>Paste the key &amp; file IDs into Streamlit</h2>
+        <p class="sub">This is where the JSON key from Step 1 and the three IDs from Step 2 come together.</p>
+      </div>
+    </div>
+    <div class="body">
+
+      <p>Streamlit keeps passwords in a private box called <b>Secrets</b>, written in a simple format called <b>TOML</b>. You'll paste one block of text. Below is the exact template — fill in the highlighted parts.</p>
+
+      <div class="code">
+        <div class="code-bar"><span class="fname">Secrets</span> · paste into Streamlit <span class="tag">TOML</span></div>
+<pre><span class="c"># ── Your robot's key: copy each value from the downloaded JSON file ──</span>
+<span class="t">[gcp_service_account]</span>
+<span class="k">type</span>                        = <span class="s">"service_account"</span>
+<span class="k">project_id</span>                  = <span class="s">"attendasync-drive"</span>
+<span class="k">private_key_id</span>              = <span class="s">"abcdef0123456789abcdef0123456789abcdef01"</span>
+<span class="k">private_key</span>                 = <span class="s">"""-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQ...
+...many lines of letters and numbers from your JSON...
+-----END PRIVATE KEY-----
+"""</span>
+<span class="k">client_email</span>                = <span class="s">"attendasync-reader@attendasync-drive.iam.gserviceaccount.com"</span>
+<span class="k">client_id</span>                   = <span class="s">"123456789012345678901"</span>
+<span class="k">auth_uri</span>                    = <span class="s">"https://accounts.google.com/o/oauth2/auth"</span>
+<span class="k">token_uri</span>                   = <span class="s">"https://oauth2.googleapis.com/token"</span>
+<span class="k">auth_provider_x509_cert_url</span> = <span class="s">"https://www.googleapis.com/oauth2/v1/certs"</span>
+<span class="k">client_x509_cert_url</span>        = <span class="s">"https://www.googleapis.com/robot/v1/metadata/x509/attendasync-reader%40attendasync-drive.iam.gserviceaccount.com"</span>
+
+<span class="c"># ── Your three Drive file IDs from Step 2 ──</span>
+<span class="t">[drive]</span>
+<span class="k">roster_id</span>       = <span class="s">"1A2b3C4d5E6f7G8h9IjK0LmN0pQrStUvWxYz"</span>   <span class="c"># Master Roster Sheet</span>
+<span class="k">l2_id</span>           = <span class="s">"1B3c4D5e6F7g8H9i0JkL1MnO2pQrStUvWxYz"</span>   <span class="c"># L2 schedule Sheet</span>
+<span class="k">attendee_zip_id</span> = <span class="s">"1Zx9Yw8Vu7Ts6Rq5Po4Nm3Lk2Ji1Hg0Fe"</span>     <span class="c"># the Zoom .zip</span>
+</pre>
+      </div>
+
+      <p><strong>How to fill it in:</strong> open the downloaded <code class="inl">.json</code> file in any text editor (Notepad works). Each line in the JSON has a name and a value in quotes — copy the value across to the matching line above. The names line up one-to-one.</p>
+
+      <div class="call danger">
+        <span class="ic">#1 trap</span>
+        <div>
+          <p><b>The <code>private_key</code> line breaks almost everyone the first time.</b> Inside the JSON file it's one very long line full of <code>\n</code> symbols. You have two safe ways to paste it:</p>
+          <p><b>Easiest:</b> use the <b>triple-quote</b> style shown above (<code>"""</code> … <code>"""</code>) and paste the key as <em>real lines</em> — wherever you see <code>\n</code> in the JSON, press Enter to make a real line break instead. Start with <code>-----BEGIN PRIVATE KEY-----</code> and end with <code>-----END PRIVATE KEY-----</code>.</p>
+          <p><b>Or:</b> keep it on one line in normal double-quotes and leave every <code>\n</code> exactly as it is — one backslash, one "n" — like <code>"-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----\n"</code>.</p>
+        </div>
+      </div>
+
+      <div class="call warn">
+        <span class="ic">Gotcha</span>
+        <div><p>Do <b>not</b> double the backslashes (<code>\\n</code> is wrong) and do <b>not</b> use single quotes <code>'…'</code> for the one-line style. Either mistake makes Google reject the key with errors like <code>No key could be detected</code> or <code>Could not deserialize key data</code>. Keep exactly one <code>\n</code> in the one-line form, or use the triple-quote real-line form.</p></div>
+      </div>
+
+      <p><strong>Where to paste it:</strong></p>
+      <ol class="steps">
+        <li>
+          <strong>If you're deploying for the first time:</strong> in the Streamlit deploy dialog (next step), click <span class="path">Advanced settings</span> and paste the whole block into the <b>Secrets</b> box.
+        </li>
+        <li>
+          <strong>If the app is already deployed:</strong> go to <a href="https://share.streamlit.io">share.streamlit.io</a>, find your app, click the <span class="path">⋮</span> menu → <span class="path">Settings</span> → <span class="path">Secrets</span> tab, paste the block, and click <span class="btn-lbl">Save</span>.
+        </li>
+      </ol>
+
+      <div class="call robot">
+        <span class="ic">Robot</span>
+        <div><p>These secrets live <b>only inside Streamlit</b>, never in your GitHub repo. That's exactly right — the key is a password and must never be committed to a public repo. You're pasting it straight into Streamlit's private box on purpose.</p></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ STEP 4 ============ -->
+  <section class="step s4" id="s4">
+    <div class="step-head">
+      <div class="step-num">4</div>
+      <div>
+        <h2>Deploy, then confirm it's live</h2>
+        <p class="sub">Publish the app (or reboot it) and check that it pulls your three items from Drive.</p>
+      </div>
+    </div>
+    <div class="body">
+
+      <ol class="steps">
+        <li>
+          <strong>Open your Streamlit workspace.</strong>
+          <p>Go to <a href="https://share.streamlit.io">share.streamlit.io</a> and sign in with GitHub.</p>
+        </li>
+        <li>
+          <strong>First time only — deploy the app.</strong>
+          <p>Click <span class="btn-lbl">Create app</span> → "Yup, I have an app" → choose your repository and branch, and set the <b>Main file path</b> to <code class="inl">app.py</code>. Open <span class="path">Advanced settings</span>, paste your Secrets from Step 3, click <span class="btn-lbl">Save</span>, then <span class="btn-lbl">Deploy</span>.</p>
+        </li>
+        <li>
+          <strong>Already deployed — just reboot it.</strong>
+          <p>After saving new or changed secrets, the app picks them up on its next run. To be sure, open the app's <span class="path">⋮</span> menu in your workspace and choose <b>Reboot</b>.</p>
+        </li>
+        <li>
+          <strong>Open the app and watch it load.</strong>
+          <p>Visit your <code class="inl">your-app.streamlit.app</code> URL. Opening or refreshing the page runs the app fresh from the top — so it re-fetches your roster, schedule, and zip from Drive each time you open it. That's your "live" behaviour.</p>
+        </li>
+      </ol>
+
+      <div class="done">
+        <h3>✓ You're live when all of these are true</h3>
+        <ul>
+          <li><span class="chk">✓</span> The app opens without a red error box about credentials or files.</li>
+          <li><span class="chk">✓</span> It shows data from your <b>current</b> Drive roster and L2 schedule — not last week's upload.</li>
+          <li><span class="chk">✓</span> After you replace the Zoom <code class="inl">.zip</code> in Drive and refresh the app, the new session appears.</li>
+        </ul>
+      </div>
+
+      <div class="call ok">
+        <span class="ic">Good to know</span>
+        <div><p>If nobody opens the app for <b>12 hours</b>, Streamlit puts it to sleep to save resources. The next visitor just clicks <b>"Yes, get this app back up!"</b> and it wakes in a few seconds — no harm done, and your live Drive connection is unaffected.</p></div>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============ TROUBLESHOOTING ============ -->
+  <section class="trouble">
+    <h2>If you get stuck</h2>
+    <p style="color:var(--ink-soft); max-width:68ch;">Most first-time problems are one of these five. Find the symptom, apply the fix.</p>
+
+    <div class="tcard">
+      <p class="symptom">"No key could be detected" / "Could not deserialize key data" / a padding error</p>
+      <p class="fix">Your <b><code>private_key</code> is mis-pasted.</b> Re-do it with the triple-quote style: real line breaks, starting at <code>-----BEGIN PRIVATE KEY-----</code> and ending at <code>-----END PRIVATE KEY-----</code>. Make sure no backslashes got doubled and you didn't use single quotes.</p>
+    </div>
+
+    <div class="tcard">
+      <p class="symptom">"File not found," a 404, or an empty/blank result for one item</p>
+      <p class="fix">That item probably <b>isn't shared with the robot</b>, or the <b>ID is wrong</b>. Re-open the item, confirm the robot's email is listed as <b>Viewer</b>, and re-copy the ID from the address bar (only the string after <code>/d/</code>). A folder you forgot to share returns nothing rather than an error — so check sharing first.</p>
+    </div>
+
+    <div class="tcard">
+      <p class="symptom">A permission / 403 error mentioning the Drive or Sheets API</p>
+      <p class="fix">You likely skipped one of the <b>Enable</b> buttons in Step 1. With your project selected, re-open the <a href="https://console.cloud.google.com/apis/library/drive.googleapis.com">Drive API</a> and <a href="https://console.cloud.google.com/apis/library/sheets.googleapis.com">Sheets API</a> links and confirm both say "API enabled."</p>
+    </div>
+
+    <div class="tcard">
+      <p class="symptom">The "Create new key" button is greyed out or refuses</p>
+      <p class="fix">Your account is a managed organization (see the Step 1 gotcha). The org blocks downloadable keys by default. Ask an admin to set <code>iam.disableServiceAccountKeyCreation</code> to "Not enforced," or run Step 1 with a <b>personal Gmail account</b> instead.</p>
+    </div>
+
+    <div class="tcard">
+      <p class="symptom">You changed the secrets but the app still behaves the same</p>
+      <p class="fix">Saved secrets only take effect on the app's next run. Open the app's <span class="path">⋮</span> menu in your Streamlit workspace and choose <b>Reboot</b>, then reload the page.</p>
+    </div>
+
+    <div class="tcard">
+      <p class="symptom">The new Zoom session doesn't show up after you updated the zip</p>
+      <p class="fix">If you <b>deleted and re-uploaded</b> the zip, it has a new ID now. Either upload as a <b>new version</b> of the existing file (keeps the ID), or copy the new ID into <code>attendee_zip_id</code> in Settings → Secrets <b>and</b> re-share the new file with the robot as Viewer.</p>
+    </div>
+  </section>
+
+  <div class="sources">
+    <h3>Where these steps come from</h3>
+    <p>
+      Google Cloud — create a project &amp; enable APIs: <a href="https://developers.google.com/workspace/guides/create-project">developers.google.com/workspace/guides/create-project</a> · <a href="https://developers.google.com/workspace/guides/enable-apis">…/enable-apis</a><br>
+      Service accounts &amp; keys: <a href="https://docs.cloud.google.com/iam/docs/service-accounts-create">docs.cloud.google.com/iam/docs/service-accounts-create</a> · <a href="https://docs.cloud.google.com/iam/docs/keys-create-delete">…/keys-create-delete</a><br>
+      Org policy that blocks keys: <a href="https://docs.cloud.google.com/iam/docs/troubleshoot-org-policies">docs.cloud.google.com/iam/docs/troubleshoot-org-policies</a><br>
+      Sharing a file in Drive: <a href="https://support.google.com/docs/answer/9331169?hl=en">support.google.com/docs/answer/9331169</a><br>
+      Streamlit secrets &amp; the <code>[gcp_service_account]</code> format: <a href="https://docs.streamlit.io/develop/concepts/connections/secrets-management">docs.streamlit.io/develop/concepts/connections/secrets-management</a> · <a href="https://docs.streamlit.io/develop/tutorials/databases/bigquery">…/tutorials/databases/bigquery</a><br>
+      Community Cloud deploy &amp; app settings: <a href="https://docs.streamlit.io/deploy/streamlit-community-cloud/deploy-your-app/deploy">docs.streamlit.io/deploy/…/deploy</a> · <a href="https://docs.streamlit.io/deploy/streamlit-community-cloud/manage-your-app/app-settings">…/manage-your-app/app-settings</a>
+    </p>
+  </div>
+
+</div>
+</div>

@@ -1,0 +1,8 @@
+streamlit>=1.30
+openpyxl>=3.1
+pandas>=2.1
+altair>=5.0
+# Live Google Drive mode (needed by the deployed auto app; imported lazily,
+# so manual-upload use works without these installed locally):
+google-api-python-client>=2.0
+google-auth>=2.0
