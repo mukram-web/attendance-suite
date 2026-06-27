@@ -15,9 +15,25 @@ It has **three tabs**:
 
 | Tab | What you see |
 |---|---|
-| **📊 Dashboard** | KPIs (active learners, avg %, top/weakest batch), a **% by batch** bar chart, a **batch × session heatmap**, a **trend** line, and a per-session table you can download. |
+| **📊 Dashboard** | KPIs (enrolled, active, batches, sessions logged) → a **cross-batch comparison bar** → a **batch selector**; pick a batch to drill into metric cards, an **attendance-by-date line chart**, a **closing-types panel** (share + per-channel attendance), and a **sessions table**. Attendance = **present ÷ total batch strength**; colour bands ≥45 / 30–45 / <30. |
 | **📋 Roster (marked attendance)** | The marked sheet, student-by-student, with **Present/Absent** colour-coded per session — like the spreadsheet. Contacts are masked by default; full marked `.xlsx` is downloadable. |
 | **🪵 Marking log** | What got marked this run (new vs re-marked columns) and any warnings. |
+
+### The Dashboard tab (new, data-driven)
+The Dashboard reads the live roster **Google Sheet directly via gspread** (with
+`FORMATTED_VALUE`, so `COUNTIF` formula cells resolve to `Present`/`Absent`), and
+labels sessions from the **L2 schedule** sheet by date. It's fully **dynamic** —
+batches, sessions, and closing-type values are all discovered at read time, so a
+new `AI CAP B29` tab or a new session column shows up after a **Refresh** with no
+code change. Topics with no L2 match are flagged ("no L2 match") to surface
+schedule gaps. The logic lives in a pure, unit-tested layer:
+
+| Module | Role |
+|---|---|
+| `data.py` | pure transforms → per-batch metrics (no Streamlit; unit-tested) |
+| `sheets.py` | gspread (live) + xlsx (dev fallback) source adapters + L2 topic lookup |
+| `dash_view.py` | the Plotly drill-down UI |
+| `tests/test_data.py` | `python -m unittest tests.test_data` — 14 tests, incl. dynamic-growth |
 
 ### Two ways it gets data
 
@@ -48,9 +64,11 @@ refund / unidentified / blank. Toggle **Active only ↔ All enrolled** in the si
 | File | Role |
 |---|---|
 | **`attendance_app.py`** | ⭐ the unified app (dashboard + roster + auto-marking + live/upload) |
+| `data.py` · `sheets.py` · `dash_view.py` | the new Dashboard: pure metrics · gspread/xlsx source · Plotly UI |
+| `tests/test_data.py` | unit tests for `data.py` (`python -m unittest tests.test_data`) |
 | `attendance_core.py` | marking engine — `process()` (zip) and `process_files()` (any source) |
-| `dashboard_core.py` | dashboard compute + the per-student `roster_grid()` |
-| `live_data.py` | reads roster / L2 / attendee zip from Google Drive (live mode) |
+| `dashboard_core.py` | per-student `roster_grid()` for the Roster tab |
+| `live_data.py` | reads roster / L2 / attendee zip from Google Drive (marker live mode) |
 | `app.py`, `dashboard.py` | the original standalone marker / dashboard (still work) |
 | `.streamlit/secrets.toml.example` | template for the Google credentials (live mode) |
 | `SETUP_LIVE.md`, `GO_LIVE_GUIDE.html` | how to turn on live Google mode |
