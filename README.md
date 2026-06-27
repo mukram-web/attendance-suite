@@ -20,9 +20,11 @@ It has **three tabs**:
 | **🪵 Marking log** | What got marked this run (new vs re-marked columns) and any warnings. |
 
 ### The Dashboard tab (new, data-driven)
-The Dashboard reads the live roster **Google Sheet directly via gspread** (with
-`FORMATTED_VALUE`, so `COUNTIF` formula cells resolve to `Present`/`Absent`), and
-labels sessions from the **L2 schedule** sheet by date. It's fully **dynamic** —
+The Dashboard shows the **same updated roster the app fetches** from your links —
+the one you can download — so *download = dashboard*. Each session is labelled with
+its real topic via a **Webinar-ID join** to the **L2 schedule** (attendee filename
+⋈ L2 on Webinar ID — the same key the marker uses; resolves ~100% of sessions),
+falling back to L2-by-date then the roster header. It's fully **dynamic** —
 batches, sessions, and closing-type values are all discovered at read time, so a
 new `AI CAP B29` tab or a new session column shows up after a **Refresh** with no
 code change. Topics with no L2 match are flagged ("no L2 match") to surface

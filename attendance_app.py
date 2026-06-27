@@ -47,34 +47,29 @@ def _compute(roster_bytes):
     return dc.compute(roster_bytes)
 
 
-@st.cache_data(show_spinner="Loading attendance from Google Sheets…")
-def _dash_live(nonce, l2_bytes):
-    """New dashboard data, read live via gspread (FORMATTED_VALUE resolves
-    formula cells). Session topics come primarily from the reliable Webinar-ID
-    join (ALL attendee filenames ⋈ L2), falling back to L2-by-date. Cached,
-    refresh-only."""
-    roster, l2_date = dsheets.load_sheets()
-    names = live_data.list_attendee_names()                       # all filenames, one query
-    topics = dsheets.webinar_topic_lookup([(n, None) for n in names], l2_bytes)
-    return ddata.build(roster, {**l2_date, **topics})   # Webinar-ID topics win on overlap
+@st.cache_data(show_spinner=False)
+def _attendee_names(nonce):
+    """All attendee filenames (one fast Drive query) — only used to label sessions
+    with their real topic name via the Webinar-ID join."""
+    try:
+        return tuple(live_data.list_attendee_names())
+    except Exception:
+        return ()
 
 
-@st.cache_data(show_spinner="Building attendance dashboard…")
-def _dash_from_bytes(roster_bytes, l2_bytes):
-    """Fallback when not live: build the new dashboard from the in-memory roster
-    (and optional L2) the rest of the app already loaded — no extra read."""
+@st.cache_data(show_spinner="Building dashboard from the updated roster…")
+def _build_dashboard(roster_bytes, attendee_names, l2_bytes):
+    """The dashboard reads the SAME updated roster the app produced (the one you
+    can download) — no second fetch. Session names come from the Webinar-ID join
+    (attendee filenames ⋈ L2)."""
     import io as _io
     from openpyxl import load_workbook
-
-    def _tabs(b):
-        wb = load_workbook(_io.BytesIO(b), read_only=True, data_only=True)
-        out = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
-               for ws in wb.worksheets}
-        wb.close()
-        return out
-
-    l2_lookup = dsheets.build_l2_lookup(_tabs(l2_bytes)) if l2_bytes else {}
-    return ddata.build(_tabs(roster_bytes), l2_lookup)
+    wb = load_workbook(_io.BytesIO(roster_bytes), read_only=True, data_only=True)
+    tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
+            for ws in wb.worksheets}
+    wb.close()
+    topics = dsheets.webinar_topic_lookup([(n, None) for n in attendee_names], l2_bytes)
+    return ddata.build(tabs, topics)
 
 
 @st.cache_data(show_spinner=False)
@@ -251,14 +246,15 @@ tab_dash, tab_roster, tab_log = st.tabs(
 
 # ============================ TAB 1 — DASHBOARD ==============================
 with tab_dash:
-    # New AI CAP dashboard: present % of total strength, per-batch drill-down,
-    # closing-type panel, L2 topics. Live via gspread; else from the loaded roster.
+    # The dashboard shows the SAME updated roster the app produced (the downloadable
+    # one) — no second fetch. Session names come from the Webinar-ID topic join.
     if live_ready and not live_failed:
-        DATA, summary = _dash_live(st.session_state.nonce, l2_bytes)
-        note = f"🟢 Live from Google Sheets · refreshed {datetime.now():%d %b %Y, %H:%M}"
+        names = _attendee_names(st.session_state.nonce)
+        note = f"🟢 Live — showing the updated roster · refreshed {datetime.now():%d %b %Y, %H:%M}"
     else:
-        DATA, summary = _dash_from_bytes(marked_bytes, l2_bytes)
-        note = "📤 Built from the uploaded roster"
+        names = tuple(n for n, _ in (attendee_files or ()))
+        note = "📤 Showing the uploaded roster"
+    DATA, summary = _build_dashboard(marked_bytes, names, l2_bytes)
     dash_view.render(DATA, summary, note)
 
 # ============================ TAB 2 — ROSTER =================================
