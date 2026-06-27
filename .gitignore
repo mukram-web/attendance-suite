@@ -1,0 +1,22 @@
+# ── Data: never commit student PII ─────────────────────────────
+sample_data/
+*.xlsx
+*.xls
+*.csv
+*.zip
+
+# ── Secrets / keys: never commit ───────────────────────────────
+.streamlit/secrets.toml
+*.json
+service_account*.json
+credentials*.json
+
+# ── Python ─────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# ── Misc ───────────────────────────────────────────────────────
+.DS_Store
