@@ -240,8 +240,9 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-tab_dash, tab_roster, tab_log = st.tabs(
-    ["📊 Dashboard", "📋 Roster (marked attendance)", "🪵 Marking log"]
+tab_dash, tab_roster, tab_log, tab_explorer = st.tabs(
+    ["📊 Dashboard", "📋 Roster (marked attendance)", "🪵 Marking log",
+     "📈 Attendance Explorer Dashboard"]
 )
 
 # ============================ TAB 1 — DASHBOARD ==============================
@@ -327,3 +328,10 @@ with tab_log:
                     st.text("• " + w)
         elif report:
             st.success("No warnings — every attendee file mapped cleanly to a batch.")
+
+# ==================== TAB 4 — ATTENDANCE EXPLORER DASHBOARD ===================
+with tab_explorer:
+    import streamlit.components.v1 as components
+    from pathlib import Path
+    _explorer = Path(__file__).parent / "attendance_explorer.html"
+    components.html(_explorer.read_text(encoding="utf-8"), height=1600, scrolling=True)
