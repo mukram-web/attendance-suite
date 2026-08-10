@@ -10,6 +10,11 @@ sample_data/
 *.json
 service_account*.json
 credentials*.json
+# exception: aggregate-only data the app embeds (no PII, no secrets)
+!intro_attendance.json
+
+# ── Local speed cache (attendee bytes + marked-roster pickles) ─
+.cache/
 
 # ── Python ─────────────────────────────────────────────────────
 __pycache__/

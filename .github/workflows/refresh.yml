@@ -1,0 +1,62 @@
+# Weekly dashboard rebuild — runs on GitHub's servers, never on Streamlit.
+#
+# Every Monday 06:00 IST (00:30 UTC) it fetches the roster + new Zoom attendee
+# reports, marks attendance, builds attendance.duckdb, and uploads it (plus the
+# marked .xlsx) to the private Drive folder the app reads from.
+#
+# Required repository secrets (Settings → Secrets and variables → Actions):
+#   GDRIVE_SERVICE_ACCOUNT_JSON  the service-account key JSON (whole file)
+#   ROSTER_ID                    Master Batch Rosters sheet id
+#   L2_ID                        L2 schedule sheet id
+#   ATTENDEE_FOLDER_ID           Weekly Sessions shared-drive id
+#   STORE_FOLDER_ID              private Drive folder the store is uploaded to
+#                                (shared with the service account as Editor)
+#
+# "Run workflow" in the Actions tab triggers it manually any time.
+
+name: Refresh dashboard data
+
+on:
+  schedule:
+    # Monday 06:00 IST (00:30 UTC). GitHub disables scheduled workflows after
+    # ~60 days with no repository activity — if the "Data as of" date in the app
+    # stops advancing, re-enable it in the Actions tab (any commit or a manual
+    # "Run workflow" also resets that clock).
+    - cron: "30 0 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: refresh-dashboard
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # NOTE: deliberately NO actions/cache here. The pipeline's .cache/ holds the
+      # full roster export, the raw Zoom attendee CSVs and the DuckDB grids — all
+      # student PII. THIS REPOSITORY IS PUBLIC, and Actions caches are restorable
+      # by any workflow run in the repo (including fork PRs), so caching that
+      # directory would publish 46k students' emails and phone numbers. A cold
+      # download every Monday costs a couple of minutes of free runner time; that
+      # is the right trade. Do not add a cache step for .cache/.
+
+      - name: Run pipeline
+        env:
+          GDRIVE_SERVICE_ACCOUNT_JSON: ${{ secrets.GDRIVE_SERVICE_ACCOUNT_JSON }}
+          ROSTER_ID: ${{ secrets.ROSTER_ID }}
+          L2_ID: ${{ secrets.L2_ID }}
+          ATTENDEE_FOLDER_ID: ${{ secrets.ATTENDEE_FOLDER_ID }}
+          STORE_FOLDER_ID: ${{ secrets.STORE_FOLDER_ID }}
+        run: python pipeline.py

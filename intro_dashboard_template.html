@@ -60,6 +60,7 @@
     font-family:var(--mono);font-variant-numeric:tabular-nums;color:var(--ink)}
   tbody td:first-child{font-family:var(--body);font-weight:500;white-space:nowrap}
   tbody tr:hover{background:var(--surface2)}
+  tbody td.dim{color:var(--ink3)}
   tfoot td{padding:12px 14px;font-family:var(--mono);font-weight:700;text-align:right;border-top:2px solid var(--line)}
   tfoot td:first-child{text-align:left;font-family:var(--body)}
   .tbl-scroll{overflow-x:auto}
@@ -98,7 +99,7 @@
     </div>
     <div class="top-meta">
       <div><b id="m-batches">–</b> roster batches · <b id="m-people">–</b> enrolled</div>
-      <div style="margin-top:2px">roster snapshot 27 Jun 2026 · intro sheet 09 Jul 2026</div>
+      <div style="margin-top:2px" id="m-note">–</div>
     </div>
   </div>
 </header>
@@ -107,8 +108,8 @@
 
   <section>
     <div class="sec-head">
-      <h2>At a glance — B17 → B28</h2>
-      <div class="sec-note">Strength from the Master Roster; intro attendance from the L2 customer sheet (unique students).</div>
+      <h2 id="glance-title">At a glance</h2>
+      <div class="sec-note">Strength live from the Master Roster; intro attendance from the L2 customer sheet (unique students).</div>
     </div>
     <div class="kpis" id="kpis"></div>
   </section>
@@ -127,37 +128,43 @@
   <footer>
     <h3>How to read this</h3>
     <div class="defs">
-      <div><b>Strength</b> — enrolled students in the Master Roster tab for that batch (registered-mail rows).</div>
+      <div><b>Strength</b> — enrolled students in the live Master Roster tab for that batch (registered-mail rows). New batches appear here automatically.</div>
       <div><b>Attended intro</b> — unique students in the L2 customer sheet marked Attended (any variant); duplicates merged by email/phone.</div>
-      <div><b>⚠ gap</b> — the intro sheet has fewer records than roster strength (B21, B27), so their real % is likely higher than shown.</div>
+      <div><b>⚠ gap</b> — the intro sheet has fewer records than roster strength, so the real % is likely higher than shown.</div>
     </div>
-    <div class="prov">Sources: Master Batch Rosters (app snapshot, 27 Jun 2026) ⋈ “L2 customer” Sheet1 (73,375 rows → 67,243 unique students, 09 Jul 2026). Aggregates only — no personal data in this file.</div>
+    <div class="prov" id="prov">Strength updates live with the roster. Intro counts are precomputed from the “L2 customer” sheet — aggregates only, no personal data.</div>
   </footer>
 </div>
 
 <script>
-const DATA = {"roster":{"B17":{"strength":1883,"active":1863},"B18":{"strength":2016,"active":2006},"B19":{"strength":2227,"active":2202},"B20":{"strength":2038,"active":2019},"B21":{"strength":2519,"active":2510},"B22":{"strength":2107,"active":2098},"B23":{"strength":2325,"active":2305},"B24":{"strength":2186,"active":2155},"B25":{"strength":2467,"active":2393},"B26":{"strength":2564,"active":2519},"B27":{"strength":3793,"active":3671},"B28":{"strength":2625,"active":2225}},"attended":{"B17":1425,"B18":1509,"B19":1454,"B20":1541,"B21":1232,"B22":1470,"B23":1491,"B24":1674,"B25":1763,"B26":1951,"B27":2028,"B28":1777}};
+const DATA = __DATA__;
 
 const fmt = n => n==null ? "–" : n.toLocaleString("en-IN");
-const MAIN_BATCHES = Array.from({length:12},(_,i)=>"B"+(17+i));
-const gapNote = {"B21":1,"B27":1};
+const numOf = c => parseInt(c.replace(/\D/g, "") || "0", 10);
+const codes = Object.keys(DATA.roster).sort((a,b)=>numOf(a)-numOf(b));
+const withIntro = codes.filter(c=>DATA.attended[c]!=null);
+const gapNote = DATA.gaps || {};
+const first = codes[0], last = codes[codes.length-1];
 
-/* KPIs */
+document.getElementById("glance-title").textContent = `At a glance — ${first} → ${last}`;
+document.getElementById("m-note").textContent = DATA.meta && DATA.meta.note ? DATA.meta.note : "";
+
+/* KPIs (batches that have intro data) */
 (function(){
   let s=0,a=0,best=null;
-  MAIN_BATCHES.forEach(b=>{
+  withIntro.forEach(b=>{
     const st=DATA.roster[b].strength, at=DATA.attended[b];
     s+=st; a+=at;
     const p=100*at/st;
     if(!best||p>best.p) best={b,p};
   });
-  document.getElementById("m-batches").textContent=MAIN_BATCHES.length;
-  document.getElementById("m-people").textContent=fmt(s);
+  document.getElementById("m-batches").textContent=codes.length;
+  document.getElementById("m-people").textContent=fmt(codes.reduce((t,b)=>t+DATA.roster[b].strength,0));
   const cards=[
-    {lab:"Batch strength (roster)", big:fmt(s), foot:"enrolled across B17–B28"},
+    {lab:"Batch strength (roster)", big:fmt(s), foot:`enrolled across ${withIntro[0]}–${withIntro[withIntro.length-1]}`},
     {lab:"Attended intro call", big:fmt(a), foot:"unique students, L2 sheet"},
-    {lab:"Overall attendance", big:(100*a/s).toFixed(1)+"%", foot:"attended ÷ strength"},
-    {lab:"Best batch", big:best.b+" · "+best.p.toFixed(1)+"%", foot:"highest intro show-up"},
+    {lab:"Overall attendance", big:s?(100*a/s).toFixed(1)+"%":"–", foot:"attended ÷ strength"},
+    {lab:"Best batch", big:best?best.b+" · "+best.p.toFixed(1)+"%":"–", foot:"highest intro show-up"},
   ];
   const host=document.getElementById("kpis");
   cards.forEach(c=>{
@@ -168,24 +175,28 @@ const gapNote = {"B21":1,"B27":1};
   });
 })();
 
-/* main table */
+/* main table — every roster batch; ones without intro data show a dash */
 (function(){
   const t=document.getElementById("main-tbl");
   let h=`<thead><tr><th>Batch</th><th>Roster strength</th><th>Attended intro</th><th>%</th><th style="text-align:left;padding-left:16px">Share</th></tr></thead><tbody>`;
   let ts=0,ta=0;
-  MAIN_BATCHES.forEach(b=>{
+  codes.forEach(b=>{
     const st=DATA.roster[b].strength, at=DATA.attended[b];
-    const p=100*at/st; ts+=st; ta+=at;
+    if(at!=null){ ts+=st; ta+=at; }
+    const p=at!=null?100*at/st:null;
     h+=`<tr><td>${b}${gapNote[b]?' <span class="warnflag">⚠ gap</span>':""}</td>
-      <td>${fmt(st)}</td><td>${fmt(at)}</td><td><b>${p.toFixed(1)}%</b></td>
-      <td style="text-align:left;padding-left:16px"><span class="pctbar"><i style="width:${p.toFixed(1)}%"></i></span></td></tr>`;
+      <td>${fmt(st)}</td>
+      <td${at==null?' class="dim"':''}>${at==null?"no intro data yet":fmt(at)}</td>
+      <td>${p==null?"–":"<b>"+p.toFixed(1)+"%</b>"}</td>
+      <td style="text-align:left;padding-left:16px">${p==null?"":`<span class="pctbar"><i style="width:${Math.min(100,p).toFixed(1)}%"></i></span>`}</td></tr>`;
   });
   h+=`</tbody><tfoot><tr><td>TOTAL</td><td>${fmt(ts)}</td><td>${fmt(ta)}</td>
-      <td>${(100*ta/ts).toFixed(1)}%</td><td></td></tr></tfoot>`;
+      <td>${ts?(100*ta/ts).toFixed(1)+"%":"–"}</td><td></td></tr></tfoot>`;
   t.innerHTML=h;
-  document.getElementById("main-note").innerHTML=
-    `<b>⚠ B21 & B27:</b> the intro sheet holds fewer records than these batches' strength `+
-    `(B21: 1,761 vs 2,519 · B27: 2,509 vs 3,793) — their real attendance is likely higher than shown.`;
+  const gaps=Object.keys(gapNote).filter(b=>codes.includes(b));
+  document.getElementById("main-note").innerHTML = gaps.length
+    ? `<b>⚠ ${gaps.join(" & ")}:</b> the intro sheet holds fewer records than these batches' strength — their real attendance is likely higher than shown.`
+    : "";
 })();
 </script>
 </body>
