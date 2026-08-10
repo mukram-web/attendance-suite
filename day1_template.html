@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI CAP — day-1 attendance, payment &amp; close type</title>
+<style>
+  /* Categorical slots: blue · yellow · magenta · green. This exact 4-set is the
+     one that passes the colour-blind ALL-PAIRS gate in BOTH light and dark
+     (blue+orange+aqua+anything fails once four bars share a group). Every bar is
+     directly labelled and every card has a table view, which is the required
+     relief for the sub-3:1 slots on the light surface. */
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb;
+    --page: #f9f9f7;
+    --text-primary: #0b0b0b;
+    --text-secondary: #52514e;
+    --muted: #898781;
+    --grid: #e1e0d9;
+    --baseline: #c3c2b7;
+    --border: rgba(11,11,11,0.10);
+    --s0: #2a78d6;
+    --s1: #eda100;
+    --s2: #e87ba4;
+    --s3: #008300;
+    --track: #ebeae5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --page: #0d0d0d;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+      --s0: #3987e5; --s1: #c98500; --s2: #d55181; --s3: #008300;
+      --track: #2c2c2a;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19; --page: #0d0d0d;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+    --s0: #3987e5; --s1: #c98500; --s2: #d55181; --s3: #008300;
+    --track: #2c2c2a;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 26px 20px 72px;
+    background: var(--page); color: var(--text-primary);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1140px; margin: 0 auto; }
+  header h1 { font-size: 23px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
+  header p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
+  header a { color: inherit; }
+
+  .bar-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 20px 0 16px; }
+  .bar-row .lbl { font-size: 11.5px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .bar-row .sep { width: 1px; height: 22px; background: var(--grid); margin: 0 6px; }
+  .chip {
+    border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+    border-radius: 999px; padding: 6px 13px; font: inherit; font-size: 13px; cursor: pointer; min-height: 32px;
+  }
+  .chip[aria-pressed="true"] { color: var(--text-primary); border-color: var(--baseline); font-weight: 600; }
+  .chip:hover { background: color-mix(in srgb, var(--surface-1) 88%, var(--text-primary)); }
+  .chip .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 7px; vertical-align: 1px; }
+
+  .session-note {
+    background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+    padding: 11px 14px; font-size: 12.5px; color: var(--text-secondary); margin-bottom: 14px;
+  }
+  .session-note b { color: var(--text-primary); font-weight: 600; }
+  .session-note .row { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+  .session-note .row + .row { margin-top: 4px; }
+  .session-note .key { display: inline-flex; align-items: center; gap: 7px; min-width: 54px; }
+  .session-note .key i { width: 9px; height: 9px; border-radius: 50%; }
+
+  .section { font-size: 11.5px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted);
+             margin: 28px 0 -4px; padding-top: 4px; }
+  .section span { color: var(--text-secondary); text-transform: none; letter-spacing: 0; font-size: 12.5px; margin-left: 10px; }
+
+  .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(184px, 1fr)); gap: 12px; }
+  .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 13px 15px 14px; }
+  .tile .k { font-size: 12px; color: var(--text-secondary); display: flex; align-items: center; gap: 7px; }
+  .tile .k .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .tile .v { font-size: 27px; font-weight: 640; letter-spacing: -0.02em; margin-top: 5px; line-height: 1.1; }
+  .tile .s { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 19px 22px 20px; margin-top: 16px; }
+  .card h2 { font-size: 15.5px; font-weight: 640; margin: 0 0 3px; }
+  .card .sub { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 16px; }
+  .legend { display: flex; gap: 15px; margin: 0 0 14px; flex-wrap: wrap; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--text-secondary); }
+  .legend i { width: 12px; height: 12px; border-radius: 3px; }
+
+  .rows { display: flex; flex-direction: column; gap: 15px; }
+  .row { display: grid; grid-template-columns: 168px 1fr; gap: 14px; align-items: center; }
+  .row .cat { font-size: 12.5px; color: var(--text-secondary); text-align: right; overflow-wrap: anywhere; }
+  .plot { position: relative; }
+  .grid { position: absolute; inset: 0; pointer-events: none; }
+  .grid i { position: absolute; top: -3px; bottom: -3px; width: 1px; background: var(--grid); }
+  .grid i.zero { background: var(--baseline); }
+  .bars { position: relative; display: flex; flex-direction: column; gap: 6px; }
+  .bar-line { position: relative; height: 22px; }
+  .bar-line:focus-visible { outline: 2px solid var(--baseline); outline-offset: 2px; border-radius: 4px; }
+  .fill { position: absolute; left: 0; top: 4px; height: 14px; border-radius: 0 4px 4px 0; min-width: 2px; }
+  .bar-line .val { position: absolute; top: 2px; font-size: 12px; line-height: 18px; color: var(--text-primary); font-weight: 600; white-space: nowrap; }
+  .bar-line .val .n { font-weight: 400; color: var(--muted); margin-left: 6px; }
+  /* Labels sitting inside a coloured fill pick ink by the fill's luminance. */
+  .bar-line .val.inside.on-light { color: #0b0b0b; }
+  .bar-line .val.inside.on-light .n { color: rgba(11,11,11,0.62); }
+  .bar-line .val.inside.on-dark { color: #ffffff; }
+  .bar-line .val.inside.on-dark .n { color: rgba(255,255,255,0.78); }
+  .axis-wrap { display: grid; grid-template-columns: 168px 1fr; gap: 14px; margin-top: 11px; }
+  .axis { position: relative; height: 16px; }
+  .axis span { position: absolute; top: 0; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; transform: translateX(-50%); }
+  .axis span:first-child { transform: none; }
+  .axis span:last-child { transform: translateX(-100%); }
+
+  details { margin-top: 18px; border-top: 1px solid var(--grid); padding-top: 11px; }
+  summary { font-size: 12.5px; color: var(--text-secondary); cursor: pointer; }
+  .tbl { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; margin-top: 11px; font-size: 12.5px; }
+  th, td { text-align: right; padding: 6px 10px; border-bottom: 1px solid var(--grid); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; font-variant-numeric: normal; }
+  thead th { color: var(--muted); font-weight: 600; }
+
+  .notes { margin-top: 26px; font-size: 13px; color: var(--text-secondary); }
+  .notes h2 { font-size: 14px; color: var(--text-primary); margin: 0 0 8px; }
+  .notes li { margin-bottom: 6px; }
+  code { background: var(--track); padding: 1px 5px; border-radius: 4px; font-size: 12px; }
+
+  #tip {
+    position: fixed; z-index: 30; pointer-events: none; opacity: 0; transition: opacity .1s;
+    background: var(--surface-1); color: var(--text-primary); border: 1px solid var(--baseline);
+    border-radius: 8px; padding: 8px 10px; font-size: 12.5px; box-shadow: 0 6px 18px rgba(0,0,0,.14); max-width: 300px;
+  }
+  #tip b { font-weight: 640; }
+  #tip .r { color: var(--text-secondary); }
+  #err { display: none; background: var(--surface-1); border: 1px solid var(--baseline); border-radius: 10px; padding: 16px; margin-top: 20px; }
+  @media (max-width: 640px) {
+    .row, .axis-wrap { grid-template-columns: 104px 1fr; gap: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>AI CAP — day-1 attendance, payment and close type</h1>
+    <p id="src">Loading…</p>
+  </header>
+
+  <div class="bar-row" role="group" aria-label="Filters">
+    <span class="lbl">Session</span>
+    <button class="chip" data-session="day1" aria-pressed="true">Day one</button>
+    <button class="chip" data-session="latest" aria-pressed="false">Latest session</button>
+  </div>
+  <div class="bar-row" role="group" aria-label="Units">
+    <span class="lbl">Roster mix as</span>
+    <button class="chip" data-unit="pct" aria-pressed="true">% of roster</button>
+    <button class="chip" data-unit="n" aria-pressed="false">Headcount</button>
+    <span class="sep"></span>
+    <span class="lbl">Attendee mix vs</span>
+    <button class="chip" data-den="matched" aria-pressed="true">Matched</button>
+    <button class="chip" data-den="all" aria-pressed="false">All attendees</button>
+  </div>
+
+  <div id="err"></div>
+  <div class="session-note" id="session-note"></div>
+  <div class="tiles" id="tiles"></div>
+
+  <p class="section">Who showed up <span>enrolled learners → present at this session</span></p>
+  <div class="card">
+    <h2 id="h-att">Present vs absent</h2>
+    <p class="sub" id="sub-att"></p>
+    <div class="legend" id="lg-att"></div>
+    <div id="c-att"></div>
+    <details><summary>Table view</summary><div class="tbl" id="t-att"></div></details>
+  </div>
+
+  <p class="section">The roster <span>all enrolled learners, by column I and column J</span></p>
+  <div class="card">
+    <h2>Payment status — column I</h2>
+    <p class="sub">Every learner on the roster tab, split by what they have paid. Independent of which session is selected.</p>
+    <div class="legend" id="lg-pay"></div>
+    <div id="c-pay"></div>
+    <details><summary>Table view</summary><div class="tbl" id="t-pay"></div></details>
+  </div>
+  <div class="card">
+    <h2>Close type — column J</h2>
+    <p class="sub">“BDA closed” = BDA Closing + BDA Collection. Buckets beyond those three differ per batch.</p>
+    <div class="legend" id="lg-close"></div>
+    <div id="c-close"></div>
+    <details><summary>Table view</summary><div class="tbl" id="t-close"></div></details>
+  </div>
+
+  <p class="section">Who attended <span>the people who actually turned up, by column I and column J</span></p>
+  <div class="card">
+    <h2>Attendees by payment status — column I</h2>
+    <p class="sub" id="sub-apay"></p>
+    <div class="legend" id="lg-apay"></div>
+    <div id="c-apay"></div>
+    <details><summary>Table view</summary><div class="tbl" id="t-apay"></div></details>
+  </div>
+  <div class="card">
+    <h2>Attendees by close type — column J</h2>
+    <p class="sub" id="sub-aclose"></p>
+    <div class="legend" id="lg-aclose"></div>
+    <div id="c-aclose"></div>
+    <details><summary>Table view</summary><div class="tbl" id="t-aclose"></div></details>
+  </div>
+
+  <p class="section">Show-up rate <span>within each bucket, the share that attended</span></p>
+  <div class="card">
+    <h2>Show-up rate by payment status</h2>
+    <p class="sub">Of the learners in each payment bucket, the share present at the selected session.</p>
+    <div class="legend" id="lg-payr"></div>
+    <div id="c-payr"></div>
+    <details><summary>Table view</summary><div class="tbl" id="t-payr"></div></details>
+  </div>
+  <div class="card">
+    <h2>Show-up rate by close type</h2>
+    <p class="sub">Of the learners closed each way, the share present at the selected session.</p>
+    <div class="legend" id="lg-closer"></div>
+    <div id="c-closer"></div>
+    <details><summary>Table view</summary><div class="tbl" id="t-closer"></div></details>
+  </div>
+
+  <div class="notes">
+    <h2>Method &amp; caveats</h2>
+    <ul id="notes-list"></ul>
+  </div>
+</div>
+<div id="tip" role="status"></div>
+
+<script>
+/* Data is inlined by attendance_app.py, which substitutes the placeholder in the
+   `D = ...` assignment below with the day1 blob from the DuckDB store. (The
+   placeholder token must appear EXACTLY once in this file — a second occurrence
+   would inject the JSON twice.) */
+const SLOTS = ["var(--s0)", "var(--s1)", "var(--s2)", "var(--s3)"];
+/* ink for a label drawn INSIDE the fill, per slot (yellow & magenta are light) */
+const SLOT_INK = ["on-dark", "on-light", "on-light", "on-dark"];
+const PAY_ORDER = ["Full Paid", "Booking Amount", "Partially Paid", "Unidentified / Refunded"];
+const CLOSE_ORDER = ["BDA Closing", "BDA Collection", "System", "Batch change", "Unidentified"];
+const UNMATCHED = "Not on this roster";
+
+let D = null, order = [], active = [], unit = "pct", den = "matched", session = "day1";
+
+const fmt = n => (n === null || n === undefined) ? "—" : n.toLocaleString("en-US");
+const pctS = p => (p === null || p === undefined) ? "—" : p.toFixed(1) + "%";
+const B = code => D.batches.find(x => x.batch === code);
+/* Colour follows the BATCH, not its position, so the rolling window never
+   repaints a batch that is still on screen. */
+const slotOf = code => (B(code).batch_no % SLOTS.length + SLOTS.length) % SLOTS.length;
+const colorOf = code => SLOTS[slotOf(code)];
+const sess = code => (B(code).sessions || {})[session] || null;
+const find = (rows, k) => (rows || []).find(x => x.k === k) || null;
+
+/* categories present in the data, canonical order first, then anything new */
+function cats(getRows) {
+  const seen = new Set();
+  active.forEach(c => (getRows(c) || []).forEach(r => seen.add(r.k)));
+  return seen;
+}
+function ordered(seen, canon) {
+  const out = canon.filter(k => seen.has(k));
+  [...seen].sort().forEach(k => { if (!out.includes(k) && k !== UNMATCHED) out.push(k); });
+  return out;
+}
+
+/* ---------- tooltip ---------- */
+const tip = document.getElementById("tip");
+function bindTip(el, html) {
+  const show = () => { tip.innerHTML = html; tip.style.opacity = 1; };
+  el.addEventListener("mouseenter", show);
+  el.addEventListener("mousemove", e => {
+    const r = tip.getBoundingClientRect();
+    let x = e.clientX + 14, y = e.clientY - r.height - 12;
+    if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 14;
+    if (y < 8) y = e.clientY + 20;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  });
+  el.addEventListener("mouseleave", () => tip.style.opacity = 0);
+  el.tabIndex = 0;
+  el.addEventListener("focus", () => {
+    const b = el.getBoundingClientRect();
+    show();
+    const r = tip.getBoundingClientRect();
+    tip.style.left = Math.min(b.left, innerWidth - r.width - 8) + "px";
+    tip.style.top = Math.max(8, b.top - r.height - 8) + "px";
+  });
+  el.addEventListener("blur", () => tip.style.opacity = 0);
+}
+
+/* ---------- chart ---------- */
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const mag = Math.pow(10, Math.floor(Math.log10(v)));
+  for (const m of [1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10]) if (v <= m * mag) return m * mag;
+  return 10 * mag;
+}
+const ticks = (max, isPct) => isPct ? [0, 25, 50, 75, 100]
+  : [0, max / 4, max / 2, (3 * max) / 4, max];
+
+function barChart(hostId, categories, get, isPct) {
+  const host = document.getElementById(hostId);
+  host.innerHTML = "";
+  const vals = [];
+  categories.forEach(c => active.forEach(b => { const d = get(b, c); if (d) vals.push(d.v); }));
+  const max = isPct ? 100 : niceMax(Math.max(1, ...vals));
+  const gridHTML = ticks(max, isPct)
+    .map(t => `<i class="${t === 0 ? "zero" : ""}" style="left:${(t / max) * 100}%"></i>`).join("");
+
+  const rows = document.createElement("div");
+  rows.className = "rows";
+  categories.forEach(cat => {
+    const items = active.map(b => ({ b, d: get(b, cat) })).filter(x => x.d);
+    if (!items.length) return;
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = `<div class="cat">${cat}</div>
+      <div class="plot"><div class="grid">${gridHTML}</div><div class="bars"></div></div>`;
+    const bars = row.querySelector(".bars");
+    items.forEach(({ b, d }) => {
+      const w = Math.max(0, (d.v / max) * 100);
+      const inside = w >= 32;
+      const line = document.createElement("div");
+      line.className = "bar-line";
+      line.setAttribute("role", "img");
+      line.setAttribute("aria-label", `${b} ${cat}: ${d.label} ${d.note || ""}`);
+      line.innerHTML = `<div class="fill" style="width:${w}%;background:${colorOf(b)}"></div>
+        <span class="val${inside ? " inside " + SLOT_INK[slotOf(b)] : ""}" style="${inside
+          ? `left:calc(${w}% - 9px);transform:translateX(-100%)`
+          : `left:calc(${w}% + 10px)`}">${d.label}<span class="n">${d.note || ""}</span></span>`;
+      bindTip(line, d.tip);
+      bars.appendChild(line);
+    });
+    rows.appendChild(row);
+  });
+  host.appendChild(rows);
+
+  const ax = document.createElement("div");
+  ax.className = "axis-wrap";
+  ax.innerHTML = `<div></div><div class="axis">${ticks(max, isPct).map(t =>
+    `<span style="left:${(t / max) * 100}%">${isPct ? t + "%" : fmt(Math.round(t))}</span>`).join("")}</div>`;
+  host.appendChild(ax);
+}
+
+const legend = id => document.getElementById(id).innerHTML =
+  active.map(b => `<span><i style="background:${colorOf(b)}"></i>${b}</span>`).join("");
+
+function table(hostId, categories, cols, cellFn) {
+  document.getElementById(hostId).innerHTML =
+    `<table><thead><tr><th>Category</th>${active.flatMap(b => cols.map(c =>
+      `<th>${b} · ${c}</th>`)).join("")}</tr></thead><tbody>${
+      categories.map(cat => `<tr><td>${cat}</td>${active.flatMap(b => cellFn(b, cat))
+        .map(v => `<td>${v}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+
+/* ---------- render ---------- */
+function renderSessionNote() {
+  const host = document.getElementById("session-note");
+  const rows = active.map(code => {
+    const s = sess(code);
+    if (!s) return `<div class="row"><span class="key"><i style="background:${colorOf(code)}"></i>${code}</span>
+      <span>no ${session === "day1" ? "day-one" : "later"} session yet</span></div>`;
+    return `<div class="row"><span class="key"><i style="background:${colorOf(code)}"></i>${code}</span>
+      <span><b>${s.date}</b> — ${s.title}</span></div>`;
+  }).join("");
+  host.innerHTML = `<div style="margin-bottom:6px">Showing <b>${
+    session === "day1" ? "each batch’s first class" : "each batch’s most recent class"}</b></div>${rows}`;
+}
+
+function renderTiles() {
+  const host = document.getElementById("tiles");
+  host.innerHTML = "";
+  active.forEach(code => {
+    const d = B(code), h = d.headline, s = sess(code);
+    const tiles = [
+      { k: "Enrolled", v: fmt(d.roster), s: "rows on the " + code + " roster tab" },
+      { k: s ? `Present ${s.date}` : "Present", v: s ? pctS(s.pct) : "—",
+        s: s ? `${fmt(s.present)} of ${fmt(d.roster)}` : "no session" },
+      { k: "Attendees", v: s ? fmt(s.unique_attendees) : "—",
+        s: s ? `${fmt(s.matched)} matched · ${fmt(s.unmatched)} not on roster` : "" },
+      { k: "Full Paid", v: pctS(h.full_paid_pct), s: fmt(h.full_paid) + " learners" },
+      { k: "BDA closed", v: pctS(h.bda_total_pct),
+        s: `${fmt(h.bda_total)} = ${fmt(h.bda_closing)} closing + ${fmt(h.bda_collection)} collection` },
+    ];
+    tiles.forEach(t => {
+      const el = document.createElement("div");
+      el.className = "tile";
+      el.innerHTML = `<div class="k"><span class="dot" style="background:${colorOf(code)}"></span>${code} · ${t.k}</div>
+        <div class="v">${t.v}</div><div class="s">${t.s}</div>`;
+      host.appendChild(el);
+    });
+  });
+}
+
+function render() {
+  const isPct = unit === "pct";
+  const byAll = den === "all";
+  const label = session === "day1" ? "day one" : "the latest session";
+
+  renderSessionNote();
+  renderTiles();
+  ["lg-att", "lg-pay", "lg-close", "lg-apay", "lg-aclose", "lg-payr", "lg-closer"].forEach(legend);
+
+  document.getElementById("h-att").textContent =
+    session === "day1" ? "Day one — present vs absent" : "Latest session — present vs absent";
+  document.getElementById("sub-att").textContent =
+    "Enrolled learners who joined, matched on email or phone.";
+  const denText = active.map(c => {
+    const s = sess(c);
+    return s ? `${c} ${fmt(byAll ? s.unique_attendees : s.matched)}` : null;
+  }).filter(Boolean).join(" · ");
+  const denLabel = byAll ? "all unique attendees" : "attendees matched to the roster";
+  document.getElementById("sub-apay").textContent =
+    `Share of ${label} attendees in each payment bucket. Denominator: ${denLabel} — ${denText}.`;
+  document.getElementById("sub-aclose").textContent =
+    `Share of ${label} attendees by how they were closed. Denominator: ${denLabel} — ${denText}.`;
+
+  /* 1 — present / absent */
+  barChart("c-att", ["Present", "Absent"], (code, cat) => {
+    const d = B(code), s = sess(code);
+    if (!s) return null;
+    const n = cat === "Present" ? s.present : s.absent;
+    const p = +(100 * n / d.roster).toFixed(1);
+    return {
+      v: isPct ? p : n,
+      label: isPct ? pctS(p) : fmt(n),
+      note: isPct ? `(${fmt(n)})` : `(${pctS(p)})`,
+      tip: `<b>${code} — ${cat} on ${s.date}</b><br>${fmt(n)} learners · ${pctS(p)} of ${fmt(d.roster)} enrolled<br>
+            <span class="r">${s.title}. The report held ${fmt(s.unique_attendees)} unique attendees;
+            ${fmt(s.unmatched)} of them are on no roster row.</span>`,
+    };
+  }, isPct);
+
+  /* 2 & 3 — roster mix (session-independent) */
+  const mix = (hostId, key, canon) => {
+    const list = ordered(cats(c => B(c)[key]), canon);
+    barChart(hostId, list, (code, cat) => {
+      const d = B(code), r = find(d[key], cat);
+      if (!r) return null;
+      const sr = sess(code) ? find(sess(code)[key], cat) : null;
+      return {
+        v: isPct ? r.pct : r.n,
+        label: isPct ? pctS(r.pct) : fmt(r.n),
+        note: isPct ? `(${fmt(r.n)})` : `(${pctS(r.pct)})`,
+        tip: `<b>${code} — ${cat}</b><br>${fmt(r.n)} learners · ${pctS(r.pct)} of ${fmt(d.roster)} enrolled`
+          + (sr ? `<br><span class="r">${fmt(sr.present)} of them were present at ${label} (${pctS(sr.rate)}).</span>` : ""),
+      };
+    }, isPct);
+    return list;
+  };
+  const payCats = mix("c-pay", "payment", PAY_ORDER);
+  const closeCats = mix("c-close", "close", CLOSE_ORDER);
+
+  /* 4 & 5 — attendee-side mix */
+  const attMix = (hostId, key, canon) => {
+    const seen = cats(c => (sess(c) || {})[key]);
+    const list = ordered(seen, canon).concat(byAll && seen.has(UNMATCHED) ? [UNMATCHED] : []);
+    barChart(hostId, list, (code, cat) => {
+      const s = sess(code);
+      if (!s) return null;
+      const r = find(s[key], cat);
+      if (!r) return null;
+      const v = byAll ? r.pct_all : r.pct_matched;
+      if (v === null || v === undefined) return null;
+      return {
+        v, label: pctS(v), note: `(${fmt(r.n)})`,
+        tip: `<b>${code} — ${cat}</b><br>${fmt(r.n)} of ${fmt(byAll ? s.unique_attendees : s.matched)} attendees on ${s.date}<br>
+              <span class="r">${pctS(r.pct_matched)} of matched (${fmt(s.matched)}) ·
+              ${pctS(r.pct_all)} of all unique attendees (${fmt(s.unique_attendees)})</span>`,
+      };
+    }, true);
+    return list;
+  };
+  const aPayCats = attMix("c-apay", "attendee_payment", PAY_ORDER);
+  const aCloseCats = attMix("c-aclose", "attendee_close", CLOSE_ORDER);
+
+  /* 6 & 7 — show-up rate per bucket */
+  const rate = (hostId, key, canon) => {
+    const list = ordered(cats(c => (sess(c) || {})[key]), canon);
+    barChart(hostId, list, (code, cat) => {
+      const s = sess(code);
+      if (!s) return null;
+      const r = find(s[key], cat);
+      if (!r || r.rate === null || r.rate === undefined) return null;
+      return {
+        v: r.rate, label: pctS(r.rate), note: `(${fmt(r.present)}/${fmt(r.n)})`,
+        tip: `<b>${code} — ${cat}</b><br>${fmt(r.present)} of ${fmt(r.n)} present on ${s.date}<br>
+              <span class="r">show-up rate ${pctS(r.rate)}</span>`,
+      };
+    }, true);
+    return list;
+  };
+  const payRCats = rate("c-payr", "payment", PAY_ORDER);
+  const closeRCats = rate("c-closer", "close", CLOSE_ORDER);
+
+  /* ---------- tables ---------- */
+  table("t-att", ["Present", "Absent", "Enrolled", "Unique attendees", "Matched to roster",
+                  "Attendees on no roster row", "No recorded time / internal"],
+        ["n", "% of roster"], (code, cat) => {
+    const d = B(code), s = sess(code);
+    if (!s) return ["—", "—"];
+    const m = {
+      "Present": [s.present, s.pct],
+      "Absent": [s.absent, +(100 - s.pct).toFixed(1)],
+      "Enrolled": [d.roster, 100],
+      "Unique attendees": [s.unique_attendees, null],
+      "Matched to roster": [s.matched, null],
+      "Attendees on no roster row": [s.unmatched, null],
+      "No recorded time / internal": [s.excluded ?? null, null],
+    }[cat];
+    return [fmt(m[0]), pctS(m[1])];
+  });
+
+  const mixTable = (id, key, list) => table(id, list, ["n", "% of roster", "present", "show-up %"],
+    (code, cat) => {
+      const r = find(B(code)[key], cat);
+      const sr = sess(code) ? find(sess(code)[key], cat) : null;
+      return r ? [fmt(r.n), pctS(r.pct), fmt(sr && sr.present), pctS(sr && sr.rate)]
+               : ["—", "—", "—", "—"];
+    });
+  mixTable("t-pay", "payment", payCats);
+  mixTable("t-close", "close", closeCats);
+
+  const attTable = (id, key, list) => table(id, list.includes(UNMATCHED) ? list : list.concat([UNMATCHED]),
+    ["count", "% of matched", "% of all attendees"], (code, cat) => {
+      const s = sess(code);
+      const r = s ? find(s[key], cat) : null;
+      return r ? [fmt(r.n), pctS(r.pct_matched), pctS(r.pct_all)] : ["—", "—", "—"];
+    });
+  attTable("t-apay", "attendee_payment", aPayCats);
+  attTable("t-aclose", "attendee_close", aCloseCats);
+
+  const rateTable = (id, key, list) => table(id, list, ["present", "in bucket", "show-up %"],
+    (code, cat) => {
+      const s = sess(code);
+      const r = s ? find(s[key], cat) : null;
+      return r ? [fmt(r.present), fmt(r.n), pctS(r.rate)] : ["—", "—", "—"];
+    });
+  rateTable("t-payr", "payment", payRCats);
+  rateTable("t-closer", "close", closeRCats);
+}
+
+function renderNotes() {
+  const lines = [
+    `<b>Day one</b> is auto-detected: the earliest session that the <b>L2 schedule</b> registers as a
+     real class for that batch. Marketing walkthroughs share the batch folder naming but are not in
+     L2, so they are skipped — without this, B34's day-1 attendance would read 26% instead of 60%.
+     If a walkthrough-titled session ever IS registered in L2, it is used and flagged in the notes
+     rather than silently dropped.`,
+    `<b>Matching</b> is email <i>or</i> phone: roster cols C/F (registered + broadcast mail) and cols
+     B/E (registered + whatsapp number) against the report's Email and Phone fields, phones cut to
+     the last 10 digits. Email alone finds far fewer people.`,
+    `A learner counts as present with any recorded in-session time; internal accounts
+     (@houseofedtech.in, @be10x.com, Fireflies) are excluded, and rejoins are merged per person.`,
+    `“Present” counts <b>roster rows</b>; the attendee charts count <b>attendees</b>. The two differ
+     slightly because a few people share a phone or email and land on the same roster row.`,
+    `Attendees who match no roster row at all are excluded from “% of matched” and appear as
+     “${UNMATCHED}” under the all-attendees denominator — so the show-up % is a floor, not the
+     true rate.`,
+    `Column J is not normalised in the sheet (“Bda closing” vs “BDA Closing”) — case is normalised
+     here, and the buckets beyond BDA Closing / BDA Collection / System differ per batch.`,
+    `The batch window rolls automatically as new batches start — nobody adds them by hand.
+     Rebuilt every Monday 06:00 IST.`,
+  ];
+  if ((D.skipped || []).length) {
+    lines.push(`<b>Skipped this run:</b> ${D.skipped.map(s => `<code>${s}</code>`).join(", ")}`);
+  }
+  if ((D.errors || []).length) {
+    lines.push(`<b>⚠ Problems this run:</b> ${D.errors.map(s => `<code>${s}</code>`).join(", ")}`);
+  }
+  document.getElementById("notes-list").innerHTML = lines.map(t => `<li>${t}</li>`).join("");
+}
+
+/* The page is embedded in a fixed-height Streamlit iframe, and its real height
+   changes with the filters (a new close-type bucket adds rows). Report the true
+   height so the frame follows it instead of growing an inner scrollbar; the
+   fixed height passed from Python stays as the fallback if the host ignores it. */
+function syncHeight() {
+  const h = Math.ceil(document.body.scrollHeight) + 16;
+  try {
+    window.parent.postMessage(
+      { isStreamlitMessage: true, type: "streamlit:setFrameHeight", height: h }, "*");
+  } catch (e) { /* not embedded — nothing to do */ }
+}
+
+/* ---------- filters ----------
+   Which batches are shown is decided OUTSIDE this page (a Streamlit control), so
+   the host can size the frame to the exact content; everything here only changes
+   what the same set of rows displays. */
+function wire(attr, set) {
+  document.querySelectorAll(`[data-${attr}]`).forEach(btn =>
+    btn.addEventListener("click", () => {
+      document.querySelectorAll(`[data-${attr}]`).forEach(b => b.setAttribute("aria-pressed", b === btn));
+      set(btn.dataset[attr]);
+      render();
+      syncHeight();
+    }));
+}
+
+try {
+  D = __DATA__;
+  if (!D || !D.batches || !D.batches.length) throw new Error("no batches in the data");
+  order = D.batches.map(b => b.batch);
+  active = order.slice();
+  document.getElementById("src").innerHTML =
+    `Columns I (Payment) and J (Close Type) of <a href="${D.sheet_url || "#"}" target="_blank" rel="noopener">Master Batch Rosters</a>,
+     against the Zoom attendee report of each batch's session. Data as of ${D.generated || "—"}.`;
+  wire("unit", v => { unit = v; });
+  wire("den", v => { den = v; });
+  wire("session", v => { session = v; });
+  renderNotes();
+  render();
+  syncHeight();
+  if (window.ResizeObserver) new ResizeObserver(syncHeight).observe(document.body);
+} catch (e) {
+  const el = document.getElementById("err");
+  el.style.display = "block";
+  el.innerHTML = `<b>Could not render the day-1 analysis</b> (${e.message}).<br>
+    It is rebuilt by <code>pipeline.py</code>; check the last Actions run.`;
+  document.getElementById("src").textContent = "No data loaded.";
+}
+</script>
+</body>
+</html>

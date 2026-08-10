@@ -40,9 +40,15 @@ def batch_key(name: str) -> int:
 
 
 def _find_header_row(ws):
-    """Return (row_number, lowercased_values) for the row that holds field names."""
+    """Return (row_number, lowercased_values) for the row that holds field names.
+
+    An EMPTY sheet yields no rows at all — people add scratch/pivot tabs to the
+    roster (e.g. "Pivot Table 2"), and an unguarded next() raises StopIteration
+    that kills the whole build. Missing rows just mean "not a roster sheet"."""
     for r in range(1, 4):
-        row = next(ws.iter_rows(min_row=r, max_row=r, max_col=20))
+        row = next(ws.iter_rows(min_row=r, max_row=r, max_col=20), None)
+        if row is None:
+            break
         vals = [str(c.value).strip().lower() if c.value is not None else "" for c in row]
         if "registered number" in vals or "payment" in vals:
             return r, vals

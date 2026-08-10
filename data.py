@@ -137,7 +137,12 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None) -> dict | 
     date_row = rows[hr - 1] if hr >= 1 else rows[hr]   # dates sit in the row above the header
     mail_col = _find_col(header, "registered", "mail")
     pay_col = _find_col(header, "payment")
-    close_col = _find_col(header, "closing")
+    # "clos" not "closing" — newer sheets head the column 'Close Type'. If it's
+    # missing entirely, fall back to the column right after Payment (same rule
+    # dashboard_core uses), so a renamed header never drops a whole batch.
+    close_col = _find_col(header, "clos")
+    if close_col is None and pay_col is not None:
+        close_col = pay_col + 1
     if mail_col is None or close_col is None:
         return None
 

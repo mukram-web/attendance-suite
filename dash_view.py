@@ -69,7 +69,8 @@ def _comparison_bar(DATA: dict):
 
 
 def _date_line(d: dict):
-    sess = d["sessions"]
+    # intro-call rows carry no percentage — the % line shows class sessions only
+    sess = [s for s in d["sessions"] if not s.get("is_intro")]
     ymax = max(60, int((d["peak"] + 6) // 5 * 5 + 5))
     cust = [[s["topic"], s["present"], s["total"],
              "(no absent logged)" if s["present_only"] else ""] for s in sess]
@@ -132,9 +133,10 @@ def render(DATA: dict, summary: dict, source_note: str = "") -> None:
         f'<span class="dh-sub">· {d["n_sessions"]} sessions logged · '
         f'strength {d["strength"]:,}</span></div>', unsafe_allow_html=True)
 
-    # ── metric cards ──
-    peak_s = max(d["sessions"], key=lambda s: s["pct"])
-    low_s = min(d["sessions"], key=lambda s: s["pct"])
+    # ── metric cards ── (intro-call rows excluded: they measure a different thing)
+    real_sess = [s for s in d["sessions"] if not s.get("is_intro")] or d["sessions"]
+    peak_s = max(real_sess, key=lambda s: s["pct"])
+    low_s = min(real_sess, key=lambda s: s["pct"])
     c = st.columns(4)
     c[0].metric("Total strength", f"{d['strength']:,}", "all enrolled", delta_color="off")
     c[1].metric("Active", f"{d['active']:,}", "excl. refund / unidentified", delta_color="off")
@@ -161,7 +163,7 @@ def render(DATA: dict, summary: dict, source_note: str = "") -> None:
 
     # ── sessions table ──
     n_missing = sum(1 for s in d["sessions"] if s["no_l2"])
-    sub = f' <span class="dh-sub">· {d["n_sessions"]} rows'
+    sub = f' <span class="dh-sub">· {len(d["sessions"])} rows'
     if n_missing:
         sub += f' · {n_missing} without an L2 topic match</span>'
     else:
@@ -169,6 +171,15 @@ def render(DATA: dict, summary: dict, source_note: str = "") -> None:
     st.markdown(f'<div class="panel-title">All sessions{sub}</div>', unsafe_allow_html=True)
     trs = []
     for s in d["sessions"]:
+        if s.get("is_intro"):   # intro call: attendees + how many then joined the batch
+            joined = (' <span style="font-size:11px;color:#8a5108;background:#fbeedd;'
+                      'padding:1px 7px;border-radius:6px;margin-left:6px;white-space:nowrap">'
+                      f'{s["total"]:,} joined this batch</span>')
+            trs.append(
+                f'<tr><td>{s["date_lbl"]}</td><td>{s["topic"]}{joined}</td>'
+                f'<td class="num">{s["present"]:,}</td><td class="num">—</td>'
+                f'<td class="num">—</td></tr>')
+            continue
         absent = "—" if s["present_only"] else f'{s["absent"]:,}'
         flag = '<span class="flag">no absent logged</span>' if s["present_only"] else ""
         miss = '<span class="flag">no L2 match</span>' if s["no_l2"] else ""

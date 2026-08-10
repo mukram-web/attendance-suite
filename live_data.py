@@ -30,10 +30,16 @@ imported lazily so upload-only use never has to install them locally.
 """
 from __future__ import annotations
 import io
+import os
 import re
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+# Attendee files on the Drive never change once uploaded, so their bytes are
+# cached on disk by file id — restarts skip re-downloading hundreds of CSVs.
+_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "attendee")
+_SHEET_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "sheets")
 
 # Never let a single Drive request hang the whole app forever (the #1 cause of an
 # app "stuck loading"). Any socket with no progress for this long raises instead.
@@ -58,14 +64,31 @@ def config_present() -> bool:
         return False
 
 
+# Optional credential override so this module also runs OUTSIDE Streamlit
+# (pipeline.py on GitHub Actions). When unset, credentials come from st.secrets.
+_CREDS_INFO: dict | None = None
+_CREDS_SCOPES: list | None = None
+
+
+def set_service_account(info: dict, scopes: list | None = None) -> None:
+    """Use an explicit service-account JSON dict (and optionally wider scopes,
+    e.g. drive read-write for the pipeline's uploads) instead of st.secrets."""
+    global _CREDS_INFO, _CREDS_SCOPES
+    _CREDS_INFO = dict(info)
+    _CREDS_SCOPES = list(scopes) if scopes else None
+
+
 def _drive_service():
-    """Build a read-only Drive v3 client from the service-account secret."""
-    import streamlit as st
+    """Build a Drive v3 client — from the override if set, else st.secrets."""
     from google.oauth2.service_account import Credentials
     from googleapiclient.discovery import build
 
-    info = dict(st.secrets["gcp_service_account"])
-    creds = Credentials.from_service_account_info(info, scopes=_SCOPES)
+    if _CREDS_INFO is not None:
+        info, scopes = dict(_CREDS_INFO), (_CREDS_SCOPES or _SCOPES)
+    else:
+        import streamlit as st
+        info, scopes = dict(st.secrets["gcp_service_account"]), _SCOPES
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
@@ -106,6 +129,59 @@ def fetch_file_bytes(svc, file_id: str) -> bytes:
     return _download(svc.files().get_media(fileId=file_id, supportsAllDrives=True))
 
 
+def fetch_sheet_cached(svc, file_id: str) -> tuple[bytes, str]:
+    """Like fetch_spreadsheet_xlsx, but disk-cached by the file's modifiedTime.
+
+    Google's Sheet→xlsx export is NON-deterministic — exporting the same
+    unchanged sheet twice returns different bytes — so downstream caches must
+    key on the returned `stamp` (the Drive modifiedTime), never on the bytes.
+    While the stamp is unchanged we also skip the export download entirely.
+    Returns (xlsx_bytes, stamp)."""
+    meta = svc.files().get(fileId=file_id, fields="modifiedTime, mimeType",
+                           supportsAllDrives=True).execute()
+    stamp = meta.get("modifiedTime", "")
+    cpath = os.path.join(_SHEET_CACHE,
+                         f"{file_id}_{re.sub(r'[^0-9A-Za-z]', '', stamp)}.xlsx")
+    try:
+        with open(cpath, "rb") as fh:
+            return fh.read(), stamp
+    except OSError:
+        pass
+    if meta.get("mimeType") == _SHEET_MIME:
+        req = svc.files().export_media(fileId=file_id, mimeType=_XLSX_MIME)
+    else:
+        req = svc.files().get_media(fileId=file_id, supportsAllDrives=True)
+    try:
+        data = _download(req)
+    except Exception as e:
+        # Drive refuses to export a Google Sheet whose xlsx form exceeds 10 MB.
+        # The roster is already ~8 MB and grows with every batch, so name the
+        # cause instead of leaving a bare 403 in the logs.
+        if "exportSizeLimitExceeded" in str(e) or "too large" in str(e).lower():
+            raise RuntimeError(
+                f"Google refused to export sheet {file_id} as .xlsx — it has grown "
+                "past Drive's 10 MB export limit. The roster must be split (e.g. "
+                "archive old batches into a separate sheet) before the pipeline "
+                "can read it again."
+            ) from e
+        raise
+    try:
+        os.makedirs(_SHEET_CACHE, exist_ok=True)
+        for old in os.listdir(_SHEET_CACHE):        # evict stale stamps of this file
+            if old.startswith(file_id + "_"):
+                try:
+                    os.remove(os.path.join(_SHEET_CACHE, old))
+                except OSError:
+                    pass
+        tmp = cpath + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, cpath)
+    except OSError:
+        pass
+    return data, stamp
+
+
 # Per-thread Drive client — googleapiclient's http transport is not safe to share
 # across threads, so each worker builds its own (cheap; discovery is bundled).
 _thread_local = threading.local()
@@ -125,7 +201,10 @@ def _list_children(svc, folder_id: str) -> list[dict]:
     while True:
         resp = svc.files().list(
             q=f"'{folder_id}' in parents and trashed=false",
-            fields="nextPageToken, files(id, name, mimeType)",
+            # `size` matters: duplicate session folders exist on this drive and
+            # callers break the tie on it. Drive only returns requested fields,
+            # so leaving it out silently makes every file look 0 bytes.
+            fields="nextPageToken, files(id, name, mimeType, size)",
             pageSize=1000, pageToken=page_token,
             supportsAllDrives=True, includeItemsFromAllDrives=True,
         ).execute()
@@ -144,8 +223,10 @@ def list_attendee_names(folder_id: str | None = None) -> list:
     and date, which is all the dashboard's topic join needs. Falls back to a
     recursive name-only walk for a plain (non-Shared-Drive) folder.
     """
-    import streamlit as st
-    fid = folder_id or st.secrets["drive"].get("attendee_folder_id")
+    fid = folder_id
+    if fid is None:
+        import streamlit as st
+        fid = st.secrets["drive"].get("attendee_folder_id")
     if not fid:
         return []
     svc = _drive_service()
@@ -172,6 +253,68 @@ def list_attendee_names(folder_id: str | None = None) -> list:
                     names.append(c["name"])
         walk(fid)
     return names
+
+
+def find_in_folder(svc, folder_id: str, name: str) -> dict | None:
+    """First non-trashed file with this exact name inside the folder (Shared-Drive
+    aware). Returns its metadata dict or None."""
+    safe = name.replace("\\", "\\\\").replace("'", "\\'")
+    resp = svc.files().list(
+        q=f"'{folder_id}' in parents and name = '{safe}' and trashed = false",
+        fields="files(id, name, mimeType, modifiedTime, size)", pageSize=10,
+        supportsAllDrives=True, includeItemsFromAllDrives=True,
+    ).execute()
+    files = resp.get("files", [])
+    return files[0] if files else None
+
+
+def upload_to_folder(svc, folder_id: str, name: str, data: bytes,
+                     mime: str = "application/octet-stream") -> str:
+    """Create-or-replace `name` inside the folder with these bytes; returns the
+    file id. Needs the service account to have Editor access on the folder and
+    a read-write Drive scope (see set_service_account)."""
+    from googleapiclient.http import MediaIoBaseUpload
+    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=True)
+    existing = find_in_folder(svc, folder_id, name)
+    if existing:
+        return svc.files().update(fileId=existing["id"], media_body=media,
+                                  supportsAllDrives=True).execute().get("id", existing["id"])
+    meta = {"name": name, "parents": [folder_id]}
+    return svc.files().create(body=meta, media_body=media, fields="id",
+                              supportsAllDrives=True).execute()["id"]
+
+
+def download_cached(svc, file_id: str) -> bytes:
+    """Download a Drive file, reusing the per-file-id byte cache. Attendee CSVs
+    never change once uploaded, so a second reader (e.g. the day-1 analysis)
+    costs nothing after the marker has already pulled them."""
+    cpath = os.path.join(_CACHE_DIR, file_id)
+    try:
+        with open(cpath, "rb") as fh:
+            return fh.read()
+    except OSError:
+        pass
+    data = _download(svc.files().get_media(fileId=file_id, supportsAllDrives=True))
+    try:
+        os.makedirs(_CACHE_DIR, exist_ok=True)
+        tmp = cpath + ".tmp"
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, cpath)
+    except OSError:
+        pass
+    return data
+
+
+def fetch_store(store_folder_id: str, name: str = "attendance.duckdb"):
+    """Download the prebuilt dashboard store from the Drive folder the pipeline
+    writes to. Returns (bytes, modifiedTime) or (None, None) if absent."""
+    svc = _drive_service()
+    meta = find_in_folder(svc, store_folder_id, name)
+    if not meta:
+        return None, None
+    data = _download(svc.files().get_media(fileId=meta["id"], supportsAllDrives=True))
+    return data, meta.get("modifiedTime", "")
 
 
 def _existing_sessions(roster_bytes: bytes) -> dict:
@@ -229,8 +372,11 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     sheet_keys = set(existing)
 
     def keep(name: str) -> bool:
+        """Attendee reports only. A .zip qualifies solely when its name says it
+        holds attendee data — otherwise a session-recording zip dropped into a
+        folder would be downloaded whole (potentially gigabytes) for nothing."""
         n = name.lower()
-        return n.startswith("attendee") or n.endswith(".zip")
+        return n.startswith("attendee") or (n.endswith(".zip") and "attendee" in n)
 
     # 1) pick the top-level folders that need marking
     to_fetch, skipped_nosheet, skipped_done = [], 0, 0
@@ -248,43 +394,93 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
         else:
             skipped_done += 1
 
-    # 2) collect the attendee files inside those folders
+    # 2) collect the attendee files inside those folders — in parallel: one API
+    #    call per folder, and at 200+ unmarked folders doing them sequentially
+    #    dominates cold-start time
     entries = []  # (path, file_id, is_zip)
-    for name, fid in to_fetch:
-        for f in _list_children(svc, fid):
-            if f["mimeType"] != _FOLDER_MIME and keep(f["name"]):
-                entries.append((f"{name}/{f['name']}", f["id"],
-                                f["name"].lower().endswith(".zip")))
+    listing_errors = []
+    if to_fetch:
+        def _kids(item):
+            name, fid = item
+            try:
+                return name, _list_children(_thread_drive(), fid), None
+            except Exception as e:
+                return name, [], str(e)
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(to_fetch))) as ex:
+            for name, kids, kerr in ex.map(_kids, to_fetch):
+                if kerr:
+                    # A folder we couldn't list is a session we'd silently drop —
+                    # surface it so the caller can refuse to publish partial data.
+                    listing_errors.append(f"{name}: {kerr}")
+                    continue
+                for f in kids:
+                    if f["mimeType"] != _FOLDER_MIME and keep(f["name"]):
+                        entries.append((f"{name}/{f['name']}", f["id"],
+                                        f["name"].lower().endswith(".zip")))
 
     # 3) download (parallel, but resilient — one slow/failed file can't hang or
-    #    sink the whole batch; the 60s socket timeout caps any single request)
+    #    sink the whole batch; the 60s socket timeout caps any single request).
+    #    Bytes are disk-cached by file id, so only never-seen files hit the network.
     out: list[tuple[str, bytes]] = []
     failed = 0
+    bad_zips: list[str] = []
     if entries:
+        try:
+            os.makedirs(_CACHE_DIR, exist_ok=True)
+        except OSError:
+            pass
+
         def _dl(e):
             path, fid, is_zip = e
+            cpath = os.path.join(_CACHE_DIR, fid)
+            try:
+                with open(cpath, "rb") as fh:
+                    return path, fid, is_zip, fh.read()
+            except OSError:
+                pass
             try:
                 data = _download(_thread_drive().files().get_media(
                     fileId=fid, supportsAllDrives=True))
-                return path, is_zip, data
+                try:
+                    tmp = cpath + ".tmp"
+                    with open(tmp, "wb") as fh:
+                        fh.write(data)
+                    os.replace(tmp, cpath)
+                except OSError:
+                    pass
+                return path, fid, is_zip, data
             except Exception:
-                return path, is_zip, None
+                return path, fid, is_zip, None
         with ThreadPoolExecutor(max_workers=min(max_workers, len(entries))) as ex:
-            for path, is_zip, data in ex.map(_dl, entries):
+            for path, fid, is_zip, data in ex.map(_dl, entries):
                 if data is None:
                     failed += 1
                     continue
                 if is_zip:
+                    # A corrupt / password-protected / non-attendee .zip must not
+                    # sink the whole run — and its bytes must not stay cached, or
+                    # every later run would fail identically without a network call.
                     prefix = (path.rsplit("/", 1)[0] + "/") if "/" in path else ""
-                    with zipfile.ZipFile(_io.BytesIO(data)) as z:
-                        for inner in z.namelist():
-                            if not inner.endswith("/"):
-                                out.append((f"{prefix}{inner}", z.read(inner)))
+                    try:
+                        with zipfile.ZipFile(_io.BytesIO(data)) as z:
+                            expanded = [(f"{prefix}{inner}", z.read(inner))
+                                        for inner in z.namelist()
+                                        if not inner.endswith("/")]
+                    except Exception as e:
+                        failed += 1
+                        bad_zips.append(f"{path}: {e}")
+                        try:
+                            os.remove(os.path.join(_CACHE_DIR, fid))
+                        except OSError:
+                            pass
+                        continue
+                    out.extend(expanded)
                 else:
                     out.append((path, data))
 
     info = dict(new_folders=len(to_fetch), files=len(out), failed=failed,
-                skipped_already_marked=skipped_done, skipped_no_sheet=skipped_nosheet)
+                skipped_already_marked=skipped_done, skipped_no_sheet=skipped_nosheet,
+                listing_errors=listing_errors, bad_zips=bad_zips)
     return out, info
 
 
@@ -305,11 +501,11 @@ def load_live():
     drive = st.secrets["drive"]
     svc = _drive_service()
 
-    roster_bytes = fetch_spreadsheet_xlsx(svc, drive["roster_id"])
+    roster_bytes, roster_stamp = fetch_sheet_cached(svc, drive["roster_id"])
 
-    l2_bytes = None
+    l2_bytes, l2_stamp = None, ""
     if drive.get("l2_id"):
-        l2_bytes = fetch_spreadsheet_xlsx(svc, drive["l2_id"])
+        l2_bytes, l2_stamp = fetch_sheet_cached(svc, drive["l2_id"])
 
     attendee_files = None
     info = {}
@@ -335,4 +531,8 @@ def load_live():
         "attendee_files": attendee_files,
         "info": info,
         "source": "Google Drive — " + ", ".join(source_bits),
+        # modifiedTime stamps: the stable identity for downstream caches
+        # (export bytes vary run-to-run even when the sheet is unchanged)
+        "roster_stamp": roster_stamp,
+        "l2_stamp": l2_stamp,
     }

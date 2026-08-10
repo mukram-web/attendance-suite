@@ -10,3 +10,5 @@ google-auth>=2.0
 # via FORMATTED_VALUE) + Plotly charts:
 gspread>=6.0
 plotly>=5.18
+# Prebuilt dashboard store (written by pipeline.py, read by the app):
+duckdb>=1.0
