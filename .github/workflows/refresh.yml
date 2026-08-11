@@ -24,6 +24,11 @@ on:
     # "Run workflow" also resets that clock).
     - cron: "30 0 * * 1"
   workflow_dispatch:
+    inputs:
+      skip_upload:
+        description: "Dry run — build everything but don't upload (use before the Drive folder exists)"
+        type: boolean
+        default: false
 
 concurrency:
   group: refresh-dashboard
@@ -68,7 +73,13 @@ jobs:
           # Off by default: the site carries NO student contact details until the
           # /roster login gate has been verified on a real deploy (SETUP_PIPELINE.md).
           PUBLISH_ROSTER: ${{ secrets.PUBLISH_ROSTER }}
-        run: python pipeline.py
+        run: |
+          if [ "${{ inputs.skip_upload }}" = "true" ]; then
+            echo "::notice::Dry run — building without uploading."
+            python pipeline.py --no-upload --no-site
+          else
+            python pipeline.py
+          fi
 
       # Publish site/ to Vercel. Skipped automatically until VERCEL_TOKEN exists,
       # so the data pipeline works before the website is set up.
