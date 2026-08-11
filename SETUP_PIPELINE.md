@@ -10,14 +10,24 @@ fetch → mark → build store           attendance.duckdb          downloads it
 
 Three one-time steps make it live:
 
-## 1. Create the private Drive folder
+## 1. Create the folder — it MUST be on a Shared Drive
 
-1. In Google Drive, create a folder, e.g. **"Attendance dashboard data"** (any
-   private location is fine).
-2. Share it with the robot account as **Editor**:
+> **This is the step that trips people up.** A normal folder in someone's *My
+> Drive* does **not** work, whatever role you grant. When the service account
+> uploads, it becomes the file's owner, and service accounts have **zero storage
+> quota** — the upload fails with `storageQuotaExceeded`. On a **Shared Drive**
+> the *drive* owns the files, so it works. (Verified 2026-08-11: a My Drive
+> folder shared as Editor failed; the SA also cannot create a Shared Drive
+> itself, nor write to one where it is only a Viewer.)
+
+1. In Google Drive: left sidebar → **Shared drives** → **+ New** →
+   name it e.g. **Attendance Dashboard**. (Or reuse an existing shared drive.)
+2. Open it → **Manage members** → add
    `attendance-robot@fresh-delight-500710-g6.iam.gserviceaccount.com`
-3. Open the folder and copy its ID from the address bar —
+   as **Content Manager** (Viewer/Commenter cannot upload).
+3. Copy the ID from the address bar —
    `https://drive.google.com/drive/folders/`**`<THIS PART>`**
+   (the shared drive's own ID works; a subfolder inside it works too).
 
 ## 2. Add the GitHub secrets
 
