@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Be10X — AI CAP Attendance</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+<script src="assets/plotly.min.js"></script>
+<style>
+  /* ── Streamlit-look chrome: same fonts, colors and spacing as the app ── */
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: #ffffff; color: #31333F;
+    font-family: "Source Sans 3", "Source Sans Pro", -apple-system, "Segoe UI", sans-serif;
+    font-size: 16px; line-height: 1.6;
+  }
+  .block { max-width: 1120px; margin: 0 auto; padding: 40px 24px 80px; }
+  h1.app-title { font-size: 2.1rem; font-weight: 700; margin: 0 0 2px; letter-spacing: -0.005em; }
+  .caption { color: rgba(49,51,63,0.6); font-size: 14px; margin: 0 0 4px; }
+
+  /* Streamlit-style tab bar */
+  .tabs { display: flex; gap: 24px; border-bottom: 1px solid rgba(49,51,63,0.2); margin: 18px 0 24px; }
+  .tabs a {
+    color: #31333F; text-decoration: none; font-size: 14.5px; padding: 8px 2px 9px;
+    border-bottom: 3px solid transparent; margin-bottom: -1px; white-space: nowrap;
+  }
+  .tabs a[aria-current="page"] { color: #ff4b4b; border-bottom-color: #ff4b4b; font-weight: 600; }
+  .tabs a:hover { color: #ff4b4b; }
+
+  /* st.metric look */
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin: 6px 0 4px; }
+  .metric .lbl { font-size: 14px; color: #31333F; }
+  .metric .val { font-size: 2.1rem; font-weight: 400; line-height: 1.25; font-variant-numeric: tabular-nums; }
+  .metric .sub { font-size: 13px; color: rgba(49,51,63,0.6); }
+
+  /* segmented control (batch picker) */
+  .seg { display: inline-flex; flex-wrap: wrap; margin: 6px 0 2px; }
+  .seg button {
+    font: inherit; font-size: 14px; color: #31333F; background: #fff;
+    border: 1px solid rgba(49,51,63,0.2); border-right-width: 0;
+    padding: 5px 14px; cursor: pointer;
+  }
+  .seg button:first-child { border-radius: 8px 0 0 8px; }
+  .seg button:last-child { border-radius: 0 8px 8px 0; border-right-width: 1px; }
+  .seg button[aria-pressed="true"] {
+    color: #ff4b4b; font-weight: 600; border-color: #ff4b4b; border-right-width: 1px;
+    position: relative; z-index: 1;
+  }
+  .seg button[aria-pressed="true"] + button { border-left-width: 0; }
+  .seg-label { font-size: 14px; color: #31333F; margin: 14px 0 4px; }
+
+  .chart { width: 100%; }
+
+  /* ── the shared dashboard panels: EXACTLY the CSS dash_view.py injects ── */
+__DASH_CSS__
+
+  footer { margin-top: 36px; color: rgba(49,51,63,0.6); font-size: 13px; }
+  @media (max-width: 640px) { .aicap .cl-row { grid-template-columns: 100px 1fr 90px 56px; } }
+</style>
+</head>
+<body>
+<div class="block aicap">
+  <h1 class="app-title">📊 Be10X — AI CAP Attendance</h1>
+  <p class="caption" id="src"></p>
+
+  <div class="tabs">
+    <a href="./" aria-current="page">📊 Dashboard</a>
+    <a href="roster/">📋 Roster (marked attendance) 🔒</a>
+    <a href="day1.html">🎯 Day-1 analysis</a>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <div class="panel-title">Average attendance by batch <span class="dh-sub">· present % of strength</span></div>
+  <div id="cmp" class="chart"></div>
+
+  <div class="seg-label">Batch — pick to drill in</div>
+  <div class="seg" id="seg"></div>
+
+  <div class="panel-title" style="font-size:18px" id="drill-title"></div>
+  <div class="kpis" id="drill-kpis"></div>
+
+  <div class="panel-title">Attendance by date</div>
+  <div id="line" class="chart"></div>
+
+  <div class="panel-title">Closing types <span class="dh-sub">· bar = share of batch · pill = that channel's avg attendance</span></div>
+  <div id="closing"></div>
+
+  <div class="panel-title" id="sess-title">All sessions</div>
+  <div id="sessions" style="overflow-x:auto"></div>
+
+  <footer>Rebuilt automatically every Monday 06:00 IST. The 🔒 Roster page asks for the team login.</footer>
+</div>
+
+<script>
+const D = __DATA__;
+const fmt = n => (n ?? 0).toLocaleString("en-US");
+const PLOTLY_CFG = { displayModeBar: false, responsive: true };
+
+document.getElementById("src").textContent = `🟢 Prebuilt data · data as of ${D.generated}`;
+
+/* KPIs — same four as the app */
+document.getElementById("kpis").innerHTML =
+  [["Enrolled", fmt(D.summary.enrolled), ""],
+   ["Active", fmt(D.summary.active), ""],
+   ["Batches", D.summary.batches, ""],
+   ["Sessions logged", D.summary.sessions, ""]]
+  .map(([l, v]) => `<div class="metric"><div class="lbl">${l}</div><div class="val">${v}</div></div>`).join("");
+
+/* cross-batch comparison — the exact figure dash_view builds */
+Plotly.newPlot("cmp", D.cmp.data, D.cmp.layout, PLOTLY_CFG);
+
+let sel = D.codes[0];
+
+function renderSeg() {
+  const seg = document.getElementById("seg");
+  seg.innerHTML = D.codes.map(c =>
+    `<button data-b="${c}" aria-pressed="${c === sel}">${c}</button>`).join("");
+  seg.querySelectorAll("[data-b]").forEach(b =>
+    b.addEventListener("click", () => { sel = b.dataset.b; renderDrill(); renderSeg(); }));
+}
+
+function renderDrill() {
+  const d = D.batches[sel];
+  document.getElementById("drill-title").innerHTML =
+    `Batch ${sel} <span class="dh-sub">· ${d.n_sessions} sessions logged · strength ${fmt(d.strength)}</span>`;
+  document.getElementById("drill-kpis").innerHTML =
+    // percentages come pre-formatted by Python so the two front ends round identically
+    [["Total strength", fmt(d.strength), "all enrolled"],
+     ["Active", fmt(d.active), "excl. refund / unidentified"],
+     ["Avg attendance", d.avg_txt + "%", "of total strength"],
+     ["Peak → lowest", `${d.peak_txt}% → ${d.low_txt}%`, `${d.peak_lbl} → ${d.low_lbl}`]]
+    .map(([l, v, s]) => `<div class="metric"><div class="lbl">${l}</div><div class="val">${v}</div><div class="sub">${s}</div></div>`).join("");
+  Plotly.react("line", d.fig.data, d.fig.layout, PLOTLY_CFG);
+  document.getElementById("closing").innerHTML = d.closing_html;
+  document.getElementById("sess-title").innerHTML = `All sessions${d.sessions_sub}`;
+  document.getElementById("sessions").innerHTML = d.sessions_html;
+}
+
+renderSeg();
+renderDrill();
+</script>
+</body>
+</html>

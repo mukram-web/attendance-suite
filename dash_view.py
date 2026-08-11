@@ -5,9 +5,13 @@ Mirrors the static HTML prototype: 4 KPIs → batch selector + cross-batch
 comparison bar → selected-batch drill-down (metric cards, attendance-by-date
 line, closing-types panel, sessions table). Colour bands and look match the
 prototype. All numbers come from data.build(); this file is presentation only.
+
+The figure builders and the HTML fragments (_comparison_bar, _date_line,
+closing_rows_html, sessions_table_html, CSS) are PURE — no Streamlit — because
+site_build.py reuses them to render the identical front end as a static
+website. Change the look here and both the app and the site follow.
 """
 from __future__ import annotations
-import streamlit as st
 import plotly.graph_objects as go
 
 import data as D
@@ -94,7 +98,56 @@ def _date_line(d: dict):
     return fig
 
 
+def closing_rows_html(d: dict) -> str:
+    """The closing-types panel rows — shared verbatim by the app and the site."""
+    rows = []
+    for ch in d["closing"]:
+        rows.append(
+            f'<div class="cl-row"><div class="cl-name">{ch["type"]}</div>'
+            f'<div class="cl-track"><div class="cl-fill" style="width:{ch["pct"]:.1f}%"></div></div>'
+            f'<div class="cl-count">{ch["count"]:,} · {ch["pct"]:.0f}%</div>'
+            f'<div>{_pill(ch["att"])}</div></div>')
+    return "".join(rows)
+
+
+def sessions_table_html(d: dict) -> str:
+    """The all-sessions table — shared verbatim by the app and the site."""
+    trs = []
+    for s in d["sessions"]:
+        if s.get("is_intro"):   # intro call: attendees + how many then joined the batch
+            joined = (' <span style="font-size:11px;color:#8a5108;background:#fbeedd;'
+                      'padding:1px 7px;border-radius:6px;margin-left:6px;white-space:nowrap">'
+                      f'{s["total"]:,} joined this batch</span>')
+            trs.append(
+                f'<tr><td>{s["date_lbl"]}</td><td>{s["topic"]}{joined}</td>'
+                f'<td class="num">{s["present"]:,}</td><td class="num">—</td>'
+                f'<td class="num">—</td></tr>')
+            continue
+        absent = "—" if s["present_only"] else f'{s["absent"]:,}'
+        flag = '<span class="flag">no absent logged</span>' if s["present_only"] else ""
+        miss = '<span class="flag">no L2 match</span>' if s["no_l2"] else ""
+        trs.append(
+            f'<tr><td>{s["date_lbl"]}</td><td>{s["topic"]}{flag}{miss}</td>'
+            f'<td class="num">{s["present"]:,}</td><td class="num">{absent}</td>'
+            f'<td class="num">{_pill(s["pct"])}</td></tr>')
+    return ('<table class="sess"><thead><tr><th>Date</th><th>Session</th>'
+            '<th class="num">Present</th><th class="num">Absent</th>'
+            '<th class="num">% of strength</th></tr></thead><tbody>'
+            + "".join(trs) + "</tbody></table>")
+
+
+def sessions_subtitle(d: dict) -> str:
+    n_missing = sum(1 for s in d["sessions"] if s["no_l2"])
+    sub = f' <span class="dh-sub">· {len(d["sessions"])} rows'
+    if n_missing:
+        sub += f' · {n_missing} without an L2 topic match</span>'
+    else:
+        sub += "</span>"
+    return sub
+
+
 def render(DATA: dict, summary: dict, source_note: str = "") -> None:
+    import streamlit as st
     st.markdown(_CSS, unsafe_allow_html=True)
     st.markdown('<div class="aicap">', unsafe_allow_html=True)
 
@@ -152,45 +205,11 @@ def render(DATA: dict, summary: dict, source_note: str = "") -> None:
     st.markdown('<div class="panel-title">Closing types '
                 '<span class="dh-sub">· bar = share of batch · pill = that channel\'s '
                 'avg attendance</span></div>', unsafe_allow_html=True)
-    rows = []
-    for ch in d["closing"]:
-        rows.append(
-            f'<div class="cl-row"><div class="cl-name">{ch["type"]}</div>'
-            f'<div class="cl-track"><div class="cl-fill" style="width:{ch["pct"]:.1f}%"></div></div>'
-            f'<div class="cl-count">{ch["count"]:,} · {ch["pct"]:.0f}%</div>'
-            f'<div>{_pill(ch["att"])}</div></div>')
-    st.markdown("".join(rows), unsafe_allow_html=True)
+    st.markdown(closing_rows_html(d), unsafe_allow_html=True)
 
     # ── sessions table ──
-    n_missing = sum(1 for s in d["sessions"] if s["no_l2"])
-    sub = f' <span class="dh-sub">· {len(d["sessions"])} rows'
-    if n_missing:
-        sub += f' · {n_missing} without an L2 topic match</span>'
-    else:
-        sub += "</span>"
-    st.markdown(f'<div class="panel-title">All sessions{sub}</div>', unsafe_allow_html=True)
-    trs = []
-    for s in d["sessions"]:
-        if s.get("is_intro"):   # intro call: attendees + how many then joined the batch
-            joined = (' <span style="font-size:11px;color:#8a5108;background:#fbeedd;'
-                      'padding:1px 7px;border-radius:6px;margin-left:6px;white-space:nowrap">'
-                      f'{s["total"]:,} joined this batch</span>')
-            trs.append(
-                f'<tr><td>{s["date_lbl"]}</td><td>{s["topic"]}{joined}</td>'
-                f'<td class="num">{s["present"]:,}</td><td class="num">—</td>'
-                f'<td class="num">—</td></tr>')
-            continue
-        absent = "—" if s["present_only"] else f'{s["absent"]:,}'
-        flag = '<span class="flag">no absent logged</span>' if s["present_only"] else ""
-        miss = '<span class="flag">no L2 match</span>' if s["no_l2"] else ""
-        trs.append(
-            f'<tr><td>{s["date_lbl"]}</td><td>{s["topic"]}{flag}{miss}</td>'
-            f'<td class="num">{s["present"]:,}</td><td class="num">{absent}</td>'
-            f'<td class="num">{_pill(s["pct"])}</td></tr>')
-    st.markdown(
-        '<table class="sess"><thead><tr><th>Date</th><th>Session</th>'
-        '<th class="num">Present</th><th class="num">Absent</th>'
-        '<th class="num">% of strength</th></tr></thead><tbody>'
-        + "".join(trs) + "</tbody></table>", unsafe_allow_html=True)
+    st.markdown(f'<div class="panel-title">All sessions{sessions_subtitle(d)}</div>',
+                unsafe_allow_html=True)
+    st.markdown(sessions_table_html(d), unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)

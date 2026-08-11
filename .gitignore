@@ -16,6 +16,10 @@ credentials*.json
 # ── Local speed cache (attendee bytes + marked-roster pickles) ─
 .cache/
 
+# ── Generated website: /roster holds student contact details, never commit ─
+site/
+.vercel/
+
 # ── Python ─────────────────────────────────────────────────────
 __pycache__/
 *.pyc
