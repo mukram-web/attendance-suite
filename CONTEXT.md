@@ -1,3 +1,9 @@
+> ⚠️ **HISTORICAL — DO NOT FOLLOW.** This describes an earlier design in which the
+> Streamlit app fetched and marked at startup. That work now runs weekly in GitHub
+> Actions (`pipeline.py`) and the app only reads the prebuilt store. Batch coverage,
+> deployment state and the "open task" below are all out of date.
+> **Read [CLAUDE.md](CLAUDE.md) instead.**
+
 # CONTEXT — Be10X AI CAP Attendance Suite (handoff to Claude Code)
 
 > **Read this first.** This is a handoff from a long Claude.ai chat. It catches you up

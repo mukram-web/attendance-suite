@@ -1,8 +1,12 @@
 # Be10X — AI CAP Attendance Suite
 
-One app that **marks attendance automatically** from the Zoom exports and shows
-you the **marked roster + a full dashboard** in one place — for the AI CAP
-live-cohort batches (B17–B28).
+Attendance for the AI CAP live-cohort batches: a weekly job marks Present/Absent
+from the Zoom exports and publishes the data; a Streamlit app shows the dashboard,
+the marked roster, and a day-1 payment/close-type analysis.
+
+**New here (human or AI)? Read [CLAUDE.md](CLAUDE.md) first** — it explains the
+architecture, the data quirks that silently corrupt numbers, and what must never
+be committed (this repo is public and the data contains student PII).
 
 ## 🚀 The one app to run: `attendance_app.py`
 
@@ -17,7 +21,7 @@ It has **three tabs**:
 |---|---|
 | **📊 Dashboard** | KPIs (enrolled, active, batches, sessions logged) → a **cross-batch comparison bar** → a **batch selector**; pick a batch to drill into metric cards, an **attendance-by-date line chart**, a **closing-types panel** (share + per-channel attendance), and a **sessions table**. Attendance = **present ÷ total batch strength**; colour bands ≥45 / 30–45 / <30. |
 | **📋 Roster (marked attendance)** | The marked sheet, student-by-student, with **Present/Absent** colour-coded per session — like the spreadsheet. Contacts are masked by default; full marked `.xlsx` is downloadable. |
-| **🪵 Marking log** | What got marked this run (new vs re-marked columns) and any warnings. |
+| **🎯 Day-1 analysis** | For the newest batches: day-one and latest-session attendance cut against payment (col I) and close type (col J). Built by the weekly pipeline. |
 
 ### The Dashboard tab (new, data-driven)
 The Dashboard shows the **same updated roster the app fetches** from your links —
@@ -37,7 +41,14 @@ schedule gaps. The logic lives in a pure, unit-tested layer:
 | `dash_view.py` | the Plotly drill-down UI |
 | `tests/test_data.py` | `python -m unittest tests.test_data` — 14 tests, incl. dynamic-growth |
 
-### Two ways it gets data
+### How it gets data
+
+> **Normal path today:** a weekly GitHub Actions job (`pipeline.py`) does the
+> fetching and marking and publishes a prebuilt data file; the app just downloads
+> it. See **[CLAUDE.md](CLAUDE.md)**. The two modes below are fallbacks that remain
+> for when the store isn't configured.
+
+### Fallback modes
 
 1. **🟢 Live (automatic)** — reads the roster + attendee `.zip` straight from
    **Google Drive**, marks on its own, and refreshes on open / the **🔄 Refresh**
