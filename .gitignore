@@ -3,6 +3,8 @@ sample_data/
 *.xlsx
 *.xls
 *.csv
+*.duckdb
+*.db
 *.zip
 
 # ── Secrets / keys: never commit ───────────────────────────────
