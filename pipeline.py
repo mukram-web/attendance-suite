@@ -227,6 +227,8 @@ def main() -> None:
                     help="build the store locally, skip the Drive upload")
     ap.add_argument("--mode", default="exact", choices=["exact", "inclusive"],
                     help="marker matching rule (default: exact, same as the app)")
+    ap.add_argument("--no-site", action="store_true",
+                    help="skip rendering site/ (the static website)")
     ap.add_argument("--allow-partial", action="store_true",
                     help="publish even if some attendee files/folders failed "
                          "(default: refuse, so a complete store is never "
@@ -237,13 +239,13 @@ def main() -> None:
     live_data.set_service_account(cfg["sa_info"], scopes=RW_SCOPES)
     svc = live_data._drive_service()
 
-    print("[1/7] Fetching roster + L2 …", flush=True)
+    print("[1/8] Fetching roster + L2 …", flush=True)
     roster_bytes, roster_stamp = live_data.fetch_sheet_cached(svc, cfg["roster_id"])
     l2_bytes, l2_stamp = (live_data.fetch_sheet_cached(svc, cfg["l2_id"])
                           if cfg["l2_id"] else (None, ""))
     print(f"   roster {len(roster_bytes):,} bytes (modified {roster_stamp})")
 
-    print("[2/7] Fetching attendee reports (new sessions only) …", flush=True)
+    print("[2/8] Fetching attendee reports (new sessions only) …", flush=True)
     attendee_files, info = live_data.fetch_new_attendees(
         svc, cfg["attendee_folder_id"], roster_bytes)
     print(f"   {info['files']} file(s) from {info['new_folders']} folder(s), "
@@ -266,7 +268,7 @@ def main() -> None:
                          "left in place:\n  - " + "\n  - ".join(problems)
                          + "\nRe-run the job; pass --allow-partial to override.")
 
-    print("[3/7] Marking attendance …", flush=True)
+    print("[3/8] Marking attendance …", flush=True)
     if attendee_files:
         marked_bytes, report, warnings = ac.process_files(
             roster_bytes, l2_bytes, attendee_files, mode=args.mode,
@@ -283,7 +285,7 @@ def main() -> None:
 
     # Day-1 analysis runs BEFORE anything is uploaded: if it refuses below, this
     # run must have left Drive exactly as it found it.
-    print(f"[4/7] Day-1 analysis (newest {DAY1_BATCHES} batches) …", flush=True)
+    print(f"[4/8] Day-1 analysis (newest {DAY1_BATCHES} batches) …", flush=True)
     day1 = {"batches": [], "skipped": [], "errors": []}
     try:
         wb_r = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
@@ -308,7 +310,7 @@ def main() -> None:
 
     marked_xlsx_file_id = ""
     if not args.no_upload:
-        print("[5/7] Uploading marked roster xlsx …", flush=True)
+        print("[5/8] Uploading marked roster xlsx …", flush=True)
         marked_xlsx_file_id = live_data.upload_to_folder(
             svc, cfg["store_folder_id"], MARKED_NAME, marked_bytes, XLSX_MIME)
     elif cfg["store_folder_id"]:
@@ -321,7 +323,7 @@ def main() -> None:
         except Exception:
             marked_xlsx_file_id = ""
 
-    print("[6/7] Building the DuckDB store …", flush=True)
+    print("[6/8] Building the DuckDB store …", flush=True)
     names = live_data.list_attendee_names(cfg["attendee_folder_id"])
     source = (f"Google Drive — roster, {info['files']} file(s) from "
               f"{info['new_folders']} new session(s)")
@@ -335,11 +337,18 @@ def main() -> None:
     print(f"   {stats['batches']} batches · {stats['students']:,} students · "
           f"{stats['sessions']} sessions · {size / 1e6:.1f} MB")
 
+    # The static website the team actually opens. Built from the store that was
+    # just written, so the site can never disagree with the app.
+    if not args.no_site:
+        print("[7/8] Rendering the static site …", flush=True)
+        import site_build
+        site_build.build_site(store_path, os.path.join(HERE, "site"))
+
     if args.no_upload:
-        print(f"[7/7] Skipped upload (--no-upload). Store at: {store_path}")
+        print(f"[8/8] Skipped upload (--no-upload). Store at: {store_path}")
         return
 
-    print("[7/7] Uploading the store …", flush=True)
+    print("[8/8] Uploading the store …", flush=True)
     with open(store_path, "rb") as fh:
         live_data.upload_to_folder(svc, cfg["store_folder_id"], STORE_NAME,
                                    fh.read())

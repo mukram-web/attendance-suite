@@ -63,6 +63,57 @@ That's it. From then on:
 - Need fresher data mid-week? GitHub → Actions → "Refresh dashboard data" →
   **Run workflow**, wait for green, then click 🔄 in the app.
 
+## 4. (Optional) The website on Vercel
+
+The pipeline also renders `site/` — the same dashboard as a **static website**
+that opens instantly and never sleeps. Three pages: `/` dashboard, `/day1.html`
+day-1 analysis, `/roster/` behind a login.
+
+1. **Create the project.** On vercel.com → *Add New… → Project → skip the git
+   import → deploy an empty project* (or run `npx vercel` once locally from
+   `attendance-suite/site` and follow the prompts). Note its **Project ID**
+   (Project → Settings → General) and your **Team/Org ID** (Account/Team →
+   Settings → General).
+2. **Create a token**: Account Settings → Tokens → *Create*, scope it to that
+   team, copy the value.
+3. **Add three GitHub secrets** (same place as the others):
+   `VERCEL_TOKEN`, `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID`.
+   Until `VERCEL_TOKEN` exists the deploy step is skipped, so nothing breaks.
+4. **Set the roster login** in Vercel → Project → Settings → Environment
+   Variables (Production):
+   `ROSTER_USER` = the shared id, `ROSTER_PASS` = the shared password.
+   These are the credentials the browser asks for on `/roster/`.
+   ⚠️ Changing them later **only takes effect on the next deploy** — after
+   editing, re-run the workflow (or hit *Redeploy* in Vercel).
+5. Run the workflow once and open the deployment URL.
+
+### ⚠️ Prove the lock works before publishing any student data
+
+**The first deploy contains no roster data on purpose.** `PUBLISH_ROSTER` is
+off by default, so `/roster/` renders an empty page and no student contact
+details are uploaded anywhere.
+
+Verify the gate, in a **private/incognito window**:
+
+1. Open `<site>/roster/canary.txt` — it **must** ask for a username and
+   password. If it instead shows a line of text, **the gate is not working**:
+   do not enable the roster, and tell me — the fix is to serve it from a Vercel
+   Function instead of a static file.
+2. Open `<site>/roster/` — same prompt. Cancel it; you should get 401, not the page.
+3. Log in once and confirm both load.
+
+Only then turn the roster on: add a GitHub secret `PUBLISH_ROSTER` = `1` and
+re-run the workflow. From that point the per-student grid is on the site,
+behind the login.
+
+Notes:
+- `site/` is **never committed** — the roster JSON holds student contact
+  details. It is uploaded straight to Vercel by the Action.
+- The dashboard and day-1 pages carry **aggregates only**, so the public URL
+  exposes no student data. They are `noindex`, so search engines skip them.
+- Vercel's free Hobby plan is for non-commercial use; a Be10x deployment should
+  be on a paid plan.
+
 ## What to commit
 
 `.gitignore` ignores `*.json`, so these need to go in together with the code —
@@ -71,7 +122,7 @@ push all of them or the CI build silently loses data:
 ```bash
 git add .github pipeline.py day1_analysis.py day1_template.html SETUP_PIPELINE.md \
         requirements.txt .gitignore attendance_app.py live_data.py dashboard_core.py \
-        intro_attendance.json
+        dash_view.py site_build.py site_templates intro_attendance.json
 ```
 
 `intro_attendance.json` holds **aggregates only** (no student contact details), so

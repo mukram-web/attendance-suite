@@ -147,15 +147,30 @@
 </head>
 <body>
 <div class="wrap">
-  <header>
-    <h1>AI CAP — day-1 attendance, payment and close type</h1>
-    <p id="src">Loading…</p>
+  <header style="display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap">
+    <div>
+      <h1>AI CAP — day-1 attendance, payment and close type</h1>
+      <p id="src">Loading…</p>
+    </div>
+    <!-- shown only on the standalone (Vercel) build; the Streamlit tab has its own
+         chrome. Styled like the app's tab bar so the site reads as one product. -->
+    <nav id="site-nav" style="display:none;gap:24px;border-bottom:1px solid rgba(49,51,63,0.2);flex-basis:100%">
+      <a href="./" style="color:inherit;text-decoration:none;font-size:14.5px;padding:8px 2px 9px;border-bottom:3px solid transparent">📊 Dashboard</a>
+      <a href="./roster/" style="color:inherit;text-decoration:none;font-size:14.5px;padding:8px 2px 9px;border-bottom:3px solid transparent">📋 Roster (marked attendance) 🔒</a>
+      <a href="./day1.html" aria-current="page" style="color:#ff4b4b;font-weight:600;text-decoration:none;font-size:14.5px;padding:8px 2px 9px;border-bottom:3px solid #ff4b4b;margin-bottom:-1px">🎯 Day-1 analysis</a>
+    </nav>
   </header>
 
   <div class="bar-row" role="group" aria-label="Filters">
     <span class="lbl">Session</span>
     <button class="chip" data-session="day1" aria-pressed="true">Day one</button>
     <button class="chip" data-session="latest" aria-pressed="false">Latest session</button>
+    <!-- batch chips only exist on the standalone build; embedded in Streamlit the
+         host's multiselect controls the batch set (it must know the row count to
+         size the iframe) -->
+    <span class="sep" id="batch-sep" style="display:none"></span>
+    <span class="lbl" id="batch-lbl" style="display:none">Batch</span>
+    <span id="batch-chips" style="display:contents"></span>
   </div>
   <div class="bar-row" role="group" aria-label="Units">
     <span class="lbl">Roster mix as</span>
@@ -615,6 +630,16 @@ try {
   wire("unit", v => { unit = v; });
   wire("den", v => { den = v; });
   wire("session", v => { session = v; });
+  if (D.standalone) {
+    document.getElementById("site-nav").style.display = "flex";
+    document.getElementById("batch-sep").style.display = "";
+    document.getElementById("batch-lbl").style.display = "";
+    document.getElementById("batch-chips").innerHTML =
+      `<button class="chip" data-batch="all" aria-pressed="true">All</button>` +
+      order.map(c => `<button class="chip" data-batch="${c}" aria-pressed="false">
+        <span class="dot" style="background:${colorOf(c)}"></span>${c}</button>`).join("");
+    wire("batch", v => { active = v === "all" ? order.slice() : [v]; });
+  }
   renderNotes();
   render();
   syncHeight();

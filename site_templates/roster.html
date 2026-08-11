@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Be10X — roster (restricted)</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface-1: #fcfcfb; --page: #f9f9f7;
+    --text-primary: #0b0b0b; --text-secondary: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --baseline: #c3c2b7; --border: rgba(11,11,11,0.10);
+    --accent: #2a78d6; --track: #ebeae5;
+    --present-bg: #d8f3dc; --present-fg: #1b4332;
+    --absent-bg: #ffe5e5; --absent-fg: #7d1128;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:where(:not([data-theme="light"])) {
+      color-scheme: dark;
+      --surface-1: #1a1a19; --page: #0d0d0d;
+      --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+      --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+      --accent: #3987e5; --track: #2c2c2a;
+      --present-bg: #14351d; --present-fg: #9fe0af; --absent-bg: #3a1418; --absent-fg: #f3a5ad;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface-1: #1a1a19; --page: #0d0d0d;
+    --text-primary: #ffffff; --text-secondary: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --baseline: #383835; --border: rgba(255,255,255,0.10);
+    --accent: #3987e5; --track: #2c2c2a;
+    --present-bg: #14351d; --present-fg: #9fe0af; --absent-bg: #3a1418; --absent-fg: #f3a5ad;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 40px 24px 60px; background: #ffffff; color: #31333F;
+         font-family: "Source Sans 3", "Source Sans Pro", -apple-system, "Segoe UI", sans-serif;
+         font-size: 15px; line-height: 1.6; }
+  .wrap { max-width: 1280px; margin: 0 auto; }
+  header h1 { font-size: 2.1rem; font-weight: 700; margin: 0 0 2px; }
+  header p { margin: 0; color: rgba(49,51,63,0.6); font-size: 14px; }
+  /* Streamlit-style tab bar, same as the other pages */
+  .tabs { display: flex; gap: 24px; border-bottom: 1px solid rgba(49,51,63,0.2); margin: 18px 0 20px; }
+  .tabs a { color: #31333F; text-decoration: none; font-size: 14.5px; padding: 8px 2px 9px;
+            border-bottom: 3px solid transparent; margin-bottom: -1px; white-space: nowrap; }
+  .tabs a[aria-current="page"] { color: #ff4b4b; border-bottom-color: #ff4b4b; font-weight: 600; }
+  .tabs a:hover { color: #ff4b4b; }
+
+  .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 18px 0 14px; }
+  .bar label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
+  select, input[type=search] {
+    font: inherit; font-size: 13.5px; color: var(--text-primary);
+    background: var(--surface-1); border: 1px solid var(--baseline); border-radius: 8px; padding: 7px 10px;
+  }
+  input[type=search] { min-width: 240px; }
+  .toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); }
+  .meta { font-size: 12.5px; color: var(--muted); margin-left: auto; }
+
+  .card { background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px; padding: 8px; }
+  .tbl { overflow: auto; max-height: 72vh; }
+  table { border-collapse: collapse; width: 100%; font-size: 12px; }
+  th, td { padding: 5px 9px; border-bottom: 1px solid var(--grid); white-space: nowrap; text-align: left; }
+  thead th { position: sticky; top: 0; background: var(--surface-1); color: var(--muted); font-weight: 600; z-index: 1; }
+  td.present { background: var(--present-bg); color: var(--present-fg); }
+  td.absent { background: var(--absent-bg); color: var(--absent-fg); }
+  td.num { font-variant-numeric: tabular-nums; text-align: right; }
+
+  .pager { display: flex; gap: 8px; align-items: center; justify-content: center; padding: 10px; font-size: 13px; }
+  .pager button { font: inherit; border: 1px solid var(--border); background: var(--surface-1);
+                  color: var(--text-primary); border-radius: 8px; padding: 5px 12px; cursor: pointer; }
+  .pager button:disabled { opacity: .4; cursor: default; }
+  #status { padding: 24px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>📊 Be10X — AI CAP Attendance</h1>
+    <p id="src">Restricted page. Student contact details are masked by default.</p>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&display=swap" rel="stylesheet">
+    <!-- root-absolute: this page is served at BOTH /roster and /roster/, and
+         relative hrefs resolve differently between the two -->
+    <div class="tabs">
+      <a href="/">📊 Dashboard</a>
+      <a href="/roster/" aria-current="page">📋 Roster (marked attendance) 🔒</a>
+      <a href="/day1.html">🎯 Day-1 analysis</a>
+    </div>
+  </header>
+
+  <div class="bar">
+    <label for="batch">Batch</label>
+    <select id="batch"></select>
+    <input id="q" type="search" placeholder="Search email / phone…" autocomplete="off">
+    <label class="toggle"><input type="checkbox" id="activeonly" checked> Active only</label>
+    <label class="toggle"><input type="checkbox" id="showpii"> Show full contact details</label>
+    <span class="meta" id="meta"></span>
+  </div>
+
+  <div class="card">
+    <div class="tbl" id="tblhost"><div id="status">Pick a batch to load its roster.</div></div>
+    <div class="pager" id="pager" style="display:none">
+      <button id="prev">‹ Prev</button>
+      <span id="pageinfo"></span>
+      <button id="next">Next ›</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const MANIFEST = __MANIFEST__;   /* {batches: ["B17", ...], generated: "..."} */
+const PAGE = 200;
+
+const maskEmail = e => {
+  e = (e || "").trim();
+  if (!e.includes("@")) return e ? "•••" : "";
+  const [l, d] = e.split("@");
+  return (l.length > 3 ? l.slice(0, 3) : l.slice(0, 1)) + "…@" + d;
+};
+const maskPhone = p => {
+  const d = String(p || "").replace(/\D/g, "");
+  return d ? "•".repeat(Math.max(0, d.length - 4)) + d.slice(-4) : "";
+};
+
+let data = null, view = [], page = 0;
+
+const $ = id => document.getElementById(id);
+$("src").textContent = `Data as of ${MANIFEST.generated}. Contact details masked by default.`;
+$("batch").innerHTML = MANIFEST.batches.map(b => `<option>${b}</option>`).join("");
+$("batch").value = MANIFEST.batches[MANIFEST.batches.length - 1];
+
+if (!MANIFEST.enabled) {
+  $("tblhost").innerHTML =
+    '<div id="status">Roster publishing is turned <b>off</b> for this deployment, so no ' +
+    'student data has been uploaded.<br><br>Verify the login gate first ' +
+    '(open <code>/roster/canary.txt</code> in a private window — it must ask for the ' +
+    'login), then set <code>PUBLISH_ROSTER=1</code> and re-run the workflow.</div>';
+  $("batch").disabled = $("q").disabled = $("activeonly").disabled = $("showpii").disabled = true;
+}
+
+async function load() {
+  if (!MANIFEST.enabled) return;
+  const b = $("batch").value;
+  $("tblhost").innerHTML = '<div id="status">Loading ' + b + '…</div>';
+  $("pager").style.display = "none";
+  try {
+    // root-absolute: /roster (no trailing slash) is a served path too, and a
+    // relative URL there would resolve to /data/<b>.json and 404
+    const r = await fetch(`/roster/data/${b}.json`, { credentials: "same-origin" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    data = await r.json();
+  } catch (e) {
+    $("tblhost").innerHTML = `<div id="status">Couldn’t load ${b}: ${e.message}</div>`;
+    return;
+  }
+  page = 0;
+  refilter();
+}
+
+function refilter() {
+  if (!data) return;
+  const q = $("q").value.trim().toLowerCase();
+  const activeOnly = $("activeonly").checked;
+  const ei = data.cols.indexOf("Email"), pi = data.cols.indexOf("Phone"),
+        ai = data.cols.indexOf("Active");
+  view = data.rows.filter(r =>
+    (!activeOnly || r[ai] === true || r[ai] === "true" || r[ai] === 1) &&
+    (!q || String(r[ei]).toLowerCase().includes(q) || String(r[pi]).includes(q)));
+  page = Math.min(page, Math.max(0, Math.ceil(view.length / PAGE) - 1));
+  render();
+}
+
+function render() {
+  const show = $("showpii").checked;
+  const ei = data.cols.indexOf("Email"), pi = data.cols.indexOf("Phone"),
+        ai = data.cols.indexOf("Active"), pr = data.cols.indexOf("Present");
+  const sess = data.cols.map((c, i) => [c, i]).filter(([c, i]) => ![ei, pi, ai, pr].includes(i));
+
+  const start = page * PAGE;
+  const rows = view.slice(start, start + PAGE);
+  const head = `<tr><th>Email</th><th>Phone</th><th>Active</th><th>Present</th>${
+    sess.map(([c]) => `<th>${c}</th>`).join("")}</tr>`;
+  const body = rows.map(r => {
+    const cells = sess.map(([c, i]) => {
+      const v = String(r[i] ?? "");
+      const cls = v.toLowerCase() === "present" ? "present" : v.toLowerCase() === "absent" ? "absent" : "";
+      return `<td class="${cls}">${v}</td>`;
+    }).join("");
+    return `<tr><td>${show ? (r[ei] ?? "") : maskEmail(r[ei])}</td>` +
+           `<td>${show ? (r[pi] ?? "") : maskPhone(r[pi])}</td>` +
+           `<td>${r[ai] === true || r[ai] === "true" || r[ai] === 1 ? "✓" : ""}</td>` +
+           `<td class="num">${r[pr] ?? ""}</td>${cells}</tr>`;
+  }).join("");
+  $("tblhost").innerHTML = `<table><thead>${head}</thead><tbody>${body}</tbody></table>`;
+
+  const pages = Math.max(1, Math.ceil(view.length / PAGE));
+  $("pager").style.display = pages > 1 ? "flex" : "none";
+  $("pageinfo").textContent = `page ${page + 1} of ${pages}`;
+  $("prev").disabled = page === 0;
+  $("next").disabled = page >= pages - 1;
+  $("meta").textContent = `${view.length.toLocaleString()} students shown · ${sess.length} sessions`;
+}
+
+$("batch").addEventListener("change", load);
+$("q").addEventListener("input", () => { page = 0; refilter(); });
+$("activeonly").addEventListener("change", () => { page = 0; refilter(); });
+$("showpii").addEventListener("change", render);
+$("prev").addEventListener("click", () => { page--; render(); });
+$("next").addEventListener("click", () => { page++; render(); });
+load();
+</script>
+</body>
+</html>

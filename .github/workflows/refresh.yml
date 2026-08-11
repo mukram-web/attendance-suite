@@ -33,6 +33,12 @@ jobs:
   refresh:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    # Job-level so the deploy step's `if:` can test whether the token exists —
+    # the secrets context isn't readable from a step-level `if`.
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -59,4 +65,20 @@ jobs:
           L2_ID: ${{ secrets.L2_ID }}
           ATTENDEE_FOLDER_ID: ${{ secrets.ATTENDEE_FOLDER_ID }}
           STORE_FOLDER_ID: ${{ secrets.STORE_FOLDER_ID }}
+          # Off by default: the site carries NO student contact details until the
+          # /roster login gate has been verified on a real deploy (SETUP_PIPELINE.md).
+          PUBLISH_ROSTER: ${{ secrets.PUBLISH_ROSTER }}
         run: python pipeline.py
+
+      # Publish site/ to Vercel. Skipped automatically until VERCEL_TOKEN exists,
+      # so the data pipeline works before the website is set up.
+      # site/ is never committed — it carries roster PII and is uploaded straight
+      # to Vercel, where /roster is gated by middleware.js + ROSTER_USER/PASS.
+      # (The CLI reads VERCEL_ORG_ID / VERCEL_PROJECT_ID from the job env to know
+      # which project to deploy into, so no .vercel/ link file is needed.)
+      - name: Deploy website to Vercel
+        if: env.VERCEL_TOKEN != ''
+        run: |
+          npm i -g vercel@latest
+          url=$(vercel deploy site --prod --yes --token "$VERCEL_TOKEN")
+          echo "Deployed: $url" >> "$GITHUB_STEP_SUMMARY"
