@@ -158,6 +158,39 @@ attendance columns" is true of the Sheet and false of the marked store.
   commercial use, so hosting means Vercel Pro or a port to Cloudflare Pages, which
   is free and permits commercial use. `SETUP_PIPELINE.md` documents the Vercel path.
 
+## 7b. Open threads — as of 2026-08-12 (delete each line once it is done)
+
+1. **The Zoom extractor emits inconsistent formats.** A separate tool (built in
+   another session, NOT this repo) writes to
+   `C:\Users\user\OneDrive\Desktop\Zoom extracts\output\<YYYY-MM-DD>\<folder>\`.
+   Measured:
+   | session | format | phone | parses to |
+   |---|---|---|---|
+   | B25 · 9 Aug (`95638821501`) | ✅ Attendee Report | 100% | 487 |
+   | B23 · 8 Aug (`99685353701`) | ✅ Attendee Report | 59.7% | 447 |
+   | B17+B19 · 9 Aug (`91695866411`) | ❌ flat 8-column list | none | **0** |
+
+   The flat format has `Name (original name), Email, Join time, Leave time,
+   Duration (minutes), Guest, …` — no `Attended`/`First Name`, so
+   `attendance_core.parse_attendees` returns **empty without raising**. If such a
+   file reaches the drive, that session marks everyone absent and the run still
+   goes green. Two sessions on the SAME day differ, so it is per-session (likely
+   webinars without registration), not a version change.
+   **Not yet fixed.** Options: fix the extractor to always pull the Attendee
+   Report; and/or teach both parsers to read either shape **plus** fail loudly
+   when a file parses to zero attendees.
+2. **Verify the deployed Streamlit app is in store mode.** `store_folder_id` was
+   being added to its Secrets. Correct = caption reads "🟢 Prebuilt data · data as
+   of …" and the Day-1 tab shows charts. Wrong = "🟢 Live from Google Drive".
+3. **Retire the old `attendance-marker` Streamlit app** — previous design, still
+   deployed, causes confusion.
+4. **Combined-batch sessions are missing from L2.** e.g. `AI CAP B1 - AI CAP B22`
+   (19 Jun) and `AI CAP B10+B17` (23 Jul) have no L2 entry, so they show "no L2
+   match" and — because the % is computed against one batch's full strength —
+   they unfairly drag that batch's average down (B17's 23 Jul reads 4.4%).
+5. **`intro_attendance.json` stops at B31**, so B32–B35 have no "Intro call" row.
+   Refreshing it means re-pulling from the "L2 customer" sheet.
+
 ## 8. Working on this
 
 ```bash
