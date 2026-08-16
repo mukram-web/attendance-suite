@@ -145,9 +145,20 @@ attendance columns" is true of the Sheet and false of the marked store.
 
 ## 7. Deployment state — snapshot, 2026-08-12, verify before relying on it
 
-- **Streamlit Community Cloud**: `mukram-web/attendance-suite`, branch `main`,
-  main file `attendance_app.py`. An older `attendance-marker` app from the previous
-  design was also still deployed and should be retired.
+- **Streamlit Community Cloud**: **https://attendance-suite-houseofedtech.streamlit.app/**
+  — repo `mukram-web/attendance-suite`, branch `main`, main file `attendance_app.py`.
+  **Confirmed in store mode 2026-08-12** by loading it signed-out: caption read
+  "🟢 Prebuilt data · data as of 12 Aug 2026, 01:28 IST" (the pipeline's build time,
+  not its own crawl) and the Day-1 tab rendered 20 tiles / 104 bars for B32–B35.
+  ⚠️ **It is PUBLIC — it loads with no login at all**, and its Roster tab has a
+  "Show full contact details" checkbox over student emails and phones. Restrict via
+  the app's Settings → Sharing if that is not intended. An older `attendance-marker`
+  app from the previous design is also still deployed and should be retired.
+- **The store lives on a Shared Drive** ("Attendance suit") with the service account
+  as Content Manager, holding `attendance.duckdb` (~7.4 MB) and
+  `Master_Batch_Rosters_marked.xlsx` (~8.5 MB). A full run **with upload** was
+  verified on GitHub 2026-08-11: all 8 steps green, both files landed, and the app
+  downloaded the store after the local copy was deleted.
 - **GitHub Actions**: `Refresh dashboard data`, Mondays 06:00 IST
   (cron `30 0 * * 1`), plus manual "Run workflow" with a `skip_upload` dry-run input.
   Verified end-to-end 2026-08-11.
@@ -179,9 +190,7 @@ attendance columns" is true of the Sheet and false of the marked store.
    **Not yet fixed.** Options: fix the extractor to always pull the Attendee
    Report; and/or teach both parsers to read either shape **plus** fail loudly
    when a file parses to zero attendees.
-2. **Verify the deployed Streamlit app is in store mode.** `store_folder_id` was
-   being added to its Secrets. Correct = caption reads "🟢 Prebuilt data · data as
-   of …" and the Day-1 tab shows charts. Wrong = "🟢 Live from Google Drive".
+2. **Decide whether the app should stay publicly readable** (§7). It currently is.
 3. **Retire the old `attendance-marker` Streamlit app** — previous design, still
    deployed, causes confusion.
 4. **Combined-batch sessions are missing from L2.** e.g. `AI CAP B1 - AI CAP B22`
@@ -190,6 +199,26 @@ attendance columns" is true of the Sheet and false of the marked store.
    they unfairly drag that batch's average down (B17's 23 Jul reads 4.4%).
 5. **`intro_attendance.json` stops at B31**, so B32–B35 have no "Intro call" row.
    Refreshing it means re-pulling from the "L2 customer" sheet.
+6. **The roster is ~8.2 MB and Google refuses to export a Sheet over 10 MB as
+   .xlsx.** When it crosses, step 1 fails every week with a clear message and old
+   batches must be archived into a separate sheet. Watch the size in the log line
+   `roster N bytes`.
+7. **GitHub disables scheduled workflows after ~60 days of repo inactivity.** The
+   only symptom is the "Data as of" date silently freezing — no failure email.
+   Any commit, or a manual "Run workflow", resets the clock.
+
+## 7c. Sheet data quality — real, and visible in the dashboards
+
+These are data-entry issues, **not** parsing bugs (column detection was verified):
+
+- **B32's `Close Type` column is empty** — 3,300 blanks + 436 `LWB_Resume`, no BDA
+  values at all, so its "BDA closed" tile reads 0.0%.
+- **B32's `Payment`** shows only **5** `Full Paid` against 2,619 `Partially Paid`
+  (with ₹26k amounts) — recorded differently from every other batch.
+- **B35 has 249 rows with the number `0`** in `Close Type`, bucketed as `(blank)`.
+
+Unknown buckets are deliberately kept as their own bar rather than dropped, so
+these show up on the page instead of vanishing.
 
 ## 8. Working on this
 
@@ -207,6 +236,27 @@ python -m unittest tests.test_data
 Use `--no-site` locally unless you mean to rebuild the site: `site_build` starts by
 **deleting the whole `site/` directory**, and with `PUBLISH_ROSTER` set it writes
 student contact data to disk.
+
+Run the real job on GitHub (needs `gh auth login` once):
+
+```bash
+gh workflow run "Refresh dashboard data" --repo mukram-web/attendance-suite
+gh workflow run "Refresh dashboard data" --repo mukram-web/attendance-suite -f skip_upload=true
+gh run watch <id> --repo mukram-web/attendance-suite
+```
+
+**Health check, 5 seconds:** open the app and read the caption under the title.
+`🟢 Prebuilt data · data as of <date>` = healthy. `🟢 Live from Google Drive` = it
+fell back to the slow path — `store_folder_id` is missing from that environment's
+secrets, or the store could not be downloaded.
+
+**What is inside `attendance.duckdb`:** `meta(key, value)` holding JSON blobs
+(`DATA`, `summary`, `report`, `warnings`, `source`, `generated_at`,
+`generated_at_iso`, `batches`, `sheet_map`, `marked_xlsx_file_id`, `stamps`,
+`day1`), the `compute` table (per batch × session), and one `grid_<batch>` table per
+batch. The `grid_*` tables carry emails and phones — that is why the store is
+PII and lives in a private Shared Drive. The app caches it with a **30-minute TTL**,
+so Monday's rebuild reaches viewers on its own; 🔄 Refresh forces it immediately.
 
 Local runs read `.streamlit/secrets.toml` and the service-account `.json` key next
 to the code; CI uses env vars instead. `.cache/` holds the attendee byte cache and
