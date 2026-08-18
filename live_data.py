@@ -195,6 +195,13 @@ def _thread_drive():
     return svc
 
 
+def _folder_ids(folder_id) -> list[str]:
+    """Split a comma-separated attendee-folder config value into individual ids.
+    Sessions can live on more than one Shared Drive (the original one plus the
+    'Zoom extracts' drive new sessions are written to since Aug 2026)."""
+    return [p.strip() for p in str(folder_id or "").split(",") if p.strip()]
+
+
 def _list_children(svc, folder_id: str) -> list[dict]:
     """One folder's immediate children (id, name, mimeType), Shared-Drive aware."""
     items, page_token = [], None
@@ -231,27 +238,28 @@ def list_attendee_names(folder_id: str | None = None) -> list:
         return []
     svc = _drive_service()
     names: list = []
-    if str(fid).startswith("0A"):                       # Shared Drive root → whole-drive search
-        token = None
-        while True:
-            resp = svc.files().list(
-                q="name contains 'attendee_' and trashed = false",
-                corpora="drive", driveId=fid,
-                includeItemsFromAllDrives=True, supportsAllDrives=True,
-                fields="nextPageToken, files(name)", pageSize=1000, pageToken=token,
-            ).execute()
-            names += [f["name"] for f in resp.get("files", [])]
-            token = resp.get("nextPageToken")
-            if not token:
-                break
-    else:                                               # plain folder → recurse names only
-        def walk(f):
-            for c in _list_children(svc, f):
-                if c["mimeType"] == _FOLDER_MIME:
-                    walk(c["id"])
-                elif "attendee" in c["name"].lower():
-                    names.append(c["name"])
-        walk(fid)
+    for one in _folder_ids(fid):
+        if one.startswith("0A"):                        # Shared Drive root → whole-drive search
+            token = None
+            while True:
+                resp = svc.files().list(
+                    q="name contains 'attendee_' and trashed = false",
+                    corpora="drive", driveId=one,
+                    includeItemsFromAllDrives=True, supportsAllDrives=True,
+                    fields="nextPageToken, files(name)", pageSize=1000, pageToken=token,
+                ).execute()
+                names += [f["name"] for f in resp.get("files", [])]
+                token = resp.get("nextPageToken")
+                if not token:
+                    break
+        else:                                           # plain folder → recurse names only
+            def walk(f):
+                for c in _list_children(svc, f):
+                    if c["mimeType"] == _FOLDER_MIME:
+                        walk(c["id"])
+                    elif "attendee" in c["name"].lower():
+                        names.append(c["name"])
+            walk(one)
     return names
 
 
@@ -284,6 +292,20 @@ def upload_to_folder(svc, folder_id: str, name: str, data: bytes,
                               supportsAllDrives=True).execute()["id"]
 
 
+def _download_any(svc, file_id: str) -> bytes:
+    """get_media, falling back to a text/csv export for Google-native files —
+    attendee reports occasionally get converted to a Google Sheet on upload,
+    which the binary endpoint refuses with 403 fileNotDownloadable."""
+    try:
+        return _download(svc.files().get_media(fileId=file_id,
+                                               supportsAllDrives=True))
+    except Exception as e:
+        if "fileNotDownloadable" not in str(e):
+            raise
+        return _download(svc.files().export_media(fileId=file_id,
+                                                  mimeType="text/csv"))
+
+
 def download_cached(svc, file_id: str) -> bytes:
     """Download a Drive file, reusing the per-file-id byte cache. Attendee CSVs
     never change once uploaded, so a second reader (e.g. the day-1 analysis)
@@ -294,7 +316,7 @@ def download_cached(svc, file_id: str) -> bytes:
             return fh.read()
     except OSError:
         pass
-    data = _download(svc.files().get_media(fileId=file_id, supportsAllDrives=True))
+    data = _download_any(svc, file_id)
     try:
         os.makedirs(_CACHE_DIR, exist_ok=True)
         tmp = cpath + ".tmp"
@@ -378,9 +400,13 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
         n = name.lower()
         return n.startswith("attendee") or (n.endswith(".zip") and "attendee" in n)
 
-    # 1) pick the top-level folders that need marking
+    # 1) pick the top-level folders that need marking — across every configured
+    #    drive (comma-separated ids: the original drive plus any newer one)
     to_fetch, skipped_nosheet, skipped_done = [], 0, 0
-    for f in _list_children(svc, folder_id):
+    top: list[dict] = []
+    for fid in _folder_ids(folder_id):
+        top += _list_children(svc, fid)
+    for f in top:
         if f["mimeType"] != _FOLDER_MIME:
             continue
         name = f["name"]
@@ -424,6 +450,7 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     out: list[tuple[str, bytes]] = []
     failed = 0
     bad_zips: list[str] = []
+    download_errors: list[str] = []
     if entries:
         try:
             os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -435,12 +462,11 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
             cpath = os.path.join(_CACHE_DIR, fid)
             try:
                 with open(cpath, "rb") as fh:
-                    return path, fid, is_zip, fh.read()
+                    return path, fid, is_zip, fh.read(), None
             except OSError:
                 pass
             try:
-                data = _download(_thread_drive().files().get_media(
-                    fileId=fid, supportsAllDrives=True))
+                data = _download_any(_thread_drive(), fid)
                 try:
                     tmp = cpath + ".tmp"
                     with open(tmp, "wb") as fh:
@@ -448,13 +474,14 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                     os.replace(tmp, cpath)
                 except OSError:
                     pass
-                return path, fid, is_zip, data
-            except Exception:
-                return path, fid, is_zip, None
+                return path, fid, is_zip, data, None
+            except Exception as e:
+                return path, fid, is_zip, None, str(e)
         with ThreadPoolExecutor(max_workers=min(max_workers, len(entries))) as ex:
-            for path, fid, is_zip, data in ex.map(_dl, entries):
+            for path, fid, is_zip, data, err in ex.map(_dl, entries):
                 if data is None:
                     failed += 1
+                    download_errors.append(f"{path}: {err}")
                     continue
                 if is_zip:
                     # A corrupt / password-protected / non-attendee .zip must not
@@ -480,7 +507,8 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
 
     info = dict(new_folders=len(to_fetch), files=len(out), failed=failed,
                 skipped_already_marked=skipped_done, skipped_no_sheet=skipped_nosheet,
-                listing_errors=listing_errors, bad_zips=bad_zips)
+                listing_errors=listing_errors, bad_zips=bad_zips,
+                download_errors=download_errors)
     return out, info
 
 

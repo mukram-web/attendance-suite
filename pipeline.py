@@ -262,7 +262,8 @@ def main() -> None:
         problems.append(f"{len(info['bad_zips'])} unreadable zip(s): "
                         f"{'; '.join(info['bad_zips'][:5])}")
     if info.get("failed"):
-        problems.append(f"{info['failed']} attendee file(s) failed to download")
+        problems.append(f"{info['failed']} attendee file(s) failed to download: "
+                        f"{'; '.join(info.get('download_errors', [])[:5])}")
     if problems and not args.allow_partial:
         raise SystemExit("Refusing to publish partial data — the previous store is "
                          "left in place:\n  - " + "\n  - ".join(problems)
