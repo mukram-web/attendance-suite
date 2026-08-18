@@ -130,7 +130,9 @@ def discover_sessions(svc, attendee_folder_id: str, batches: set[int]) -> tuple:
     out: dict[int, dict] = {b: {} for b in batches}
     errors: list[str] = []
     try:
-        top = live_data._list_children(svc, attendee_folder_id)
+        top = []
+        for fid in live_data._folder_ids(attendee_folder_id):
+            top += live_data._list_children(svc, fid)
     except Exception as e:
         return {b: [] for b in batches}, [f"could not list the sessions drive: {e}"]
 
@@ -162,18 +164,36 @@ def discover_sessions(svc, attendee_folder_id: str, batches: set[int]) -> tuple:
              for b, v in out.items()}, errors)
 
 
-def is_real_class(session: dict, wid_map: dict) -> bool:
+def is_real_class(session: dict, wid_map: dict, batch: int | None = None) -> bool:
     """A class is a session the L2 schedule registers by webinar id — that alone.
     Walkthroughs are provably never registered there, and a title guard must not
     veto an L2-registered session (real topics contain words like 'onboarding'),
-    so the title only raises a visible flag, never excludes."""
-    return session["webinar_id"] in wid_map
+    so the title only raises a visible flag, never excludes.
+
+    When `batch` is given, a webinar L2 registers under OTHER batches only is
+    also rejected: that is a mislabeled folder (B33's webinar has been uploaded
+    into a "B34"-named folder), and using it computes this batch's numbers from
+    another batch's attendees. An L2 row with no parseable batch must not veto."""
+    info = wid_map.get(session["webinar_id"])
+    if info is None:
+        return False
+    if batch is None:
+        return True
+    keys = info[0]
+    return (not keys) or any(num == batch for _track, num in keys)
 
 
-def pick_sessions(sessions: list, wid_map: dict, notes: list) -> tuple:
+def pick_sessions(sessions: list, wid_map: dict, notes: list,
+                  batch: int | None = None) -> tuple:
     """(day_one, latest) — earliest and most recent real class. latest is None
     when the batch has only had one class so far."""
-    real = [s for s in sessions if is_real_class(s, wid_map)]
+    real = [s for s in sessions if is_real_class(s, wid_map, batch)]
+    mislabeled = [s for s in sessions
+                  if s["webinar_id"] in wid_map and not is_real_class(s, wid_map, batch)]
+    for s in mislabeled:
+        notes.append(f"{s['date']} “{s['folder']}” holds webinar "
+                     f"{s['webinar_id']}, which L2 registers under a different "
+                     "batch — skipped as a mislabeled folder")
     if not real:
         return None, None
     day_one = real[0]
@@ -470,7 +490,8 @@ def build(svc, roster_tabs: dict, l2_bytes, attendee_folder_id: str,
         if not roster:
             skipped.append(f"B{b}: roster tab has no Payment column")
             continue
-        day_one, latest = pick_sessions(found.get(b, []), wid_map, skipped_notes := [])
+        day_one, latest = pick_sessions(found.get(b, []), wid_map,
+                                        skipped_notes := [], batch=b)
         skipped.extend(f"B{b}: {note}" for note in skipped_notes)
         if not day_one:
             skipped.append(f"B{b}: no session registered in L2 yet")
