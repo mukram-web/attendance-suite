@@ -512,6 +512,159 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     return out, info
 
 
+def fetch_track_attendees(svc, folder_id, track: str, max_workers: int = 8):
+    """Every attendee report belonging to one programme track (e.g. "BSIAI").
+
+    `fetch_new_attendees` selects folders by which roster sheet already carries
+    which dates — that only works for a programme whose workbook holds session
+    columns. BSIAI has none: its attendance is recomputed from the reports each
+    run, so this simply takes every folder whose name resolves to the requested
+    track, across every configured drive.
+
+    Cheap despite that: downloads are disk-cached by Drive file id, so a re-run
+    touches the network only for genuinely new files.
+
+    Returns (attendee_files, info) with the same info keys the caller's
+    partial-data gate already understands.
+    """
+    import attendance_core as ac
+
+    def keep(name: str) -> bool:
+        return name.lower().startswith("attendee")
+
+    folders = []
+    for fid in _folder_ids(folder_id):
+        for f in _list_children(svc, fid):
+            if f["mimeType"] != _FOLDER_MIME:
+                continue
+            if any(t == track for t, _ in ac._folder_batches(f["name"])):
+                folders.append((f["name"], f["id"]))
+
+    entries, listing_errors = [], []
+    if folders:
+        def _kids(item):
+            name, fid = item
+            try:
+                return name, _list_children(_thread_drive(), fid), None
+            except Exception as e:
+                return name, [], str(e)
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(folders))) as ex:
+            for name, kids, kerr in ex.map(_kids, folders):
+                if kerr:
+                    listing_errors.append(f"{name}: {kerr}")
+                    continue
+                for f in kids:
+                    if f["mimeType"] != _FOLDER_MIME and keep(f["name"]):
+                        entries.append((f"{name}/{f['name']}", f["id"]))
+
+    out, failed, download_errors = [], 0, []
+    if entries:
+        try:
+            os.makedirs(_CACHE_DIR, exist_ok=True)
+        except OSError:
+            pass
+
+        def _dl(e):
+            path, fid = e
+            cpath = os.path.join(_CACHE_DIR, fid)
+            try:
+                with open(cpath, "rb") as fh:
+                    return path, fh.read(), None
+            except OSError:
+                pass
+            try:
+                data = _download_any(_thread_drive(), fid)
+                try:
+                    tmp = cpath + ".tmp"
+                    with open(tmp, "wb") as fh:
+                        fh.write(data)
+                    os.replace(tmp, cpath)
+                except OSError:
+                    pass
+                return path, data, None
+            except Exception as e:
+                return path, None, str(e)
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(entries))) as ex:
+            for path, data, err in ex.map(_dl, entries):
+                if data is None:
+                    failed += 1
+                    download_errors.append(f"{path}: {err}")
+                    continue
+                out.append((path, data))
+
+    info = dict(new_folders=len(folders), files=len(out), failed=failed,
+                skipped_already_marked=0, skipped_no_sheet=0,
+                listing_errors=listing_errors, bad_zips=[],
+                download_errors=download_errors)
+    return out, info
+
+
+def fetch_polls(svc, folder_id, max_workers: int = 8):
+    """Every `poll_<webinarid>_<date>.csv` across the configured drives.
+
+    One name query per drive rather than a walk - there are 1,100+ of them - and
+    the same disk cache the attendee reports use, so a re-run costs nothing.
+    Failures are counted, never raised: a missing poll should cost that session
+    its rating, not the whole refresh.
+    """
+    files, seen = [], set()
+    for did in _folder_ids(folder_id):
+        token = None
+        while True:
+            # both conventions - see polls.name_key
+            kw = dict(q=("(name contains 'poll_' or name contains 'Poll Report') "
+                         "and trashed = false"),
+                      fields="nextPageToken, files(id, name)", pageSize=1000,
+                      pageToken=token, includeItemsFromAllDrives=True,
+                      supportsAllDrives=True)
+            if str(did).startswith("0A"):
+                kw.update(corpora="drive", driveId=did)
+            resp = svc.files().list(**kw).execute()
+            for f in resp.get("files", []):
+                if f["id"] not in seen:
+                    seen.add(f["id"])
+                    files.append(f)
+            token = resp.get("nextPageToken")
+            if not token:
+                break
+
+    out, failed = [], 0
+    if files:
+        try:
+            os.makedirs(_CACHE_DIR, exist_ok=True)
+        except OSError:
+            pass
+
+        def _dl(f):
+            cpath = os.path.join(_CACHE_DIR, f["id"])
+            try:
+                with open(cpath, "rb") as fh:
+                    return f["name"], fh.read(), None
+            except OSError:
+                pass
+            try:
+                data = _download_any(_thread_drive(), f["id"])
+                try:
+                    tmp = cpath + ".tmp"
+                    with open(tmp, "wb") as fh:
+                        fh.write(data)
+                    os.replace(tmp, cpath)
+                except OSError:
+                    pass
+                return f["name"], data, None
+            except Exception as e:
+                return f["name"], None, str(e)
+
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(files))) as ex:
+            for name, data, err in ex.map(_dl, files):
+                if data is None:
+                    failed += 1
+                    continue
+                out.append((name, data))
+    return out, {"found": len(files), "files": len(out), "failed": failed}
+
+
 def load_live():
     """Pull everything the marker needs from Drive.
 

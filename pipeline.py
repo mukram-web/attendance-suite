@@ -46,8 +46,10 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import attendance_core as ac          # noqa: E402
+import bsiai                          # noqa: E402
 import dashboard_core as dc           # noqa: E402
 import data as ddata                  # noqa: E402
+import polls                          # noqa: E402
 import day1_analysis                  # noqa: E402
 import sheets as dsheets              # noqa: E402
 import live_data                      # noqa: E402
@@ -89,6 +91,10 @@ def load_config() -> dict:
         "l2_id": pick("L2_ID", "l2_id"),
         "attendee_folder_id": pick("ATTENDEE_FOLDER_ID", "attendee_folder_id"),
         "store_folder_id": pick("STORE_FOLDER_ID", "store_folder_id"),
+        # Optional: the BSIAI programme's own roster Sheet. Absent -> the BSIAI
+        # section is simply not built, and the app shows its tab as unconfigured.
+        # Like every other id, the Sheet must be shared with the service account.
+        "bsiai_roster_id": pick("BSIAI_ROSTER_ID", "bsiai_roster_id"),
     }
 
     env_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
@@ -152,21 +158,25 @@ def _prepend_intro_sessions(DATA: dict) -> None:
             "present": att, "absent": max(0, stg - att), "total": stg,
             "pct": round(min(100.0, 100 * att / stg), 1),
             "present_only": False, "no_l2": False, "is_intro": True,
+            # the intro call predates the batch and has no feedback poll
+            "rating": None, "rating_n": 0,
         })
 
 
 def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
                 l2_bytes, attendee_names, marked_xlsx_file_id: str,
-                stamps: dict, day1: dict | None = None) -> dict:
+                stamps: dict, day1: dict | None = None,
+                bsiai_section: dict | None = None,
+                ratings: dict | None = None) -> dict:
     """Write attendance.duckdb next to nothing else — one self-contained file."""
     # dashboard DATA/summary (same code path the app used to run at startup)
     wb = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
     tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
             for ws in wb.worksheets}
     wb.close()
-    topics = dsheets.webinar_topic_lookup([(n, None) for n in attendee_names],
-                                          l2_bytes)
-    DATA, summary = ddata.build(tabs, topics)
+    topics, l2_labels = dsheets.webinar_topic_lookup(
+        [(n, None) for n in attendee_names], l2_bytes, with_labels=True)
+    DATA, summary = ddata.build(tabs, topics, l2_labels, ratings)
     _prepend_intro_sessions(DATA)
 
     df = dc.compute(marked_bytes)
@@ -205,6 +215,9 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         "marked_xlsx_file_id": marked_xlsx_file_id,
         "stamps": stamps,
         "day1": day1 or {"batches": [], "skipped": []},
+        # None means "not configured" (no BSIAI_ROSTER_ID). A section whose DATA
+        # is empty means "configured, nothing to show yet". The app distinguishes.
+        "bsiai": bsiai_section,
     }
     con.execute("CREATE TABLE meta (key VARCHAR, value VARCHAR)")
     con.executemany("INSERT INTO meta VALUES (?, ?)",
@@ -324,6 +337,50 @@ def main() -> None:
         except Exception:
             marked_xlsx_file_id = ""
 
+    # BSIAI — a separate programme with its own roster Sheet, its own batch
+    # numbering and no session columns anywhere, so it is computed from the
+    # attendee reports rather than marked into a workbook. Never fatal: a BSIAI
+    # problem must not cost the AI CAP refresh its weekly publish.
+    # Session feedback polls: one small CSV per session, disk-cached like the
+    # attendee reports. Never fatal - a missing poll costs that session its
+    # rating, not the run.
+    print("[5a] Session feedback polls …", flush=True)
+    ratings, ratings_by_wid = {}, {}
+    try:
+        poll_files, pinfo = live_data.fetch_polls(svc, cfg["attendee_folder_id"])
+        ratings, ratings_by_wid = polls.lookup_by_session(poll_files, l2_bytes)
+        print(f"   {pinfo['files']}/{pinfo['found']} poll file(s) · "
+              f"{len(ratings_by_wid)} webinar(s) rated · "
+              f"{len(ratings)} session key(s)")
+    except Exception as e:
+        print(f"   WARNING: poll ratings unavailable ({e}) - sessions show no rating.")
+
+    bsiai_section = None
+    if cfg["bsiai_roster_id"]:
+        print("[5b] BSIAI attendance …", flush=True)
+        try:
+            b_roster, b_stamp = live_data.fetch_sheet_cached(svc, cfg["bsiai_roster_id"])
+            b_files, b_info = live_data.fetch_track_attendees(
+                svc, cfg["attendee_folder_id"], "BSIAI")
+            l2_map = ac.parse_l2(l2_bytes) if l2_bytes else {}
+            B_DATA, b_summary, b_warn = bsiai.analyse(b_roster, b_files, l2_map,
+                                                      ratings_by_wid)
+            bsiai_section = {"DATA": B_DATA, "summary": b_summary,
+                             "warnings": b_warn, "stamp": b_stamp,
+                             "source": (f"BSIAI roster + {b_info['files']} attendee "
+                                        f"file(s) from {b_info['new_folders']} folder(s)")}
+            print(f"   {b_summary['batches']} batch(es) · "
+                  f"{b_summary['enrolled']:,} enrolled · "
+                  f"{b_summary['sessions']} session(s) · {len(b_warn)} warning(s)")
+        except Exception as e:
+            bsiai_section = {"DATA": {}, "summary": {"batches": 0, "enrolled": 0,
+                                                     "active": 0, "sessions": 0},
+                             "warnings": [f"BSIAI build failed: {e}"],
+                             "stamp": "", "source": ""}
+            print(f"   WARNING: BSIAI section failed ({e}) - the tab will say so.")
+    else:
+        print("[5b] BSIAI skipped (no BSIAI_ROSTER_ID configured)", flush=True)
+
     print("[6/8] Building the DuckDB store …", flush=True)
     names = live_data.list_attendee_names(cfg["attendee_folder_id"])
     source = (f"Google Drive — roster, {info['files']} file(s) from "
@@ -333,7 +390,7 @@ def main() -> None:
     stats = build_store(store_path, marked_bytes, report, warnings, source,
                         l2_bytes, names, marked_xlsx_file_id,
                         {"roster": roster_stamp, "l2": l2_stamp, "mode": args.mode},
-                        day1=day1)
+                        day1=day1, bsiai_section=bsiai_section, ratings=ratings)
     size = os.path.getsize(store_path)
     print(f"   {stats['batches']} batches · {stats['students']:,} students · "
           f"{stats['sessions']} sessions · {size / 1e6:.1f} MB")

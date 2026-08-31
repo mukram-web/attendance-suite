@@ -47,7 +47,7 @@ def _hdr_idx(header, *needles):
     return None
 
 
-def webinar_topic_lookup(attendee_files, l2_bytes) -> dict:
+def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False) -> dict:
     """The RELIABLE topic map: join Zoom attendee files ⋈ L2 on **Webinar ID**.
 
     Each attendee file is named `attendee_<WebinarID>_<date>.csv`, and L2 maps
@@ -57,10 +57,13 @@ def webinar_topic_lookup(attendee_files, l2_bytes) -> dict:
     if there are no attendee files or no L2 (e.g. upload mode without a zip).
     """
     import attendance_core as ac
+    import pods
     if not l2_bytes or not attendee_files:
-        return {}
-    wid_map = ac.parse_l2(l2_bytes)              # {webinar_id: (frozenset((track, num)), topic)}
+        return ({}, {}) if with_labels else {}
+    # {webinar_id: (frozenset((track, num)), topic)} (+ {webinar_id: raw batch cell})
+    wid_map, wid_labels = ac.parse_l2(l2_bytes, with_labels=True)
     lookup: dict = {}
+    labels: dict = {}
     for name, _data in attendee_files:
         pf = ac._parse_filename(str(name).split("/")[-1])   # (webinar_id, "YYYY_MM_DD")
         if not pf:
@@ -74,10 +77,29 @@ def webinar_topic_lookup(attendee_files, l2_bytes) -> dict:
         if not topic:
             continue
         mm = f"{int(ymd[5:7]):02d}_{int(ymd[8:10]):02d}"
+        raw = (wid_labels.get(wid) or "").strip()
+        # From B35 a date carries up to eleven sessions, one per domain POD, each
+        # with its own topic. Keying on (batch, date) alone hands all eleven the
+        # first topic it happens to meet - every POD row on B35's 23 Aug read
+        # "Build AI Agents for your Enterprise Part 2". So key on the POD too, and
+        # keep the (batch, date) entry as the fallback for everything pre-B35.
+        pod = pods.from_l2_label(raw) if raw else None
+        pod = "" if pod in (None, pods.WHOLE_BATCH) else pod
         for _track, num in _keys:
-            lookup[(f"B{num}", mm)] = topic          # batch-specific (preferred)
+            # Key on the POD ALWAYS, '' included. A whole-batch session sharing a
+            # date with a domain session would otherwise take whichever topic was
+            # seen first: B35's 16 Aug whole-batch row displayed the Techies
+            # session's name and label.
+            lookup[(f"B{num}", mm, pod)] = topic
+            if raw:
+                labels[(f"B{num}", mm, pod)] = raw
+            lookup.setdefault((f"B{num}", mm), topic)   # batch-specific fallback
+            if raw:
+                labels.setdefault((f"B{num}", mm), raw)
         lookup.setdefault(mm, topic)                 # date-only fallback
-    return lookup
+        if raw:
+            labels.setdefault(mm, raw)
+    return (lookup, labels) if with_labels else lookup
 
 
 def build_l2_lookup(l2_tabs: dict[str, list[list]]) -> dict:

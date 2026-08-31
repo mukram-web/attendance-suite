@@ -25,6 +25,8 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 
+import pods
+from attendance_core import _col_pod   # session column header -> its POD
 from attendance_core import _mmdd  # proven date parser: "4th April", "31st may", "2026_05_31", datetimes
 
 # ── business-rule constants (the only hardcoded things, per spec) ─────────────
@@ -34,6 +36,15 @@ _REFUND_TOKENS = ("refund", "unidentified", "not paid", "cancel",
 
 # Colour bands for attendance pills/bars.
 BAND_HIGH, BAND_MID = 45, 30  # ≥45 green, 30–45 amber, <30 red
+
+# The L2 schedule is the register of what actually ran. A session column whose
+# webinar has no L2 row is NOT shown on the dashboard (owner's rule, 2026-08-29):
+# those are unscheduled/mislabeled folders, and they read as real sessions at 4-9%
+# attendance, dragging a batch's average down by a third. They are still MARKED
+# into the workbook - the roster download keeps the full record - they are just
+# not counted or displayed. Fix a wrongly-hidden session by adding its row to L2,
+# never by flipping this off.
+REQUIRE_L2 = True
 
 # Valid-session thresholds.
 _MIN_MARKED_FRAC = 0.30   # a real session has Present/Absent for >30% of strength
@@ -126,8 +137,22 @@ def _find_header_row(rows) -> int:
     return 0
 
 
+def clean_l2_label(raw) -> str:
+    """Tidy L2's raw 'Batch Name' cell for display without rewording it.
+
+    The sheet is hand-typed, so the same batch appears as 'AI CAP B17 11AM',
+    'AI CAP B17 @ 11AM', 'AI CAP B17  11AM' and even 'AI CAP B17 11:00 AM]'.
+    Collapse whitespace and drop stray edge punctuation; keep everything else,
+    including the time of day — an 11AM and a 7PM session are different
+    sessions, which is the whole reason the label is shown.
+    """
+    s = re.sub(r"\s+", " ", str(raw or "")).strip()
+    return s.strip("[](){},;:-").strip()
+
+
 # ── per-batch build ─────────────────────────────────────────────────────────
-def build_batch(rows: list[list], batch: str, l2_lookup: dict | None) -> dict | None:
+def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
+                l2_labels: dict | None = None, ratings: dict | None = None) -> dict | None:
     """Compute one batch's dashboard object from its raw rows. None if the tab
     doesn't look like a roster (no mail/closing columns) or has no strength."""
     if not rows:
@@ -154,38 +179,101 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None) -> dict | 
         return None
     active = sum(1 for r in enrolled if is_active(_cell(r, pay_col)))
 
+    # POD membership (B35 onwards). The header drifts - 'POD pref', 'POD Pref',
+    # 'POD Prefrence' - and its position moves (B38 has no 'batch name' column),
+    # so it is found by substring like every other column. A batch without one
+    # has no PODs and every session below is a whole-batch session, which is what
+    # keeps every pre-B35 number identical to before.
+    pod_col = _find_col(header, "pod")
+    pod_strength: dict = defaultdict(int)
+    pod_active: dict = defaultdict(int)
+    row_pod: dict = {}
+    pod_guessed = 0
+    if pod_col is not None:
+        for r in enrolled:
+            name, multi = pods.from_roster_cell(_cell(r, pod_col))
+            pod_guessed += bool(multi)
+            name = name or pods.UNKNOWN
+            pod_strength[name] += 1
+            row_pod[id(r)] = name
+            if is_active(_cell(r, pay_col)):
+                pod_active[name] += 1
+
     l2_lookup = l2_lookup or {}
+    l2_labels = l2_labels or {}
+    ratings = ratings or {}
 
     # discover + validate session columns (everything after Closing Type)
     sessions = []
     for c in range(close_col + 1, width):
+        hraw = _cell(header, c)
+        # The marker writes "<date> | <POD>" for a domain session, so the POD has
+        # to be known BEFORE the validity thresholds: a 59-member Data POD could
+        # never clear "30% of the batch marked", and every small POD's session
+        # would be discarded as a broken column.
+        pod = _col_pod(_cell(date_row, c)) or _col_pod(hraw)
+        denom = pod_strength.get(pod, 0) if pod else strength
+        if not denom:
+            continue        # a POD nobody in this batch belongs to
+
+        # Count over the SAME population the denominator uses. Counting every
+        # marked row against a POD-sized denominator is how B37's 22 Aug came to
+        # report 1,631 present out of 571 - 285%.
         present = absent = 0
         for r in enrolled:
+            if pod and row_pod.get(id(r), "") != pod:
+                continue
             v = str(_cell(r, c) or "").strip().lower()
             if v == "present":
                 present += 1
             elif v == "absent":
                 absent += 1
         marked = present + absent
-        if not (marked > _MIN_MARKED_FRAC * strength and present > _MIN_PRESENT_FRAC * strength):
+        if not (marked > _MIN_MARKED_FRAC * denom and present > _MIN_PRESENT_FRAC * denom):
             continue  # un-synced/empty formula column or broken near-empty column
 
         mm = _mmdd(_cell(date_row, c)) or _mmdd(_cell(header, c))
-        hraw = _cell(header, c)
         # a real roster header (topic) is one that ISN'T itself a date
         roster_topic = None if (hraw is None or _mmdd(hraw)) else str(hraw).strip()
-        l2_topic = l2_lookup.get((batch, mm)) or l2_lookup.get(mm)
+        # POD-specific topic first: on a domain date the eleven sessions differ,
+        # and (batch, date) would give them all the same name.
+        l2_topic = (l2_lookup.get((batch, mm, pod))
+                    or l2_lookup.get((batch, mm)) or l2_lookup.get(mm))
         topic = l2_topic or roster_topic or (f"Session on {date_label(mm)}" if mm else "Live session")
+        # How L2 names this session's batch ("AI CAP B35 - Techies", "AI CAP B8 + B22").
+        # The same topic runs across many batches, so the label is what tells two
+        # otherwise identical session names apart. Batch-specific match only —
+        # the date-only fallback would borrow another batch's label.
+        l2_batch = clean_l2_label(l2_labels.get((batch, mm, pod))
+                                  or l2_labels.get((batch, mm)))
 
         sessions.append({
             "col": c, "mm": mm,
             "date_lbl": date_label(mm) or (str(hraw).strip() if hraw else "—"),
             "topic": topic,
-            "present": present, "absent": absent, "total": strength,
-            "pct": round(present / strength * 100, 1),
+            "l2_batch": l2_batch,
+            "pod": pod,
+            # The session's own feedback poll, joined on Webinar ID like the topic.
+            "rating": (rt := ratings.get((batch, mm, pod)) or {}).get("session"),
+            "rating_trainer": rt.get("trainer"),
+            "rating_recommend": rt.get("recommend"),
+            "rating_n": rt.get("responses", 0),
+            "present": present, "absent": max(0, denom - present), "total": denom,
+            "pct": round(present / denom * 100, 1),
             "present_only": absent == 0,
             "no_l2": l2_topic is None,
         })
+
+    # Enforce the L2 rule (see REQUIRE_L2). Counted before dropping so the page can
+    # say how many are hidden rather than silently showing a shorter list.
+    #
+    # Guarded on a NON-EMPTY lookup on purpose. With no L2 loaded at all - the id
+    # unset, the fetch failed, a caller passing None - every session looks "not in
+    # L2" and filtering would blank the entire dashboard. An absent schedule means
+    # "cannot tell", not "nothing ran", so in that case show everything.
+    hidden_no_l2 = sum(1 for s in sessions if s["no_l2"]) if l2_lookup else 0
+    if REQUIRE_L2 and hidden_no_l2:
+        sessions = [s for s in sessions if not s["no_l2"]]
 
     if not sessions:
         return None
@@ -199,11 +287,23 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None) -> dict | 
     groups: dict[str, list] = defaultdict(list)
     for r in enrolled:
         groups[normalize_closing(_cell(r, close_col))].append(r)
+    # A student can only attend their OWN POD's sessions plus the whole-batch
+    # ones, so the denominator is per person. Dividing by every session in the
+    # batch quartered these numbers the moment B35 ran eleven PODs a day.
+    col_pod = {sx["col"]: sx.get("pod", "") for sx in sessions}
     closing = []
     for ctype, grp in groups.items():
-        pres = sum(1 for r in grp for c in valid_cols
-                   if str(_cell(r, c) or "").strip().lower() == "present")
-        att = (pres / (len(grp) * n_valid) * 100) if (grp and n_valid) else 0.0
+        pres = slots = 0
+        for r in grp:
+            rp = row_pod.get(id(r), "")
+            for c in valid_cols:
+                cp = col_pod.get(c, "")
+                if cp and cp != rp:
+                    continue            # a different POD's session
+                slots += 1
+                if str(_cell(r, c) or "").strip().lower() == "present":
+                    pres += 1
+        att = (pres / slots * 100) if slots else 0.0
         closing.append({
             "type": ctype, "count": len(grp),
             "pct": round(len(grp) / strength * 100, 1),
@@ -211,17 +311,63 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None) -> dict | 
         })
     closing.sort(key=lambda c: c["count"], reverse=True)   # biggest channel first
 
-    pcts = [s["pct"] for s in sessions]
+    # One date can now carry eleven sessions, so the batch headline is rolled up
+    # per DATE and weighted by POD size: everyone present across every POD that
+    # ran that date, over the whole batch. That reads as "what share of the batch
+    # showed up this week", and where a date holds a single whole-batch session -
+    # every batch before B35 - it is arithmetically the old number.
+    by_date: dict = {}
+    for sx in sessions:
+        k = sx["mm"] or sx["date_lbl"]
+        d = by_date.setdefault(k, {"mm": sx["mm"], "date_lbl": sx["date_lbl"],
+                                   "present": 0, "total": 0, "n_pods": 0,
+                                   "cols": [], "pods": set(), "whole": False})
+        d["n_pods"] += 1
+        d["cols"].append(sx["col"])
+        if sx.get("pod"):
+            d["pods"].add(sx["pod"])
+        else:
+            d["whole"] = True
+
+    # Counted per STUDENT, not by summing sessions, for two reasons:
+    #  * you cannot be absent from a session you were never invited to - on a day
+    #    when only the Generalist POD met, the other 2,291 students are not
+    #    absentees, and dividing by the whole batch reported 12% for a session
+    #    41% of its POD attended;
+    #  * someone in a POD that met on a day the whole batch also met would
+    #    otherwise be counted twice in the numerator.
+    for d in by_date.values():
+        pres = tot = 0
+        for r in enrolled:
+            rp = row_pod.get(id(r), "")
+            if not (d["whole"] or rp in d["pods"]):
+                continue                     # not invited that day
+            tot += 1
+            if any(str(_cell(r, c) or "").strip().lower() == "present"
+                   for c in d["cols"]):
+                pres += 1                    # attended at least one of their sessions
+        d["present"], d["total"] = pres, tot
+        d["pct"] = round(pres / tot * 100, 1) if tot else 0.0
+        d.pop("cols"); d.pop("pods"); d.pop("whole")
+    dates = sorted(by_date.values(), key=lambda d: d["mm"] or "")
+    dpcts = [d["pct"] for d in dates]
+
     return {
         "code": batch, "strength": strength, "active": active,
         "n_sessions": n_valid,
-        "avg_pct": round(sum(pcts) / len(pcts), 1),
-        "peak": max(pcts), "low": min(pcts),
+        "avg_pct": round(sum(dpcts) / len(dpcts), 1),
+        "peak": max(dpcts), "low": min(dpcts),
         "sessions": sessions, "closing": closing,
+        "hidden_no_l2": hidden_no_l2,
+        "by_date": dates,
+        "pods": {p: {"strength": pod_strength[p], "active": pod_active.get(p, 0)}
+                 for p in sorted(pod_strength)},
+        "pod_guessed": pod_guessed,
     }
 
 
-def build(sheets: dict[str, list[list]], l2_lookup: dict | None = None):
+def build(sheets: dict[str, list[list]], l2_lookup: dict | None = None,
+          l2_labels: dict | None = None, ratings: dict | None = None):
     """Build the full DATA dict + summary from all worksheets. Auto-discovers
     batch tabs; never hardcodes the batch or session list."""
     data = {}
@@ -229,7 +375,7 @@ def build(sheets: dict[str, list[list]], l2_lookup: dict | None = None):
         b = batch_label(tab)
         if not b:
             continue
-        bd = build_batch(rows, b, l2_lookup)
+        bd = build_batch(rows, b, l2_lookup, l2_labels, ratings)
         if bd:
             data[b] = bd
 
