@@ -39,12 +39,34 @@ def _mmdd(v):
             return f'{mn:02d}_{int(mt.group(1).replace("O","0").replace("o","0")):02d}'
     return None
 
+# A session column header is the date, plus the POD when the session was for
+# one domain: "2026_08_23 | Techies". From B35 a single date carries up to
+# eleven different sessions, so the date alone no longer identifies a column -
+# keying on it merged all eleven attendee sets into one, which is how B35's
+# 23 Aug came to report 1,193 present against a 916-member POD.
+POD_SEP = " | "
+
+
+def _col_pod(header):
+    """Session column header -> its POD name, or '' for a whole-batch session."""
+    s = str(header or "")
+    return s.split(POD_SEP, 1)[1].strip() if POD_SEP in s else ""
+
+
+def _col_header(ymd, pod):
+    return f"{ymd}{POD_SEP}{pod}" if pod else ymd
+
+
 def _parse_filename(fname):
     m = re.match(r'attendee_(\d+)_((20\d\d)_(\d{2})_(\d{2}))', fname)
     return (m.group(1), m.group(2)) if m else None
 
 def _track(seg):
     s = seg.lower()
+    # BSIAI first: its folders and L2 rows say 'BSIAI B1', 'BSI AI B3' or a
+    # plain 'BSI B1'. Without this they fall through to CAP and collide head-on
+    # with AI CAP B1/B2 - same key, different programme, silently wrong marks.
+    if re.search('(?<![a-z])bsi', s):  return 'BSIAI'
     if 'ecap' in s or 'e-cap' in s: return 'ECAP'
     if re.search(r'\bus\b', s):      return 'US'
     if 'lcp' in s:                   return 'LCP'
@@ -55,8 +77,11 @@ def extract_batches(text):
     keys = set()
     for seg in re.split(r'&|\band\b', text):
         tr = _track(seg)
-        nums = sorted(set(int(x) for x in re.findall(r'\bB(\d{1,2})\b', seg)) |
-                      set(int(x) for x in re.findall(r'CAP\s+(\d{1,2})\b', seg)))
+        # 'CAP\s*B?' also catches the run-together form the POD rows use
+        # ('AICAPB35, B36-Techies'): there is no word boundary before B35, so
+        # the B pattern alone silently credits the session to B36 only.
+        nums = sorted(set(int(x) for x in re.findall(r'\bB(\d{1,2})\b', seg, re.I)) |
+                      set(int(x) for x in re.findall(r'CAP\s*B?(\d{1,2})\b', seg, re.I)))
         if not nums:
             continue
         is_list  = ('+' in seg) or (',' in seg)
@@ -79,15 +104,23 @@ def _folder_batches(member_path):
     rest = re.sub(r'^\d{4}-\d{2}-\d{2}\s*-\s*', '', folder)
     parts, batch_parts = re.split(r'\s+-\s+', rest), []
     for p in parts:                       # keep leading segments that name batches; stop at topic
-        if re.search(r'\bB\d{1,2}\b|CAP\s+\d{1,2}\b', p): batch_parts.append(p)
+        # Same run-together form extract_batches handles ('AICAPB37- Techies'):
+        # without it this gate rejects the segment, the folder resolves to NO
+        # batch, and the session is never even downloaded - L2 never gets asked.
+        if re.search(r'\bB\d{1,2}\b|CAP\s*B?\d{1,2}\b', p, re.I): batch_parts.append(p)
         else: break
     return extract_batches(' - '.join(batch_parts)) if batch_parts else set()
 
 # ---------------- L2 schedule ----------------
-def parse_l2(l2_bytes):
-    """webinar_id -> (frozenset[(track,num)], topic). Includes combined/range sessions."""
+def parse_l2(l2_bytes, with_labels=False):
+    """webinar_id -> (frozenset[(track,num)], topic). Includes combined/range sessions.
+
+    With `with_labels`, also returns {webinar_id: raw 'Batch Name' cell} so callers
+    can show a session the way L2 names it ('AI CAP B35 - Techies', 'AI CAP B8 + B22')
+    rather than a bare parsed number. The extra map is first-wins per webinar id,
+    exactly like `out`, so the two never disagree."""
     wb = load_workbook(io.BytesIO(l2_bytes), data_only=True)
-    out = {}
+    out, labels = {}, {}
     for ws in wb.worksheets:
         bcol = tcol = wcol = hrow = None
         for r in range(1, min(ws.max_row or 1, 6) + 1):
@@ -101,12 +134,14 @@ def parse_l2(l2_bytes):
         for r in range(hrow + 1, (ws.max_row or hrow) + 1):
             wid = _wid(ws.cell(r, wcol).value)
             if not wid: continue
-            keys = extract_batches(str(ws.cell(r, bcol).value or ''))
+            raw = str(ws.cell(r, bcol).value or '').strip()
+            keys = extract_batches(raw)
             if not keys: continue
             topic = str(ws.cell(r, tcol).value or '').strip() if tcol else ''
             if wid not in out:
                 out[wid] = (frozenset(keys), topic)
-    return out
+                labels[wid] = raw
+    return (out, labels) if with_labels else out
 
 # ---------------- Zoom attendee report ----------------
 def parse_attendees(text):
@@ -192,8 +227,11 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
 
     Returns (output_xlsx_bytes, report_rows, warnings).
     """
+    import pods
+
     wb = load_workbook(io.BytesIO(roster_bytes), data_only=values_only)
-    wid_map = parse_l2(l2_bytes) if l2_bytes else {}
+    wid_map, l2_labels = (parse_l2(l2_bytes, with_labels=True) if l2_bytes
+                          else ({}, {}))
 
     key_sheet = {}
     for name in wb.sheetnames:
@@ -209,8 +247,9 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
         if pf in chosen and '(1)' in name: continue
         chosen[pf] = name
 
-    # accumulate attendee sets per (sheet_name, mmdd), merging multiple files
+    # accumulate attendee sets per (sheet_name, mmdd, POD), merging multiple files
     acc, warnings = {}, []
+    unknown_pods = set()
     for (wid, ymd), info in chosen.items():
         keys, topic = wid_map.get(wid, (None, ''))
         if keys is None:                                 # not in L2 -> recover from folder
@@ -226,32 +265,49 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
             warnings.append(f'Could not read {info}: {e}'); continue
         em, pf, p10 = parse_attendees(text)
         mm = f'{int(ymd[5:7]):02d}_{int(ymd[8:10]):02d}'
+
+        # Which POD is this session for? L2's own label is authoritative; the
+        # folder name is the fallback, exactly as it is for the batch itself.
+        # An unrecognised domain becomes a whole-batch session AND warns - it
+        # must never be silently folded into another POD's denominator.
+        pod = pods.from_l2_label(l2_labels.get(wid)) if l2_labels.get(wid) else None
+        if pod is None:
+            pod = pods.from_folder(info)
+        if pod is None and l2_labels.get(wid):
+            tail = str(l2_labels.get(wid)).split('-')[-1].strip()
+            if tail and tail not in unknown_pods:
+                unknown_pods.add(tail)
+                warnings.append(f'Webinar {wid}: POD "{tail}" not recognised - '
+                                f'counted against the whole batch. Add it to pods._ALIASES.')
+        pod = '' if pod in (None, pods.WHOLE_BATCH) else pod
         targets = [key_sheet[k] for k in keys if k in key_sheet]
         if not targets:
             blist = ', '.join(f'B{n}' if t == 'CAP' else f'{t} B{n}' for t, n in sorted(keys))
             warnings.append(f'Webinar {wid}: batch(es) {blist} not in this roster — left empty (sheets are never created)')
             continue
         for sheet in targets:
-            a = acc.setdefault((sheet, mm), dict(ymd=ymd, topic=topic,
-                                                 em=set(), pf=set(), p10=set()))
+            a = acc.setdefault((sheet, mm, pod), dict(ymd=ymd, topic=topic, pod=pod,
+                                                      em=set(), pf=set(), p10=set()))
             a['em'] |= em; a['pf'] |= pf; a['p10'] |= p10
             if not a['topic']: a['topic'] = topic
 
     # write per sheet
     report = []
-    sheets = sorted({s for (s, _) in acc}, key=lambda n: _sheet_key(n) or ('', 0))
+    sheets = sorted({k[0] for k in acc}, key=lambda n: _sheet_key(n) or ('', 0))
     for sheet in sheets:
         ws = wb[sheet]; hr = _header_row(ws)
         rm = _col(ws, hr, 'registered', 'mail')
         rn = _col(ws, hr, 'registered', 'number')
         wa = _col(ws, hr, 'whatsa');  bc = _col(ws, hr, 'broadcast')
+        pc = _col(ws, hr, 'pod')      # 'POD pref' / 'POD Pref' / 'POD Prefrence'
         if rm is None and rn is None:
             warnings.append(f'Sheet "{sheet}": no Registered mail/number columns — skipped')
             continue
         dmap = {}
         for c in range(11, (ws.max_column or 1) + 1):
-            d = _mmdd(ws.cell(1, c).value) or (_mmdd(ws.cell(2, c).value) if hr == 2 else None)
-            if d: dmap.setdefault(d, c)
+            h1 = ws.cell(1, c).value
+            d = _mmdd(h1) or (_mmdd(ws.cell(2, c).value) if hr == 2 else None)
+            if d: dmap.setdefault((d, _col_pod(h1)), c)
         nxt = _last_used(ws) + 1
         # Real rosters sometimes have merged cells in the body; writing a mark into
         # a merged (non-anchor) cell raises in openpyxl. Unmerge any range that
@@ -260,18 +316,32 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
         for rng in list(ws.merged_cells.ranges):
             if rng.max_row > hr:
                 ws.unmerge_cells(str(rng))
-        for (s, mm) in sorted((k for k in acc if k[0] == sheet), key=lambda k: k[1]):
-            a = acc[(s, mm)]
-            if mm in dmap:
-                ci, kind = dmap[mm], 're-mark'
+        for (s, mm, pod) in sorted((k for k in acc if k[0] == sheet),
+                                   key=lambda k: (k[1], k[2])):
+            a = acc[(s, mm, pod)]
+            if (mm, pod) in dmap:
+                ci, kind = dmap[(mm, pod)], 're-mark'
             else:
                 ci, kind = nxt, 'NEW'; nxt += 1
-                ws.cell(1, ci).value = a['ymd']
+                ws.cell(1, ci).value = _col_header(a['ymd'], pod)
                 if hr == 2 and a['topic']: ws.cell(2, ci).value = a['topic']
-                dmap[mm] = ci
+                dmap[(mm, pod)] = ci
             em, pf, p10 = a['em'], a['pf'], a['p10']
-            pres = tot = 0
+            pres = tot = outside = 0
             for r in range(hr + 1, (ws.max_row or hr) + 1):
+                # A POD session is only for that POD. Marking everyone else
+                # 'Absent' is simply false - they were never invited - and it put
+                # ten wrong Absents against every student in the downloadable
+                # roster the moment a batch ran eleven PODs in a day.
+                if pod and pc:
+                    rp, _multi = pods.from_roster_cell(ws.cell(r, pc).value)
+                    if (rp or pods.UNKNOWN) != pod:
+                        # still worth knowing if they turned up
+                        e0 = _cell_email(ws.cell(r, rm).value) if rm else ''
+                        p0 = _cell_phone(ws.cell(r, rn).value) if rn else ''
+                        if (e0 and e0 in em) or (p0 and p0 in pf):
+                            outside += 1
+                        continue
                 if mode == 'exact':
                     e = _cell_email(ws.cell(r, rm).value) if rm else ''
                     p = _cell_phone(ws.cell(r, rn).value) if rn else ''
@@ -285,7 +355,17 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
                 tot += 1
                 ws.cell(r, ci).value = 'Present' if hit else 'Absent'
                 if hit: pres += 1
+            # A "POD" session most of the batch attended is not a POD session -
+            # either L2 mislabels a whole-batch session, or the domain is wrong.
+            # Loudly, because the numbers look plausible either way.
+            if pod and outside > max(20, pres):
+                warnings.append(
+                    f'{sheet} {a["ymd"]} "{pod}": {outside} attendee(s) matched '
+                    f'students OUTSIDE that POD (vs {pres} inside) - is this really '
+                    f'a POD session, or does L2 label a whole-batch session with a '
+                    f'domain?')
             report.append(dict(batch=sheet, date=a['ymd'], col=get_column_letter(ci),
-                               kind=kind, topic=a['topic'], present=pres, total=tot))
+                               kind=kind, topic=a['topic'], pod=pod,
+                               present=pres, total=tot, outside=outside))
     out = io.BytesIO(); wb.save(out)
     return out.getvalue(), report, warnings

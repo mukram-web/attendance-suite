@@ -57,6 +57,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `day1_template.html` | **used by the live app** to render the Day-1 tab (and by the static site). Not dormant — do not delete. |
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
+| `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
 | `site_build.py`, `site_templates/` | the static-website build. See §7 — it is **wired to deploy**, not inert. |
 
 ## 4. Data sources
@@ -77,6 +78,49 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 itself. Newer batches (B29+) do not — the marker **appends** them to its own copy
 of the workbook and they are never written back to the Sheet. So "the roster has no
 attendance columns" is true of the Sheet and false of the marked store.
+
+### 4b. BSIAI — the second programme (added 2026-08-28)
+
+BSIAI is **not** AI CAP with different numbers; it is a separate programme that
+shares only the L2 schedule and the attendee drives.
+
+| | AI CAP | BSIAI |
+|---|---|---|
+| roster | Master Batch Rosters, one tab per batch | its own Sheet (`BSIAI_ROSTER_ID`), batch read from a **`Batch` column**, not the tab name |
+| status columns | `Payment` + `Close Type` | **only `Refund`** — so no closing-type panel, and Active = not refunded |
+| session columns | in the workbook / appended by the marker | **none, ever** — attendance is recomputed from the reports each run |
+| session gate | **L2 only** for display since 2026-08-29 (§5.6); still falls back to the folder name when deciding what to *mark* | **L2 only** everywhere — no L2 row, no session |
+
+Things that will trip you up:
+
+1. **`_track()` must classify BSIAI before CAP.** Its folders read `BSI B1`,
+   `bsi b2`, `BSIAI B1`; L2 reads `BSIAI B1`. Without the BSIAI branch every one
+   of them parses to `('CAP', 1)` — the same key as AI CAP B1. Verified: adding
+   the track moved exactly 25 of 1,188 L2 webinars, all to BSIAI, none away.
+2. **Batch numbers carry group suffixes in the roster only** — `BSIAI B1GA`,
+   `BSI B2W1/W2/W3`. `bsiai.batch_num` folds them into the parent batch; the
+   shared `extract_batches` cannot read them and is not asked to.
+3. **Folder names are lowercase on one drive.** The word-boundary batch-number pattern was case-sensitive
+   in both `extract_batches` and `_folder_batches`; both now pass `re.I`.
+   Verified across all 1,048 top-level folders: exactly 7 changed, all `bsi b2`.
+4. **The same session sits on both Shared Drives** ("Weekly Sessions Files" as
+   `BSI B1`, "Zoom extracts" as `BSIAI B1`) and sometimes twice on one of them.
+   `sessions_from_files` keys on webinar id and keeps the copy with the most
+   attendees — the copies differ by a row or two.
+5. **`MM-AI B1` is a third programme**, not BSIAI. `batch_num` returns None for
+   it. It has no session folders on Drive at all.
+6. **Three tabs are excluded on purpose** (owner-confirmed 2026-08-29), listed in
+   `bsiai._IGNORED_TABS`: `failed BSI B1` (a Q&A group split), `Sheet8` (~466
+   contacts with no Batch column) and `NEXT BATCH 15K MMAI`. They are skipped
+   **silently**; every other unusable tab still warns, which is what stops a real
+   roster tab from disappearing unnoticed. Revisit `Sheet8` if a Batch column is
+   ever added - those rows would then join a denominator and move the numbers.
+
+Config: `BSIAI_ROSTER_ID` (repo secret) or `bsiai_roster_id` under `[drive]`.
+Absent → the pipeline skips the section entirely and the tab says so; the AI CAP
+refresh is never affected. A BSIAI failure is caught and reported in the tab
+rather than failing the run.
+
 
 ## 5. Invariants — break these and the numbers go silently wrong
 
@@ -104,17 +148,29 @@ attendance columns" is true of the Sheet and false of the marked store.
    Marketing walkthroughs share the batch folder naming but are never in L2.
    A title guard may FLAG but must never VETO (real topics contain "onboarding").
    Verified across B31–B35, 28 sessions, zero false negatives.
-6. **Google's Sheet→xlsx export is non-deterministic** — the same unchanged sheet
+6. **L2 is the register of what ran — the dashboard shows nothing else.**
+   `data.REQUIRE_L2` (owner's rule, 2026-08-29) drops any session column whose
+   webinar has no L2 row. It applies to **both** programmes: BSIAI never admitted
+   one, and AI CAP stopped falling back to the folder name for display. The
+   columns are still MARKED into the workbook — the roster download keeps the
+   full record — they are just not counted or shown, and the sessions panel says
+   how many are hidden. It engages **only when a non-empty L2 lookup exists**: with
+   no schedule loaded every session would look unregistered and the page would
+   blank, so an absent L2 means "cannot tell", not "nothing ran". Measured on
+   2026-08-29: 29 of 440 AI CAP sessions were unregistered, and hiding them moved
+   B35 27.1→39.9%, B36 25.5→40.3%, B37 28.6→43.1%. **To restore a wrongly hidden
+   session, add its row to L2 — never by turning the flag off.**
+7. **Google's Sheet→xlsx export is non-deterministic** — the same unchanged sheet
    exports to different bytes each time, so `live_data.fetch_sheet_cached` keys on
    Drive `modifiedTime`. The app's own `_disk_memo` caches still hash bytes; they
    are only safe because they sit downstream of that sheet cache.
-7. **Service accounts have zero Drive storage.** They can only upload into a
+8. **Service accounts have zero Drive storage.** They can only upload into a
    **Shared Drive** (as Content Manager). A My Drive folder shared as Editor fails
    with `storageQuotaExceeded`, whatever role you grant. The SA also cannot create
    a Shared Drive itself.
-8. **Never `next(ws.iter_rows(...))` unguarded** — people add empty scratch tabs
+9. **Never `next(ws.iter_rows(...))` unguarded** — people add empty scratch tabs
    (a "Pivot Table 2" tab once crashed the whole build).
-9. **The pipeline refuses to publish partial data.** A failed folder listing or
+10. **The pipeline refuses to publish partial data.** A failed folder listing or
    download, or a day-1 analysis that produced nothing, exits non-zero and leaves
    last week's store intact. `--allow-partial` overrides it; the workflow
    deliberately never passes that flag. Keep it this way — a green run that
@@ -194,9 +250,10 @@ attendance columns" is true of the Sheet and false of the marked store.
 3. **Retire the old `attendance-marker` Streamlit app** — previous design, still
    deployed, causes confusion.
 4. **Combined-batch sessions are missing from L2.** e.g. `AI CAP B1 - AI CAP B22`
-   (19 Jun) and `AI CAP B10+B17` (23 Jul) have no L2 entry, so they show "no L2
-   match" and — because the % is computed against one batch's full strength —
-   they unfairly drag that batch's average down (B17's 23 Jul reads 4.4%).
+   (19 Jun) and `AI CAP B10+B17` (23 Jul) have no L2 entry. Since 2026-08-29 they
+   no longer drag averages down — `REQUIRE_L2` hides them (§5.6) — but they are
+   still **absent from the dashboard**, which is only right if they genuinely did
+   not run for that batch. Adding the missing L2 rows is still the real fix.
 5. **`intro_attendance.json` stops at B31**, so B32–B35 have no "Intro call" row.
    Refreshing it means re-pulling from the "L2 customer" sheet.
 6. **The roster is ~8.2 MB and Google refuses to export a Sheet over 10 MB as

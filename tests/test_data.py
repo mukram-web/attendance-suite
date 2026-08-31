@@ -160,8 +160,27 @@ class TestBuildBatch(unittest.TestCase):
         s = {x["mm"]: x for x in b["sessions"]}
         self.assertEqual(s["04_04"]["topic"], "L2 Topic A")   # L2 wins over roster header
         self.assertFalse(s["04_04"]["no_l2"])
-        self.assertEqual(s["04_05"]["topic"], "Session on 5 Apr")  # no L2, header is a date -> fallback
-        self.assertTrue(s["04_05"]["no_l2"])
+        # REQUIRE_L2: a session the schedule does not register is HIDDEN, not shown
+        # under a "Session on 5 Apr" placeholder. The count is kept so the page can
+        # say one was withheld.
+        self.assertNotIn("04_05", s)
+        self.assertEqual(b["hidden_no_l2"], 1)
+        self.assertEqual(b["n_sessions"], 1)
+
+    def test_no_l2_sheet_at_all_shows_everything(self):
+        """An absent schedule means "cannot tell", not "nothing ran". Filtering on
+        an empty lookup would blank the whole dashboard the moment L2 fails to
+        load, so the rule only engages when there is a schedule to check against."""
+        rows = make_tab(
+            ten_students(["Present"] * 6 + ["Absent"] * 4,
+                         ["Present"] * 6 + ["Absent"] * 4),
+            session_dates=["2026_04_04", "2026_04_05"],
+            session_topics=["2026_04_04", "2026_04_05"],
+        )
+        for empty in (None, {}):
+            b = data.build_batch(rows, "B17", empty)
+            self.assertEqual(b["n_sessions"], 2, f"lookup={empty!r}")
+            self.assertEqual(b["hidden_no_l2"], 0)
 
     def test_l2_join_by_mm_when_not_per_batch(self):
         rows = make_tab(

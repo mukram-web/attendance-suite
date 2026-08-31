@@ -124,8 +124,9 @@ def _build_dashboard_impl(roster_bytes, attendee_names, l2_bytes):
     tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
             for ws in wb.worksheets}
     wb.close()
-    topics = dsheets.webinar_topic_lookup([(n, None) for n in attendee_names], l2_bytes)
-    DATA, summary = ddata.build(tabs, topics)
+    topics, l2_labels = dsheets.webinar_topic_lookup(
+        [(n, None) for n in attendee_names], l2_bytes, with_labels=True)
+    DATA, summary = ddata.build(tabs, topics, l2_labels)
     _prepend_intro_sessions(DATA)
     return DATA, summary
 
@@ -154,6 +155,8 @@ def _prepend_intro_sessions(DATA: dict) -> None:
             "present": att, "absent": max(0, stg - att), "total": stg,
             "pct": round(min(100.0, 100 * att / stg), 1),
             "present_only": False, "no_l2": False, "is_intro": True,
+            # the intro call predates the batch and has no feedback poll
+            "rating": None, "rating_n": 0,
         })
 
 
@@ -530,8 +533,9 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-tab_dash, tab_roster, tab_day1 = st.tabs(
-    ["📊 Dashboard", "📋 Roster (marked attendance)", "🎯 Day-1 analysis"]
+tab_dash, tab_roster, tab_day1, tab_bsiai = st.tabs(
+    ["📊 Dashboard", "📋 Roster (marked attendance)", "🎯 Day-1 analysis",
+     "🧩 BSIAI"]
 )
 
 # ============================ TAB 1 — DASHBOARD ==============================
@@ -645,3 +649,42 @@ with tab_day1:
         # Measured: ~3.3k px of fixed chrome + ~1.15k per batch of chart rows.
         _components.html(_tpl.replace("__DATA__", _blob),
                          height=3350 + 1150 * len(_sel), scrolling=True)
+# ============================ TAB 4 - BSIAI ==================================
+with tab_bsiai:
+    st.caption("The BSIAI programme. Separate roster, separate batch numbering - "
+               "a session counts only once the L2 schedule lists its webinar.")
+
+    _b = store.get("bsiai") if store_mode else None
+
+    if not store_mode:
+        st.info("The BSIAI tab reads the prebuilt store. It is empty in upload / "
+                "legacy-live mode because BSIAI's roster is a different Sheet that "
+                "the app does not fetch at runtime.")
+    elif _b is None:
+        st.warning(
+            "**BSIAI is not configured yet.** Add `BSIAI_ROSTER_ID` (repo secret, "
+            "or `bsiai_roster_id` under `[drive]` in secrets.toml) pointing at the "
+            "BSIAI roster Sheet, and share that Sheet with the service account. "
+            "The next refresh will fill this tab in."
+        )
+    elif not _b.get("DATA"):
+        st.warning("BSIAI is configured but produced no batches in the last refresh.")
+        for _w in _b.get("warnings", [])[:20]:
+            st.caption("- " + str(_w))
+    else:
+        _note = (f"\U0001F7E2 Data as of {store['generated_at']} - {_b.get('source','')}"
+                 .strip(" -"))
+        dash_view.render(
+            _b["DATA"], _b["summary"], _note, key="bsiai_batch",
+            # BSIAI has no Close Type to slice by, so the same panel carries the
+            # question its data CAN answer: how much of the course each learner
+            # actually attends. A 55% average hides very different cohorts.
+            show_closing=True,
+            closing_title="Engagement",
+            closing_sub=("bar = share of active learners · pill = that group's "
+                         "own attendance rate"))
+        _w = _b.get("warnings") or []
+        if _w:
+            with st.expander(f"Skipped / warnings ({len(_w)})"):
+                for _line in _w:
+                    st.text("- " + str(_line))
