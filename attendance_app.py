@@ -16,6 +16,7 @@ Run locally:   streamlit run attendance_app.py
 """
 from __future__ import annotations
 import hashlib
+import hmac
 import io
 import json
 import pickle
@@ -34,6 +35,64 @@ import dash_view              # Plotly drill-down dashboard UI
 st.set_page_config(page_title="Be10X Attendance", page_icon="📊", layout="wide")
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+# ───────────────────────── password gate ─────────────────────────────────────
+# This app is reachable by anyone with the link, and its Roster tab shows student
+# emails and phone numbers. Everything below — including downloading the store —
+# happens only after this returns, so an unauthenticated visitor never causes the
+# PII to be fetched, let alone rendered.
+#
+# One SHARED password, read from secrets. It is a deterrent against a stray link,
+# not real authentication: it cannot tell users apart, cannot be revoked for one
+# person, and is only as private as the least careful person it is given to. For
+# genuine access control use Streamlit Cloud's own viewer allow-list
+# (Settings -> Sharing), which authenticates against real accounts. See §6.
+_PASSWORD_KEY = "app_password"
+
+
+def _password_ok() -> None:
+    """Stop the script unless this session has entered the right password.
+
+    Fails CLOSED: with no password configured nobody gets in. An unset secret is
+    far more likely to mean "not set up yet" than "deliberately public", and the
+    failure mode of guessing wrong is publishing the roster."""
+    if st.session_state.get("_authed"):
+        return
+    try:
+        expected = str(st.secrets.get(_PASSWORD_KEY, "") or "")
+    except Exception:            # no secrets file at all
+        expected = ""
+
+    st.title("📊 Be10X — AI CAP Attendance")
+    if not expected:
+        st.error(
+            f"**No `{_PASSWORD_KEY}` is configured, so the app is locked.** "
+            "Add it to the app's secrets (Streamlit Cloud: Manage app → Settings → "
+            f"Secrets) as `{_PASSWORD_KEY} = \"your-password\"`, or to "
+            "`.streamlit/secrets.toml` when running locally."
+        )
+        st.stop()
+
+    def _submit():
+        # compare_digest keeps the check constant-time, and the plaintext is
+        # dropped from session state the moment it has been used.
+        if hmac.compare_digest(st.session_state.get("_pw", ""), expected):
+            st.session_state["_authed"] = True
+        else:
+            st.session_state["_authed"] = False
+        st.session_state.pop("_pw", None)
+
+    st.text_input("Password", type="password", key="_pw", on_change=_submit,
+                  placeholder="Enter the password and press Enter")
+    if st.session_state.get("_authed") is False:
+        st.error("Incorrect password.")
+    st.caption("Ask the AI CAP team for access.")
+    st.stop()
+
+
+_password_ok()
+
+
 
 
 # ───────────────────────────── cached heavy work ─────────────────────────────

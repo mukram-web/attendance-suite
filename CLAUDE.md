@@ -227,6 +227,25 @@ Things that will trip you up:
 
 ## 6. Security — THIS REPOSITORY IS PUBLIC
 
+**The app is behind a shared password** (added 2026-09-01). `attendance_app.py`
+calls `_password_ok()` immediately after `set_page_config`, before the store is
+downloaded — so an unauthenticated visitor never causes the PII to be fetched,
+let alone rendered. It reads `app_password` from secrets and **fails CLOSED**: no
+secret, no access, because an unset value far more likely means "not set up yet"
+than "deliberately public".
+
+It is a deterrent, not authentication: one shared string cannot tell users apart,
+cannot be revoked for one person, and is only as private as the least careful
+person holding it. For real access control use Streamlit Cloud's viewer
+allow-list (Manage app -> Settings -> Sharing), which authenticates against real
+Google accounts; the two compose fine.
+
+Set it in **two** places, they are separate stores:
+  - deployed: Streamlit Cloud -> Manage app -> Settings -> Secrets
+  - local:    `.streamlit/secrets.toml`, as a TOML **top-level** key — it must sit
+              ABOVE the first `[section]` header or it silently becomes part of
+              that section and `st.secrets.get("app_password")` returns "".
+
 - The roster, the attendee CSVs and `attendance.duckdb` all contain **student
   emails and phone numbers**. None of it may be committed.
 - `.gitignore` covers `*.json` (with an exception for the aggregates-only
