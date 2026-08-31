@@ -23,7 +23,8 @@ The store schema (attendance.duckdb):
   meta(key, value)       — JSON blobs: DATA, summary, report, warnings, source,
                            generated_at, batches, sheet_map, marked_xlsx_file_id,
                            day1 (the Day-1 analysis for the newest batches —
-                           aggregates only)
+                           aggregates only), forecast (predicted attendance for
+                           sessions that have not run yet — aggregates only)
   compute                — dashboard_core.compute() table (per batch × session)
   grid_<batch>           — roster_grid() per batch (the Roster tab, incl. PII —
                            the store must stay in a PRIVATE Drive folder)
@@ -51,12 +52,19 @@ import dashboard_core as dc           # noqa: E402
 import data as ddata                  # noqa: E402
 import polls                          # noqa: E402
 import day1_analysis                  # noqa: E402
+import forecast                       # noqa: E402
 import sheets as dsheets              # noqa: E402
 import live_data                      # noqa: E402
 
 # How many of the newest batches the day-1 dashboard covers. The window rolls by
 # itself: a new batch tab joins, the oldest drops off.
 DAY1_BATCHES = 4
+
+# How far ahead the forecast runs. Eight weeks is where the backtest still holds
+# under ~13% MAPE and the curriculum sheet is actually filled in; past that the
+# schedule thins out and the error climbs, so forecasting further would be
+# confident-looking noise.
+FORECAST_WEEKS = 8
 
 IST = timezone(timedelta(hours=5, minutes=30))
 STORE_NAME = "attendance.duckdb"
@@ -95,6 +103,11 @@ def load_config() -> dict:
         # section is simply not built, and the app shows its tab as unconfigured.
         # Like every other id, the Sheet must be shared with the service account.
         "bsiai_roster_id": pick("BSIAI_ROSTER_ID", "bsiai_roster_id"),
+        # Optional: the Master Curriculum Schedule Sheet — what is PLANNED, one
+        # tab per pod. Absent -> no forecast section and the tab says so. Note
+        # this Sheet is owned outside the team that owns the roster, so sharing
+        # it with the service account is a separate step that is easy to forget.
+        "curriculum_id": pick("CURRICULUM_ID", "curriculum_id"),
     }
 
     env_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
@@ -167,7 +180,8 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
                 l2_bytes, attendee_names, marked_xlsx_file_id: str,
                 stamps: dict, day1: dict | None = None,
                 bsiai_section: dict | None = None,
-                ratings: dict | None = None) -> dict:
+                ratings: dict | None = None,
+                curric_tabs: dict | None = None) -> dict:
     """Write attendance.duckdb next to nothing else — one self-contained file."""
     # dashboard DATA/summary (same code path the app used to run at startup)
     wb = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
@@ -178,6 +192,19 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         [(n, None) for n in attendee_names], l2_bytes, with_labels=True)
     DATA, summary = ddata.build(tabs, topics, l2_labels, ratings)
     _prepend_intro_sessions(DATA)
+
+    # Forecast for sessions that have not run yet. Built HERE because it needs the
+    # finished DATA and nothing else — no extra fetch, and the numbers can never
+    # disagree with the dashboard they sit beside. None means "not configured";
+    # a section carrying only warnings means "configured, could not build".
+    forecast_section = None
+    if curric_tabs is not None:
+        try:
+            forecast_section = forecast.build(DATA, curric_tabs,
+                                              datetime.now(IST).date(),
+                                              horizon_weeks=FORECAST_WEEKS)
+        except Exception as e:
+            forecast_section = forecast.empty_result(f"forecast build failed: {e}")
 
     df = dc.compute(marked_bytes)
     smap = dc.batch_sheet_map(marked_bytes)
@@ -215,6 +242,10 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         "marked_xlsx_file_id": marked_xlsx_file_id,
         "stamps": stamps,
         "day1": day1 or {"batches": [], "skipped": []},
+        # None = no CURRICULUM_ID configured. A section present but with empty
+        # `sessions` means it was configured and produced nothing — the app says
+        # which, because "not set up" and "set up but broken" need different fixes.
+        "forecast": forecast_section,
         # None means "not configured" (no BSIAI_ROSTER_ID). A section whose DATA
         # is empty means "configured, nothing to show yet". The app distinguishes.
         "bsiai": bsiai_section,
@@ -381,6 +412,27 @@ def main() -> None:
     else:
         print("[5b] BSIAI skipped (no BSIAI_ROSTER_ID configured)", flush=True)
 
+    # The Master Curriculum Schedule — what is PLANNED, one tab per pod. Read as
+    # xlsx like every other Sheet so the same modifiedTime cache applies.
+    # A failure here must never sink the run: the forecast is an extra, and last
+    # week's dashboard is worth far more than a red build over a missing schedule.
+    curric_tabs = None
+    if cfg["curriculum_id"]:
+        print("[5c] Curriculum schedule …", flush=True)
+        try:
+            c_bytes, _c_stamp = live_data.fetch_sheet_cached(svc, cfg["curriculum_id"])
+            cwb = load_workbook(io.BytesIO(c_bytes), read_only=True, data_only=True)
+            curric_tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
+                           for ws in cwb.worksheets}
+            cwb.close()
+            print(f"   {len(curric_tabs)} tab(s)")
+        except Exception as e:
+            curric_tabs = {}          # {} = configured but unreadable; None = unset
+            print(f"   WARNING: curriculum unavailable ({e}) - the Forecast tab "
+                  "will say so.")
+    else:
+        print("[5c] Forecast skipped (no CURRICULUM_ID configured)", flush=True)
+
     print("[6/8] Building the DuckDB store …", flush=True)
     names = live_data.list_attendee_names(cfg["attendee_folder_id"])
     source = (f"Google Drive — roster, {info['files']} file(s) from "
@@ -390,7 +442,8 @@ def main() -> None:
     stats = build_store(store_path, marked_bytes, report, warnings, source,
                         l2_bytes, names, marked_xlsx_file_id,
                         {"roster": roster_stamp, "l2": l2_stamp, "mode": args.mode},
-                        day1=day1, bsiai_section=bsiai_section, ratings=ratings)
+                        day1=day1, bsiai_section=bsiai_section, ratings=ratings,
+                        curric_tabs=curric_tabs)
     size = os.path.getsize(store_path)
     print(f"   {stats['batches']} batches · {stats['students']:,} students · "
           f"{stats['sessions']} sessions · {size / 1e6:.1f} MB")

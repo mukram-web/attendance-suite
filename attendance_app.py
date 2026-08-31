@@ -533,9 +533,9 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-tab_dash, tab_roster, tab_day1, tab_bsiai = st.tabs(
+tab_dash, tab_roster, tab_day1, tab_fcst, tab_bsiai = st.tabs(
     ["📊 Dashboard", "📋 Roster (marked attendance)", "🎯 Day-1 analysis",
-     "🧩 BSIAI"]
+     "🔮 Forecast", "🧩 BSIAI"]
 )
 
 # ============================ TAB 1 — DASHBOARD ==============================
@@ -649,7 +649,190 @@ with tab_day1:
         # Measured: ~3.3k px of fixed chrome + ~1.15k per batch of chart rows.
         _components.html(_tpl.replace("__DATA__", _blob),
                          height=3350 + 1150 * len(_sel), scrolling=True)
-# ============================ TAB 4 - BSIAI ==================================
+# ========================== TAB 4 — FORECAST =================================
+# Predicted attendance for sessions that have not run yet, built by pipeline.py
+# from the dashboard's own DATA plus the Master Curriculum Schedule. Aggregates
+# only. Everything shown here is a PREDICTION — the copy says so in every place
+# a number could otherwise be mistaken for a measurement.
+with tab_fcst:
+    _f = (store or {}).get("forecast") if store_mode else None
+
+    if not store_mode:
+        st.info("The Forecast tab reads the prebuilt store. It is empty in "
+                "upload / legacy-live mode because the curriculum schedule is a "
+                "separate Sheet the app does not fetch at runtime.")
+    elif _f is None:
+        st.warning(
+            "**The forecast is not configured yet.** Add `CURRICULUM_ID` (repo "
+            "secret, or `curriculum_id` under `[drive]` in secrets.toml) pointing "
+            "at the Master Curriculum Schedule, and share that Sheet with the "
+            "service account. The next refresh will fill this tab in."
+        )
+    elif not _f.get("sessions"):
+        st.warning("The forecast produced no sessions in the last refresh.")
+        for _w in _f.get("warnings", []):
+            st.caption("• " + str(_w))
+    else:
+        import pandas as _pd
+
+        _acc = _f.get("accuracy") or {}
+        _rows = _f["sessions"]
+
+        st.caption(
+            f"Predicted attendance for the next {_f['horizon_weeks']} weeks, from "
+            f"the batch's own attendance so far and the decay curve measured "
+            f"across every past batch. Built {store['generated_at']}."
+        )
+
+        m1, m2, m3, m4 = st.columns(4)
+        # Count SESSIONS, not per-batch rows: one session that three batches sit
+        # in is one thing to run and staff, not three. The rows are still there
+        # in the detail table and the full CSV.
+        m1.metric("Sessions ahead", f"{len(_f.get('by_session') or []):,}",
+                  help=f"{len(_rows):,} batch-slots across them — a session that "
+                       "several batches attend counts once here.")
+        m2.metric("Predicted attendees", f"{sum(r['pred'] for r in _rows):,}")
+        if _acc.get("mape_1_4wk") is not None:
+            m3.metric("Typical error, 1–4 wks", f"±{_acc['mape_1_4wk']}%",
+                      help="Mean absolute % error on headcount, measured by "
+                           "replaying every past batch: fit on what was known at "
+                           "the time, score against what actually happened.")
+        if _acc.get("baseline_mape_1_4wk") is not None:
+            m4.metric("Naive baseline", f"±{_acc['baseline_mape_1_4wk']}%",
+                      help="What you would get by assuming the next session "
+                           "repeats the last one's attendance rate. The model is "
+                           "only worth having while it beats this.")
+
+        for _w in _f.get("warnings", []):
+            st.warning(str(_w))
+
+        # ── every session, batch-wise and total ──────────────────────────────
+        # One row per SESSION with a column per batch, because that is the unit
+        # the programme is staffed and briefed in: "Build Your Marketing OS on
+        # 6 Sep draws ~230 across B35/B36/B37", not three unrelated numbers.
+        st.subheader("Every session — batch-wise and total")
+        _sess = _f.get("by_session") or []
+        _all_b = sorted({b for s in _sess for b in s["batches"]}, key=dc.batch_key)
+
+        # All three filters are multiselects: they are type-to-search and apply on
+        # selection. A free-text box would only commit on Enter, which reads as a
+        # broken filter to anyone who types and then looks straight at the table.
+        c1, c2, c3 = st.columns([2, 2, 3])
+        _fdate = c1.multiselect("Date", list(dict.fromkeys(
+            _pd.to_datetime([s["date"] for s in _sess]).strftime("%a %d %b"))),
+            key="fcst_date")
+        _fpod = c2.multiselect("Pod", sorted({s["pod"] for s in _sess}),
+                               key="fcst_pod")
+        _ftopic = c3.multiselect("Topic — type to search",
+                                 sorted({s["topic"] for s in _sess}),
+                                 key="fcst_topic")
+
+        _v = _sess
+        if _fpod:
+            _v = [s for s in _v if s["pod"] in _fpod]
+        if _ftopic:
+            _v = [s for s in _v if s["topic"] in _ftopic]
+        _tbl = []
+        for s in _v:
+            _lbl = _pd.to_datetime(s["date"]).strftime("%a %d %b")
+            if _fdate and _lbl not in _fdate:
+                continue
+            _r = {"Date": _lbl, "Pod": s["pod"], "Topic": s["topic"],
+                  "Trainer": s["trainer"] or "—"}
+            for b in _all_b:
+                _pb = s["per_batch"].get(b)
+                _r[b] = _pb["pred"] if _pb else None
+            _r["TOTAL"] = s["pred"]
+            _r["Range"] = f"{s['lo']:,} – {s['hi']:,}"
+            _r["Of"] = s["denom"]
+            _r["%"] = s["pred_pct"]
+            _r["≈"] = "≈" if s["any_assumed"] else ""
+            _tbl.append(_r)
+
+        if not _tbl:
+            st.info("No sessions match those filters.")
+        else:
+            _tdf = _pd.DataFrame(_tbl)
+            st.dataframe(
+                _tdf, width='stretch', hide_index=True, height=520,
+                column_config={
+                    **{b: st.column_config.NumberColumn(b, format="%d", width="small")
+                       for b in _all_b},
+                    "TOTAL": st.column_config.NumberColumn(
+                        "TOTAL", format="%d",
+                        help="Sum across the batches running this session"),
+                    "Of": st.column_config.NumberColumn(
+                        "Of", format="%d",
+                        help="Combined size of the groups invited"),
+                    "%": st.column_config.NumberColumn("%", format="%.1f%%"),
+                    "≈": st.column_config.TextColumn(
+                        "≈", width="small",
+                        help="At least one batch here has not started, so its "
+                             "size is assumed rather than measured"),
+                })
+            st.caption(
+                f"Showing **{len(_tbl)}** of {len(_sess)} sessions · "
+                f"**{sum(r['TOTAL'] for r in _tbl):,}** predicted attendees. "
+                "Blank cell = that batch is not scheduled for this session. "
+                "The range widens for dates further out, and totals add each "
+                "batch's range rather than assuming their errors cancel — "
+                "batches sharing a date also share their bad days.")
+
+        _c1, _c2 = st.columns(2)
+        _c1.download_button(
+            "⬇️ Sessions, batch-wise (.csv)",
+            data=(_pd.DataFrame(_tbl).to_csv(index=False).encode("utf-8")
+                  if _tbl else b""),
+            file_name=f"forecast_by_session_{_f.get('generated_for','')}.csv",
+            mime="text/csv", key="dl_fcst_sess", disabled=not _tbl)
+        _c2.download_button(
+            "⬇️ Full detail, one row per batch (.csv)",
+            data=_pd.DataFrame(_rows).to_csv(index=False).encode("utf-8"),
+            file_name=f"attendance_forecast_{_f.get('generated_for','')}.csv",
+            mime="text/csv", key="dl_fcst")
+
+        with st.expander("How this is calculated, and how much to trust it"):
+            st.markdown(
+                "**predicted = group size × decay curve(week) × batch offset × "
+                "pod multiplier**\n\n"
+                "- **Decay curve** — attendance against weeks-since-batch-start, "
+                "pooled over every past batch. The shape is very stable: batches "
+                "open near 50% and fall about 10% a week.\n"
+                "- **Batch offset** — how this batch is actually tracking against "
+                "that curve. A batch running cold shows up here first.\n"
+                "- **Pod multiplier** — how a pod draws relative to its own "
+                "batch on the same day. **This is the weak layer**: the pod split "
+                "only began in late Aug 2026, so it rests on few sessions and is "
+                "shrunk toward the batch average.\n\n"
+                "Accuracy is re-measured on live data every refresh by replaying "
+                "history, so if the model stops working this page will say so.")
+            _cA, _cB = st.columns(2)
+            with _cA:
+                st.caption("**Error by weeks ahead** (measured)")
+                _mh = _acc.get("mape_by_horizon") or {}
+                if _mh:
+                    st.dataframe(_pd.DataFrame(
+                        {"Weeks ahead": list(_mh), "Error ±%": list(_mh.values())}),
+                        width='stretch', hide_index=True, height=240)
+            with _cB:
+                st.caption("**Pod multipliers** (>1 attends more than its batch)")
+                _pmd = _f.get("pod_multiplier") or {}
+                if _pmd:
+                    st.dataframe(_pd.DataFrame(
+                        [{"Pod": k, "×": v["mult"], "Sessions seen": v["n"]}
+                         for k, v in sorted(_pmd.items(),
+                                            key=lambda kv: -kv[1]["mult"])]),
+                        width='stretch', hide_index=True, height=240)
+            st.caption("**Batch offset** — ×1.00 is exactly on the curve; "
+                       "below 1 means that batch is running cold")
+            _bo = _f.get("batch_offset") or {}
+            if _bo:
+                st.dataframe(_pd.DataFrame(
+                    [{"Batch": k, "×": v} for k, v in sorted(
+                        _bo.items(), key=lambda kv: dc.batch_key(kv[0]))]),
+                    width='stretch', hide_index=True, height=240)
+
+# ============================ TAB 5 - BSIAI ==================================
 with tab_bsiai:
     st.caption("The BSIAI programme. Separate roster, separate batch numbering - "
                "a session counts only once the L2 schedule lists its webinar.")
