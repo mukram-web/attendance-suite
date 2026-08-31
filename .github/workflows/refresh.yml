@@ -11,6 +11,8 @@
 #   ATTENDEE_FOLDER_ID           Weekly Sessions shared-drive id
 #   STORE_FOLDER_ID              private Drive folder the store is uploaded to
 #                                (shared with the service account as Editor)
+# Optional:
+#   BSIAI_ROSTER_ID              BSIAI roster sheet id (its own programme tab)
 #
 # "Run workflow" in the Actions tab triggers it manually any time.
 
@@ -70,6 +72,10 @@ jobs:
           L2_ID: ${{ secrets.L2_ID }}
           ATTENDEE_FOLDER_ID: ${{ secrets.ATTENDEE_FOLDER_ID }}
           STORE_FOLDER_ID: ${{ secrets.STORE_FOLDER_ID }}
+          # Optional: the BSIAI programme's roster Sheet. Unset -> the pipeline
+          # skips that section and the app's BSIAI tab says so; AI CAP is
+          # unaffected either way.
+          BSIAI_ROSTER_ID: ${{ secrets.BSIAI_ROSTER_ID }}
           # Off by default: the site carries NO student contact details until the
           # /roster login gate has been verified on a real deploy (SETUP_PIPELINE.md).
           PUBLISH_ROSTER: ${{ secrets.PUBLISH_ROSTER }}
