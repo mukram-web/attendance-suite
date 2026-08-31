@@ -48,12 +48,13 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | File | Role |
 |---|---|
 | `pipeline.py` | the weekly job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--no-upload`, `--no-site`, `--allow-partial`, `--mode`. |
-| `attendance_app.py` | the Streamlit app (tabs: Dashboard, Roster, Day-1 analysis). Reads the store; does not compute. |
+| `attendance_app.py` | the Streamlit app (tabs: Dashboard, Roster, Day-1 analysis, Forecast, BSIAI). Reads the store; does not compute. |
 | `attendance_core.py` | the marker engine: parses Zoom reports + L2, writes Present/Absent into the workbook. |
 | `dashboard_core.py` | `compute()` (per batch × session) and `roster_grid()` (per-student grid). |
 | `data.py` | pure data layer → the `DATA`/`summary` objects the dashboard renders. No I/O, unit-tested. |
 | `dash_view.py` | Plotly + Streamlit rendering. Its figure builders and HTML fragments are **pure** so `site_build.py` can reuse them. |
 | `day1_analysis.py` | day-one / latest-session cut of payment and close type for the newest `DAY1_BATCHES` (4) batches. |
+| `forecast.py` | predicted attendance for sessions that have not run yet: decay curve x batch offset x pod multiplier. Pure, no I/O, unit-tested. See §4c. |
 | `day1_template.html` | **used by the live app** to render the Day-1 tab (and by the static site). Not dormant — do not delete. |
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
@@ -121,6 +122,54 @@ Absent → the pipeline skips the section entirely and the tab says so; the AI C
 refresh is never affected. A BSIAI failure is caught and reported in the tab
 rather than failing the run.
 
+
+### 4c. The Forecast tab (added 2026-08-31)
+
+Predicts attendance for sessions that have **not run yet**, from the schedule in
+the **Master Curriculum Schedule** Sheet (`CURRICULUM_ID`) — one tab per pod,
+columns `Date | Day | AI CAP B<n> | Trainer | ...`. Built inside `build_store()`
+because it needs the finished `DATA` and nothing else, so it can never disagree
+with the dashboard beside it. Aggregates only — safe to publish.
+
+    predicted = group size x curve(week) x batch_offset x pod_multiplier
+
+- **curve(week)** — attendance against weeks-since-batch-start, pooled over every
+  batch. The strong part: B17-B38 all open at 46-59% and fall ~10%/week.
+- **batch_offset** — that batch's own level vs the curve. This is what spots a
+  cold batch (B36 sat at x0.863 on 2026-08-30).
+- **pod_multiplier** — a pod's draw vs its batch on the SAME day, so batch level
+  and week both cancel. Data x1.13 / Ops x1.12 highest, Students x0.89 lowest.
+
+**Measured, not asserted.** `accuracy` is re-derived every run by rolling-origin
+backtest: 9.3% MAPE on headcount at 1-4 weeks against 32.1% for carrying the last
+rate forward. The app shows both, so a model that rots in the field says so.
+
+Things that will trip you up:
+
+1. **The pod split began 2026-08-23.** Before that a date is ONE whole-batch
+   session; after it, up to 11 pod sessions with their own denominators. Which
+   one a scheduled date is comes from `_split_kind`: >= `SPLIT_MIN_TOPICS` (5)
+   distinct normalised titles across the pod tabs. Whole-batch dates show 1-3
+   (pure spelling variants like "Prompt Engineering 2026" vs "... in 2026"), real
+   splits show 8-12, so the threshold sits in a wide gap.
+2. **Neither the roster nor the curriculum sheet carries a YEAR** — both say just
+   "30 Aug". `_walk_years` attaches years by walking the (known chronological)
+   list and advancing when the month goes backwards. Without it a schedule
+   crossing new year sorts December after January.
+3. **The pod layer is the weak one and is deliberately separable.** It rests on a
+   few dozen sessions, so multipliers are shrunk toward 1.0 by `POD_SHRINK_K`.
+   Do not "improve" the fit by removing the shrinkage.
+4. **A week beyond any batch's observed lifetime is NOT forecast.** There is no
+   curve point, and extrapolating an exponential tail invents numbers. Those
+   sessions are dropped with a warning instead.
+5. **Batches that have not started are assumed** — strength and pod shares from
+   the `RECENT_BATCHES` (4) mean. Pod shares are genuinely unstable (Generalist
+   was 18.9% of B37 and 48.6% of B38), so every such row carries
+   `assumed_strength: True` and the UI marks it. Never let those read as measured.
+6. **`CURRICULUM_ID` is owned outside the roster team.** Sharing it with the
+   service account is a separate step: as of 2026-08-31 the robot got **403** on
+   it. Absent or unreadable, the forecast is skipped and the tab says which —
+   `None` = never configured, a section with warnings = configured but broken.
 
 ## 5. Invariants — break these and the numbers go silently wrong
 
@@ -192,6 +241,7 @@ rather than failing the run.
   | `GDRIVE_SERVICE_ACCOUNT_JSON` | the robot's Google key |
   | `ROSTER_ID`, `L2_ID`, `ATTENDEE_FOLDER_ID` | what to read |
   | `STORE_FOLDER_ID` | the Shared Drive to publish the store into |
+  | `CURRICULUM_ID` | optional — the Master Curriculum Schedule, drives the Forecast tab (§4c) |
   | **`PUBLISH_ROSTER`** | ⚠️ when truthy, `site_build.py` writes **every student's email and phone** into `site/roster/data/*.json` |
   | **`VERCEL_TOKEN`** + `VERCEL_ORG_ID`, `VERCEL_PROJECT_ID` | ⚠️ presence of the token makes every Monday run **deploy the site publicly** |
 
@@ -310,7 +360,7 @@ secrets, or the store could not be downloaded.
 **What is inside `attendance.duckdb`:** `meta(key, value)` holding JSON blobs
 (`DATA`, `summary`, `report`, `warnings`, `source`, `generated_at`,
 `generated_at_iso`, `batches`, `sheet_map`, `marked_xlsx_file_id`, `stamps`,
-`day1`), the `compute` table (per batch × session), and one `grid_<batch>` table per
+`day1`, `forecast`), the `compute` table (per batch × session), and one `grid_<batch>` table per
 batch. The `grid_*` tables carry emails and phones — that is why the store is
 PII and lives in a private Shared Drive. The app caches it with a **30-minute TTL**,
 so Monday's rebuild reaches viewers on its own; 🔄 Refresh forces it immediately.

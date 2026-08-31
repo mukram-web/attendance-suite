@@ -13,6 +13,8 @@
 #                                (shared with the service account as Editor)
 # Optional:
 #   BSIAI_ROSTER_ID              BSIAI roster sheet id (its own programme tab)
+#   CURRICULUM_ID                Master Curriculum Schedule sheet id (drives the
+#                                Forecast tab; one tab per pod)
 #
 # "Run workflow" in the Actions tab triggers it manually any time.
 
@@ -76,6 +78,11 @@ jobs:
           # skips that section and the app's BSIAI tab says so; AI CAP is
           # unaffected either way.
           BSIAI_ROSTER_ID: ${{ secrets.BSIAI_ROSTER_ID }}
+          # Optional: the Master Curriculum Schedule (what is PLANNED). Unset ->
+          # no forecast is built and the app's Forecast tab says so. This Sheet is
+          # owned outside the roster team, so it needs sharing with the service
+          # account separately - a 403 here only disables the forecast.
+          CURRICULUM_ID: ${{ secrets.CURRICULUM_ID }}
           # Off by default: the site carries NO student contact details until the
           # /roster login gate has been verified on a real deploy (SETUP_PIPELINE.md).
           PUBLISH_ROSTER: ${{ secrets.PUBLISH_ROSTER }}
