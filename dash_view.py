@@ -12,6 +12,7 @@ site_build.py reuses them to render the identical front end as a static
 website. Change the look here and both the app and the site follow.
 """
 from __future__ import annotations
+import html
 import plotly.graph_objects as go
 
 import data as D
@@ -150,6 +151,10 @@ def pod_view(d: dict, pod: str | None) -> dict:
                 rating, wn = None, 0
             sess.append({
                 "rating": rating, "rating_n": wn,
+                # same reason as the rating: without this the rolled-up row
+                # loses the trainer and the column reads blank for pod days
+                "mentor": next((x.get("mentor") for x in same
+                                if (x.get("mentor") or "").strip()), ""),
                 "rating_trainer": (rated[0].get("rating_trainer")
                                    if len(rated) == 1 else None),
                 "rating_recommend": (rated[0].get("rating_recommend")
@@ -192,6 +197,19 @@ def closing_rows_html(d: dict) -> str:
     return "".join(rows)
 
 
+def _mentor(s: dict) -> str:
+    """Who taught it, from L2's Mentor column.
+
+    Blank when L2 did not record one - which is most older sessions, since the
+    column only appears on the recent monthly tabs. An em dash would read as
+    "nobody taught this"; empty reads as "not recorded", which is the truth.
+    """
+    who = (s.get("mentor") or "").strip()
+    if not who:
+        return '<span style="color:#c8cdd6">-</span>'
+    return f'<span style="white-space:nowrap">{html.escape(who)}</span>'
+
+
 def _rating(s: dict) -> str:
     """The session's poll score, or "no poll conducted" when none was run.
 
@@ -228,7 +246,7 @@ def sessions_table_html(d: dict) -> str:
             trs.append(
                 f'<tr><td>{s["date_lbl"]}</td><td>{s["topic"]}{joined}</td>'
                 f'<td class="num">{s["present"]:,}</td><td class="num">—</td>'
-                f'<td class="num">—</td></tr>')
+                f'<td class="num">—</td><td>—</td><td class="num">—</td></tr>')
             continue
         absent = "—" if s["present_only"] else f'{s["absent"]:,}'
         flag = '<span class="flag">no absent logged</span>' if s["present_only"] else ""
@@ -243,10 +261,12 @@ def sessions_table_html(d: dict) -> str:
             f'<tr><td>{s["date_lbl"]}</td><td>{who}{s["topic"]}{flag}{miss}</td>'
             f'<td class="num">{s["present"]:,}</td><td class="num">{absent}</td>'
             f'<td class="num">{_pill(s["pct"])}</td>'
+            f'<td>{_mentor(s)}</td>'
             f'<td class="num">{_rating(s)}</td></tr>')
     return ('<table class="sess"><thead><tr><th>Date</th><th>Session</th>'
             '<th class="num">Present</th><th class="num">Absent</th>'
             '<th class="num">% of strength</th>'
+            '<th>Trainer</th>'
             '<th class="num">Rating</th></tr></thead><tbody>'
             + "".join(trs) + "</tbody></table>")
 

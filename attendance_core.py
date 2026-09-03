@@ -112,23 +112,32 @@ def _folder_batches(member_path):
     return extract_batches(' - '.join(batch_parts)) if batch_parts else set()
 
 # ---------------- L2 schedule ----------------
-def parse_l2(l2_bytes, with_labels=False):
+def parse_l2(l2_bytes, with_labels=False, with_mentors=False):
     """webinar_id -> (frozenset[(track,num)], topic). Includes combined/range sessions.
 
     With `with_labels`, also returns {webinar_id: raw 'Batch Name' cell} so callers
     can show a session the way L2 names it ('AI CAP B35 - Techies', 'AI CAP B8 + B22')
-    rather than a bare parsed number. The extra map is first-wins per webinar id,
-    exactly like `out`, so the two never disagree."""
+    rather than a bare parsed number. With `with_mentors`, also returns
+    {webinar_id: 'Mentor' cell} - who actually taught it. Both extra maps are
+    first-wins per webinar id, exactly like `out`, so they never disagree.
+
+    The flags are separate rather than one wider return because five callers
+    already unpack the two-tuple; adding a third element unconditionally would
+    break every one of them."""
     wb = load_workbook(io.BytesIO(l2_bytes), data_only=True)
-    out, labels = {}, {}
+    out, labels, mentors = {}, {}, {}
     for ws in wb.worksheets:
-        bcol = tcol = wcol = hrow = None
+        bcol = tcol = wcol = mcol = hrow = None
         for r in range(1, min(ws.max_row or 1, 6) + 1):
             for c in range(1, (ws.max_column or 1) + 1):
                 v = str(ws.cell(r, c).value or '').strip().lower()
                 if v == 'batch name':  bcol, hrow = c, r
                 elif v == 'topic name': tcol = c
                 elif v == 'webinar id': wcol = c
+                # EXACT match only: the same header row also carries "Mentor's
+                # email" and "In-house/Freelancer mentor", and a substring test
+                # would bind the column to whichever came first.
+                elif v == 'mentor': mcol = c
             if bcol and wcol: break
         if not (bcol and wcol and hrow): continue
         for r in range(hrow + 1, (ws.max_row or hrow) + 1):
@@ -141,6 +150,12 @@ def parse_l2(l2_bytes, with_labels=False):
             if wid not in out:
                 out[wid] = (frozenset(keys), topic)
                 labels[wid] = raw
+                # Older monthly tabs have no Mentor column at all; absent simply
+                # means "not recorded", which the UI renders as blank.
+                if mcol:
+                    mentors[wid] = str(ws.cell(r, mcol).value or '').strip()
+    if with_labels and with_mentors: return out, labels, mentors
+    if with_mentors: return out, mentors
     return (out, labels) if with_labels else out
 
 # ---------------- Zoom attendee report ----------------

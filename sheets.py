@@ -47,7 +47,8 @@ def _hdr_idx(header, *needles):
     return None
 
 
-def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False) -> dict:
+def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False,
+                         with_mentors=False) -> dict:
     """The RELIABLE topic map: join Zoom attendee files ⋈ L2 on **Webinar ID**.
 
     Each attendee file is named `attendee_<WebinarID>_<date>.csv`, and L2 maps
@@ -59,11 +60,15 @@ def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False) -> dict:
     import attendance_core as ac
     import pods
     if not l2_bytes or not attendee_files:
+        if with_labels and with_mentors: return {}, {}, {}
+        if with_mentors: return {}, {}
         return ({}, {}) if with_labels else {}
     # {webinar_id: (frozenset((track, num)), topic)} (+ {webinar_id: raw batch cell})
-    wid_map, wid_labels = ac.parse_l2(l2_bytes, with_labels=True)
+    wid_map, wid_labels, wid_mentors = ac.parse_l2(
+        l2_bytes, with_labels=True, with_mentors=True)
     lookup: dict = {}
     labels: dict = {}
+    mentors: dict = {}
     for name, _data in attendee_files:
         pf = ac._parse_filename(str(name).split("/")[-1])   # (webinar_id, "YYYY_MM_DD")
         if not pf:
@@ -78,6 +83,7 @@ def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False) -> dict:
             continue
         mm = f"{int(ymd[5:7]):02d}_{int(ymd[8:10]):02d}"
         raw = (wid_labels.get(wid) or "").strip()
+        who = (wid_mentors.get(wid) or "").strip()
         # From B35 a date carries up to eleven sessions, one per domain POD, each
         # with its own topic. Keying on (batch, date) alone hands all eleven the
         # first topic it happens to meet - every POD row on B35's 23 Aug read
@@ -93,12 +99,23 @@ def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False) -> dict:
             lookup[(f"B{num}", mm, pod)] = topic
             if raw:
                 labels[(f"B{num}", mm, pod)] = raw
+            # Mentors key exactly like labels so a POD session shows ITS trainer,
+            # not whichever of the day's eleven sessions was seen first.
+            if who:
+                mentors[(f"B{num}", mm, pod)] = who
             lookup.setdefault((f"B{num}", mm), topic)   # batch-specific fallback
             if raw:
                 labels.setdefault((f"B{num}", mm), raw)
+            if who:
+                mentors.setdefault((f"B{num}", mm), who)
         lookup.setdefault(mm, topic)                 # date-only fallback
         if raw:
             labels.setdefault(mm, raw)
+        # No date-only fallback for the mentor on purpose: borrowing another
+        # batch's trainer would put a real person's name against a session they
+        # did not teach. Blank is the honest answer.
+    if with_labels and with_mentors: return lookup, labels, mentors
+    if with_mentors: return lookup, mentors
     return (lookup, labels) if with_labels else lookup
 
 

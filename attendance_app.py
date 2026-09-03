@@ -183,9 +183,10 @@ def _build_dashboard_impl(roster_bytes, attendee_names, l2_bytes):
     tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
             for ws in wb.worksheets}
     wb.close()
-    topics, l2_labels = dsheets.webinar_topic_lookup(
-        [(n, None) for n in attendee_names], l2_bytes, with_labels=True)
-    DATA, summary = ddata.build(tabs, topics, l2_labels)
+    topics, l2_labels, mentors = dsheets.webinar_topic_lookup(
+        [(n, None) for n in attendee_names], l2_bytes,
+        with_labels=True, with_mentors=True)
+    DATA, summary = ddata.build(tabs, topics, l2_labels, None, mentors)
     _prepend_intro_sessions(DATA)
     return DATA, summary
 
