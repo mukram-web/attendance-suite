@@ -152,7 +152,8 @@ def clean_l2_label(raw) -> str:
 
 # ── per-batch build ─────────────────────────────────────────────────────────
 def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
-                l2_labels: dict | None = None, ratings: dict | None = None) -> dict | None:
+                l2_labels: dict | None = None, ratings: dict | None = None,
+                mentors: dict | None = None) -> dict | None:
     """Compute one batch's dashboard object from its raw rows. None if the tab
     doesn't look like a roster (no mail/closing columns) or has no strength."""
     if not rows:
@@ -202,6 +203,7 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
     l2_lookup = l2_lookup or {}
     l2_labels = l2_labels or {}
     ratings = ratings or {}
+    mentors = mentors or {}
 
     # discover + validate session columns (everything after Closing Type)
     sessions = []
@@ -246,6 +248,10 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         # the date-only fallback would borrow another batch's label.
         l2_batch = clean_l2_label(l2_labels.get((batch, mm, pod))
                                   or l2_labels.get((batch, mm)))
+        # Who taught it, from L2's Mentor column. Batch-specific only, matching
+        # l2_batch: a date-only fallback would credit the wrong person.
+        mentor = str(mentors.get((batch, mm, pod))
+                     or mentors.get((batch, mm)) or "").strip()
 
         sessions.append({
             "col": c, "mm": mm,
@@ -253,6 +259,7 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             "topic": topic,
             "l2_batch": l2_batch,
             "pod": pod,
+            "mentor": mentor,
             # The session's own feedback poll, joined on Webinar ID like the topic.
             "rating": (rt := ratings.get((batch, mm, pod)) or {}).get("session"),
             "rating_trainer": rt.get("trainer"),
@@ -367,7 +374,8 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
 
 
 def build(sheets: dict[str, list[list]], l2_lookup: dict | None = None,
-          l2_labels: dict | None = None, ratings: dict | None = None):
+          l2_labels: dict | None = None, ratings: dict | None = None,
+          mentors: dict | None = None):
     """Build the full DATA dict + summary from all worksheets. Auto-discovers
     batch tabs; never hardcodes the batch or session list."""
     data = {}
@@ -375,7 +383,7 @@ def build(sheets: dict[str, list[list]], l2_lookup: dict | None = None,
         b = batch_label(tab)
         if not b:
             continue
-        bd = build_batch(rows, b, l2_lookup, l2_labels, ratings)
+        bd = build_batch(rows, b, l2_lookup, l2_labels, ratings, mentors)
         if bd:
             data[b] = bd
 

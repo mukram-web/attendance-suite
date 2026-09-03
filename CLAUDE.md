@@ -69,7 +69,15 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
   letters are NOT stable**: on most tabs Payment/Close Type are I/J, on `AI CAP B29`
   and `AI CAP B20` they are J/K, and the header row is row 1 on some tabs and row 2
   on others. Always locate columns by header text (§5.1).
-- **L2 Weekly Live Sessions** (Sheet) — the schedule; maps Webinar ID → batch + topic.
+- **L2 Weekly Live Sessions** (Sheet) — the schedule; maps Webinar ID → batch +
+  topic + **Mentor** (who taught it; shown as the dashboard's Trainer column).
+  The Mentor column exists only on the recent monthly tabs, and is matched on the
+  header text **exactly** — the same row also carries "Mentor's email" and
+  "In-house/Freelancer mentor", and a substring test would bind to the wrong one.
+  Unlike the topic, the mentor has **no date-only fallback**: borrowing another
+  batch's trainer would put a real person's name against a session they did not
+  teach, so an unmatched session shows blank. Measured 2026-09-03: 1,230 of 1,235
+  L2 webinars carry a mentor, and all 447 dashboard sessions resolved one.
 - **Weekly Sessions Files** (Shared Drive) — folders named
   `YYYY-MM-DD - AI CAP B<n> - <topic>` holding `attendee_<webinarid>_<date>.csv`.
 - **A second Shared Drive** — where the pipeline writes `attendance.duckdb` and the
