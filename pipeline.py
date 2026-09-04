@@ -53,6 +53,7 @@ import data as ddata                  # noqa: E402
 import polls                          # noqa: E402
 import day1_analysis                  # noqa: E402
 import forecast                       # noqa: E402
+import archive                        # noqa: E402
 import sheets as dsheets              # noqa: E402
 import live_data                      # noqa: E402
 
@@ -462,8 +463,26 @@ def main() -> None:
 
     print("[8/8] Uploading the store …", flush=True)
     with open(store_path, "rb") as fh:
-        live_data.upload_to_folder(svc, cfg["store_folder_id"], STORE_NAME,
-                                   fh.read())
+        store_bytes = fh.read()
+    live_data.upload_to_folder(svc, cfg["store_folder_id"], STORE_NAME,
+                               store_bytes)
+
+    # Dated snapshots of the four source Sheets (+ this store) into archive/ on
+    # the same private Shared Drive. The store itself is REPLACED every week, so
+    # without this there is no copy of anything: a sheet deleted on Tuesday is
+    # gone from the dashboard by the next Monday with no way back. Every source
+    # is owned by a different person outside this repo - see archive.py.
+    #
+    # Deliberately AFTER the upload and never fatal: the dashboard refreshing is
+    # what people actually depend on, and a Drive hiccup here must not cost them
+    # that. Failures are reported, not raised.
+    print("[8b] Archiving the source sheets …", flush=True)
+    try:
+        archive.run(svc, cfg, cfg["store_folder_id"],
+                    when=datetime.now(IST).date(), store_bytes=store_bytes)
+    except Exception as e:
+        print(f"   WARNING: archive step failed entirely ({e})")
+
     print(f"Done — dashboard data refreshed "
           f"({datetime.now(IST).strftime('%d %b %Y, %H:%M IST')}).")
 
