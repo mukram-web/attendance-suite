@@ -212,6 +212,13 @@ About 18 MB a week.
   store. Never a local path that could be committed, never the repo.
 - The folder is found **by name**, so moving or renaming it yields a fresh empty
   archive rather than a crash. There is no id to keep in secrets.
+- **Nothing is ever pruned. Owner's decision, 2026-09-05.** There is deliberately
+  no retention policy, no thinning of old snapshots, no "keep monthlies after 90
+  days". The whole point is that a snapshot exists for a week nobody thought to
+  check, and any pruning rule eventually deletes exactly the one that mattered.
+  At ~18 MB a week this is ~1 GB a year, which is cheap against re-deriving a
+  deleted roster. **Do not add cleanup here** — if the Shared Drive ever runs
+  short, raise the quota or move old snapshots to cold storage, but keep them.
 
 To restore: download the dated `.xlsx` and either re-upload it as the Sheet, or
 point the relevant `*_ID` at a copy of it and re-run the pipeline.
