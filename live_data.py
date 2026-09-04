@@ -339,6 +339,35 @@ def fetch_store(store_folder_id: str, name: str = "attendance.duckdb"):
     return data, meta.get("modifiedTime", "")
 
 
+def list_store_snapshots(store_folder_id: str) -> list[dict]:
+    """Past weeks' stores from archive/, newest first.
+
+    Each is {"name", "id", "date", "size"}. Returns [] when the folder or the
+    archive does not exist yet, so a caller can offer history when there is some
+    and stay quiet when there is not.
+    """
+    import archive
+    svc = _drive_service()
+    try:
+        folder = archive.ensure_folder(svc, store_folder_id)
+    except Exception:
+        return []
+    out = []
+    for f in _list_children(svc, folder):
+        name = f.get("name", "")
+        m = re.match(r"attendance_store_(\d{4}-\d{2}-\d{2})\.duckdb$", name)
+        if m:
+            out.append({"name": name, "id": f["id"], "date": m.group(1),
+                        "size": int(f.get("size") or 0)})
+    return sorted(out, key=lambda d: d["date"], reverse=True)
+
+
+def fetch_store_snapshot(file_id: str) -> bytes:
+    """One archived store by file id. Snapshots are immutable, so the byte cache
+    is always valid — reopening last month's week costs nothing after the first."""
+    return download_cached(_drive_service(), file_id)
+
+
 def _existing_sessions(roster_bytes: bytes) -> dict:
     """{batch_key -> set(mm_dd)} of session columns already present in the roster,
     so we can skip re-fetching sessions that are already marked.

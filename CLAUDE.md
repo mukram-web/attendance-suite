@@ -220,8 +220,26 @@ About 18 MB a week.
   deleted roster. **Do not add cleanup here** — if the Shared Drive ever runs
   short, raise the quota or move old snapshots to cold storage, but keep them.
 
-To restore: download the dated `.xlsx` and either re-upload it as the Sheet, or
-point the relevant `*_ID` at a copy of it and re-run the pipeline.
+To restore a sheet: download the dated `.xlsx` and either re-upload it as the
+Sheet, or point the relevant `*_ID` at a copy of it and re-run the pipeline.
+
+**Past weeks are readable in the app**, not just recoverable from Drive. The
+sidebar's **Week** selector lists every archived store newest-first; picking one
+renders that week verbatim — attendance, day-1, forecast, BSIAI and roster all as
+they stood. A yellow banner sits on the PAGE, not just the sidebar, because
+someone screenshotting a number from a historical week must not be able to
+mistake it for today. Two things to know:
+
+- Snapshots load through `_load_snapshot`, deliberately NOT `_load_store`. They
+  are immutable so they cache permanently rather than on the live store's
+  30-minute TTL, and they must never be written to `_STORE_PATH` — that would
+  leave last month's data where the live loader expects today's.
+- **The marked .xlsx is not archived per week.** Only the current
+  `Master_Batch_Rosters_marked.xlsx` exists on Drive and the pipeline replaces it
+  every Monday, so the download button is suppressed while viewing history. Left
+  enabled it would hand over today's workbook labelled as that week's.
+- The selector only appears when `store_folder_id` is configured AND at least one
+  snapshot exists, so a fresh install shows nothing rather than an empty control.
 
 ## 5. Invariants — break these and the numbers go silently wrong
 
