@@ -284,6 +284,53 @@ def _load_store(nonce):
     return out
 
 
+@st.cache_data(show_spinner=False, ttl=_STORE_TTL_SECONDS)
+def _snapshot_list(nonce):
+    """Past weeks available in archive/, newest first. Never raises: history is
+    a bonus, and a Drive hiccup here must not take the live dashboard with it."""
+    fid = _store_folder_id()
+    if not fid:
+        return []
+    try:
+        return live_data.list_store_snapshots(fid)
+    except Exception:
+        return []
+
+
+@st.cache_data(show_spinner="Opening that week's dashboard…")
+def _load_snapshot(file_id, name):
+    """Render an ARCHIVED week instead of the current one.
+
+    Kept separate from _load_store rather than parameterised, for two reasons:
+    a snapshot is immutable so it wants permanent caching rather than the live
+    store's 30-minute TTL, and it must never be written to _STORE_PATH — doing
+    so would leave last month's data sitting where the live loader expects
+    today's, and the app would serve it as current long after the user moved on.
+    """
+    path = _DISK_CACHE / f"snap_{name}"
+    try:
+        if not path.exists():
+            _DISK_CACHE.mkdir(exist_ok=True)
+            tmp = path.with_suffix(".tmp")
+            tmp.write_bytes(live_data.fetch_store_snapshot(file_id))
+            tmp.replace(path)
+        import duckdb
+        con = duckdb.connect(str(path), read_only=True)
+        try:
+            out = {k: json.loads(v)
+                   for k, v in con.execute("SELECT key, value FROM meta").fetchall()}
+            out["df"] = con.execute("SELECT * FROM compute").df()
+        finally:
+            con.close()
+    except Exception as e:
+        return {"error": f"that week's snapshot could not be opened ({e})"}
+    if "df" not in out or "generated_at" not in out:
+        return {"error": "that week's snapshot is incomplete"}
+    out["path"] = str(path)
+    out["drive_error"] = None
+    return out
+
+
 @st.cache_data(show_spinner=False)
 def _store_grid(path, batch, stamp):
     """One batch's roster grid from the store. `stamp` (generated_at_iso) keys
@@ -430,7 +477,47 @@ mark_error = None
 store = None
 store_mode = False
 
-if _store_available:
+# ── which week are we looking at? ────────────────────────────────────────────
+# Every Monday the pipeline archives the store it just built, so each past week's
+# dashboard survives verbatim rather than being overwritten. Offer them here, or
+# the archive is data nobody can actually reach.
+_snapshots = _snapshot_list(st.session_state.nonce) if _store_configured else []
+_viewing = None
+if _snapshots:
+    with st.sidebar:
+        _labels = ["Latest (live)"] + [
+            datetime.strptime(s["date"], "%Y-%m-%d").strftime("%d %b %Y")
+            for s in _snapshots]
+        _pick_week = st.selectbox(
+            "Week", _labels, index=0, key="week_pick",
+            help="Past weeks are archived every Monday. Choosing one shows the "
+                 "dashboard exactly as it stood then — attendance, day-1, "
+                 "forecast and roster all as they were.")
+        if _pick_week != "Latest (live)":
+            _viewing = _snapshots[_labels.index(_pick_week) - 1]
+
+if _viewing:
+    loaded = _load_snapshot(_viewing["id"], _viewing["name"])
+    if loaded and "df" in loaded:
+        store = loaded
+        store_mode = True
+        report, warnings = store["report"], store["warnings"]
+        source_label = store["source"]
+        # Say it on the PAGE, not just the sidebar. Someone screenshotting a
+        # number from a historical week must not be able to mistake it for today.
+        st.warning(
+            f"📅 **Viewing the archived week of "
+            f"{datetime.strptime(_viewing['date'], '%Y-%m-%d'):%d %b %Y}** — this "
+            f"is the dashboard as it stood then (built {store['generated_at']}), "
+            "not current data. Switch **Week** back to “Latest (live)” in the "
+            "sidebar for today's numbers.")
+    else:
+        st.sidebar.error(
+            "Couldn’t open that week: "
+            + str((loaded or {}).get("error", "unknown")))
+        _viewing = None
+
+if not _viewing and _store_available:
     loaded = _load_store(st.session_state.nonce)
     if loaded and "df" in loaded:
         store = loaded
@@ -552,6 +639,15 @@ def _marked_roster_download(key: str) -> None:
             file_name="Master_Batch_Rosters_marked.xlsx",
             mime=XLSX_MIME, type="primary", key=key,
         )
+        return
+    # While viewing an archived week the store is historical, but this file id
+    # points at Master_Batch_Rosters_marked.xlsx on Drive, which the pipeline
+    # REPLACES every Monday. Offering it here would hand over today's workbook
+    # labelled as that week's - silently wrong in the worst way.
+    if _viewing:
+        st.caption("The marked workbook is not archived per week — only the "
+                   "current one exists on Drive. Switch to **Latest (live)** to "
+                   "download it.")
         return
     fid = store.get("marked_xlsx_file_id") or ""
     if not fid:
