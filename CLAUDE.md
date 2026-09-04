@@ -59,6 +59,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
 | `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
+| `archive.py` | dated snapshots of the four source Sheets (+ the store) into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
 | `site_build.py`, `site_templates/` | the static-website build. See §7 — it is **wired to deploy**, not inert. |
 
 ## 4. Data sources
@@ -178,6 +179,42 @@ Things that will trip you up:
    service account is a separate step: as of 2026-08-31 the robot got **403** on
    it. Absent or unreadable, the forecast is skipped and the tab says which —
    `None` = never configured, a section with warnings = configured but broken.
+
+### 4d. The archive (added 2026-09-05)
+
+**The store is not a backup.** `pipeline.py` REPLACES `attendance.duckdb` in place
+every week, so nothing in this system retained history until now: a tab deleted on
+Tuesday was gone from the dashboard by the next Monday with no way back.
+
+The exposure is real — measured 2026-09-04, the four source Sheets are owned by
+**four different individuals**, none of them the robot, and one of them a personal
+gmail rather than a company account. (Run the owner check in `archive.py`'s
+docstring to see who currently holds each; the names are deliberately not written
+down here, since this repo is public.) Any one of them can delete a tab,
+restructure a column, or bin the file.
+
+L2 is the worst case: `REQUIRE_L2` (§5.6) means a session with no L2 row is
+**hidden**, not merely unlabelled, so losing L2 blanks the dashboard rather than
+staling it.
+
+Step `[8b]` copies each Sheet as `<Label>_<YYYY-MM-DD>.xlsx` into an `archive/`
+folder beside the store, plus that week's `attendance_store_<date>.duckdb`.
+About 18 MB a week.
+
+- **Snapshots are immutable.** A name that already exists is skipped, never
+  replaced — re-running on the same day must not overwrite the morning's copy
+  with one taken after somebody edited the sheet at lunchtime.
+- **It runs AFTER the upload and never raises.** The dashboard refreshing is what
+  people depend on; a Drive hiccup in the archive must not cost them that.
+  Failures print a WARNING and the run stays green.
+- **These files are PII** — the roster snapshot is every student's name, email and
+  phone. They live on the private Shared Drive under the same access list as the
+  store. Never a local path that could be committed, never the repo.
+- The folder is found **by name**, so moving or renaming it yields a fresh empty
+  archive rather than a crash. There is no id to keep in secrets.
+
+To restore: download the dated `.xlsx` and either re-upload it as the Sheet, or
+point the relevant `*_ID` at a copy of it and re-run the pipeline.
 
 ## 5. Invariants — break these and the numbers go silently wrong
 
