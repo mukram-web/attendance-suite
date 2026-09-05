@@ -417,5 +417,68 @@ class TestDay1EitherKey(unittest.TestCase):
         self.assertEqual(set(people), {"a@x.com", "phone:9000000002"})
 
 
+
+class TestPhoneMatchesOnLast10(unittest.TestCase):
+    """The roster stores 91-prefixed 12-digit numbers; Zoom reports mostly send
+    bare 10-digit ones. Comparing whole strings made the phone half of
+    "email OR phone" dead in production (measured 2026-09-06)."""
+
+    def _roster(self, rows):
+        from openpyxl import Workbook
+        wb = Workbook(); wb.remove(wb.active)
+        ws = wb.create_sheet("AI CAP B17")
+        ws.append(["Country", "Registered Number", "Registered Mail", "WhatsApp",
+                   "Broadcast", "Batch", "Amount", "Payment", "Close Type", "POD"])
+        for num, mail in rows:
+            ws.append([91, num, mail, "", "", "B17", 0, "Full Paid", "BDA Closing", ""])
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    def _run(self, roster_rows, report_rows):
+        marker = TestMarkerSkips()
+        name = ("2026-09-09 - AI CAP B17 - Some Session/"
+                "attendee_91695866411_2026_09_09.csv")
+        payload = report_csv(rows=report_rows).encode()
+        _, report, _ = ac.process_files(self._roster(roster_rows), marker._l2(),
+                                        [(name, payload)], values_only=True)
+        return report[0]["present"] if report else 0
+
+    def test_roster_has_country_code_report_does_not(self):
+        # The real shape: roster 12 digits, Zoom 10. This is the case that failed.
+        self.assertEqual(self._run([("919000000001", "nomatch1@x.com")],
+                                   (("other@x.com", "9000000001"),)), 1)
+
+    def test_report_has_country_code_roster_does_not(self):
+        self.assertEqual(self._run([("9000000001", "nomatch1@x.com")],
+                                   (("other@x.com", "919000000001"),)), 1)
+
+    def test_both_carry_the_country_code(self):
+        self.assertEqual(self._run([("919000000001", "nomatch1@x.com")],
+                                   (("other@x.com", "919000000001"),)), 1)
+
+    def test_a_float_formatted_roster_number_still_matches(self):
+        # Sheets hands these back as 919000000001.0
+        self.assertEqual(self._run([("919000000001.0", "nomatch1@x.com")],
+                                   (("other@x.com", "9000000001"),)), 1)
+
+    def test_a_different_number_does_not_match(self):
+        self.assertEqual(self._run([("919000000009", "nomatch1@x.com")],
+                                   (("other@x.com", "9000000001"),)), 0)
+
+    def test_email_still_matches_on_its_own(self):
+        self.assertEqual(self._run([("910000000000", "a@x.com")],
+                                   (("a@x.com", "9999999999"),)), 1)
+
+    def test_a_short_number_falls_back_to_the_whole_string(self):
+        # Fewer than 10 digits has no last-10 form; it must still match exactly.
+        self.assertEqual(self._run([("12345", "nomatch1@x.com")],
+                                   (("other@x.com", "12345"),)), 1)
+
+    def test_the_helper_is_shared_by_both_call_sites(self):
+        self.assertTrue(ac._phone_hit("919000000001", set(), {"9000000001"}))
+        self.assertTrue(ac._phone_hit("12345", {"12345"}, set()))
+        self.assertFalse(ac._phone_hit("", {"12345"}, {"9000000001"}))
+        self.assertFalse(ac._phone_hit("919000000002", set(), {"9000000001"}))
+
+
 if __name__ == "__main__":
     unittest.main()
