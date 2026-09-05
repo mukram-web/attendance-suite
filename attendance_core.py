@@ -12,8 +12,9 @@ Key behaviour:
 
 Matching rule (default 'exact', per the auditing guide):
   Registered mail == Email (lower-cased, whitespace-stripped);
-  Registered Number == Phone (digits only, trailing .0 removed); blanks never match.
-Optional 'inclusive' mode also uses WhatsApp / broadcast columns and last-10-digit phones.
+  Registered Number == Phone (digits only, trailing .0 removed, compared on the
+  last 10 digits); blanks never match.
+Optional 'inclusive' mode also uses the WhatsApp / broadcast columns.
 """
 import re, csv, io, zipfile, datetime
 from openpyxl import load_workbook
@@ -282,6 +283,29 @@ def _last_used(ws):
 def _cell_email(v):
     if v is None: return ''
     s = str(v); return re.sub(r'\s', '', s).lower() if '@' in s else ''
+def _phone_hit(p, ph_full, ph_last10) -> bool:
+    """Does roster number `p` appear in a report's phone sets?
+
+    Compared on the LAST 10 DIGITS, not the whole string. The two sources use
+    different conventions and always have: measured 2026-09-06, 99.4% of roster
+    `Registered Number` values carry the 91 country code (12 digits) while 78.8%
+    of Zoom `Phone` values do not (10 digits). A full-string comparison therefore
+    tested "919886440098" against "9886440098" and missed, which made the phone
+    half of "email OR phone" dead in production — it added 1 to 6 students per
+    session where the last-10 rule adds 126 to 145 (+8.4% to +9.5% attendance).
+
+    Safe for this data: an Indian mobile number IS its last 10 digits, so two
+    different people cannot collide on them. The full-string check is kept first
+    for numbers too short to have a last-10 form. `day1_analysis.norm_phone` has
+    always compared this way; this is the marker catching up, not a new rule.
+    """
+    if not p:
+        return False
+    if p in ph_full:
+        return True
+    return len(p) >= 10 and p[-10:] in ph_last10
+
+
 def _cell_phone(v):
     if v is None: return ''
     if isinstance(v, (int, float)):
@@ -487,14 +511,14 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
                         # still worth knowing if they turned up
                         e0 = _cell_email(ws.cell(r, rm).value) if rm else ''
                         p0 = _cell_phone(ws.cell(r, rn).value) if rn else ''
-                        if (e0 and e0 in em) or (p0 and p0 in pf):
+                        if (e0 and e0 in em) or _phone_hit(p0, pf, p10):
                             outside += 1
                         continue
                 if mode == 'exact':
                     e = _cell_email(ws.cell(r, rm).value) if rm else ''
                     p = _cell_phone(ws.cell(r, rn).value) if rn else ''
                     if not e and not p: continue
-                    hit = (e and e in em) or (p and p in pf)
+                    hit = (e and e in em) or _phone_hit(p, pf, p10)
                 else:
                     es = [x for x in (_cell_email(ws.cell(r, c).value) for c in (rm, bc) if c) if x]
                     ps = [x for x in (_cell_phone(ws.cell(r, c).value) for c in (rn, wa) if c) if x]
