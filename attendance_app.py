@@ -297,6 +297,25 @@ def _snapshot_list(nonce):
         return []
 
 
+@st.cache_data(show_spinner=False)
+def _archived_marked(day):
+    """That week's dated marked workbook in archive/, or None.
+
+    None is a real answer, not an error: weeks refreshed before the archive
+    existed have no marked copy, and saying so beats serving today's file under
+    an old week's name."""
+    fid = _store_folder_id()
+    if not fid:
+        return None
+    try:
+        import archive
+        return live_data.find_archived(
+            fid, archive.snapshot_name(archive.MARKED_LABEL,
+                                       datetime.strptime(day, "%Y-%m-%d").date()))
+    except Exception:
+        return None
+
+
 @st.cache_data(show_spinner="Opening that week's dashboard…")
 def _load_snapshot(file_id, name):
     """Render an ARCHIVED week instead of the current one.
@@ -640,24 +659,32 @@ def _marked_roster_download(key: str) -> None:
             mime=XLSX_MIME, type="primary", key=key,
         )
         return
-    # While viewing an archived week the store is historical, but this file id
-    # points at Master_Batch_Rosters_marked.xlsx on Drive, which the pipeline
-    # REPLACES every Monday. Offering it here would hand over today's workbook
-    # labelled as that week's - silently wrong in the worst way.
+    # While viewing an archived week, `marked_xlsx_file_id` in that old store
+    # points at Master_Batch_Rosters_marked.xlsx, which the pipeline REPLACES
+    # every Monday — following it would hand over TODAY's workbook labelled as
+    # that week's. Use the dated copy in archive/ instead, and say plainly when
+    # a week predates archiving rather than serving the wrong file.
     if _viewing:
-        st.caption("The marked workbook is not archived per week — only the "
-                   "current one exists on Drive. Switch to **Latest (live)** to "
-                   "download it.")
-        return
-    fid = store.get("marked_xlsx_file_id") or ""
+        _arch = _archived_marked(_viewing["date"])
+        if not _arch:
+            st.caption(
+                f"No marked workbook was archived for {_viewing['date']} — that "
+                "week ran before the archive existed. Only weeks refreshed since "
+                "then have one.")
+            return
+        fid, token = _arch["id"], f"{_arch['id']}@{_viewing['date']}"
+        fname = _arch["name"]
+    else:
+        fid = store.get("marked_xlsx_file_id") or ""
+        token = f"{fid}@{store['generated_at_iso']}" if fid else ""
+        fname = "Master_Batch_Rosters_marked.xlsx"
     if not fid:
         st.caption("The marked workbook isn’t on Drive yet — it is uploaded by a "
                    "full pipeline run (not by `--no-upload`).")
         return
-    # The pipeline REPLACES the xlsx in place, so the Drive file id is the same
-    # every week — cache on the store's build time too, or a long-lived session
-    # keeps serving last week's workbook after a refresh.
-    token = f"{fid}@{store['generated_at_iso']}"
+    # For the LIVE file the Drive id never changes (the pipeline replaces it in
+    # place), so the token folds in the build time — otherwise a long-lived
+    # session keeps serving last week's workbook after a refresh.
     if st.session_state.get("marked_xlsx_token") != token:
         if st.button("⬇️ Prepare marked roster download (.xlsx)", key=f"prep_{key}",
                      help="Fetches the full marked workbook (~8 MB) from Drive"):
@@ -674,7 +701,7 @@ def _marked_roster_download(key: str) -> None:
         st.download_button(
             "⬇️ Download marked roster — ALL sessions (.xlsx)",
             data=st.session_state["marked_xlsx"],
-            file_name="Master_Batch_Rosters_marked.xlsx",
+            file_name=fname,
             mime=XLSX_MIME, type="primary", key=key,
         )
 

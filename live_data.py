@@ -362,6 +362,17 @@ def list_store_snapshots(store_folder_id: str) -> list[dict]:
     return sorted(out, key=lambda d: d["date"], reverse=True)
 
 
+def find_archived(store_folder_id: str, name: str) -> dict | None:
+    """One named file inside archive/, or None. Used to fetch a PAST week's
+    marked workbook, which lives only under its dated name."""
+    import archive
+    svc = _drive_service()
+    try:
+        return find_in_folder(svc, archive.ensure_folder(svc, store_folder_id), name)
+    except Exception:
+        return None
+
+
 def fetch_store_snapshot(file_id: str) -> bytes:
     """One archived store by file id. Snapshots are immutable, so the byte cache
     is always valid — reopening last month's week costs nothing after the first."""

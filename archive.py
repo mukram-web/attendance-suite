@@ -26,8 +26,10 @@ the dashboard goes blank, not stale.
 WHAT THIS DOES
 --------------
 Once a week, before anything else can fail, copy each source Sheet as a dated
-.xlsx into an `archive/` folder on the private Shared Drive, plus the store that
-was built from them. Never overwrite: a snapshot is named for its date and is
+.xlsx into an `archive/` folder on the private Shared Drive, plus the store and
+the MARKED workbook that were built from them. The marked workbook matters on its
+own: it is what people download and pass around, and the pipeline overwrites it
+on Drive every Monday. Never overwrite: a snapshot is named for its date and is
 skipped if it already exists, so re-running the pipeline on the same day costs
 one cheap existence check and cannot clobber the morning's copy.
 
@@ -45,6 +47,13 @@ from datetime import date
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 FOLDER_MIME = "application/vnd.google-apps.folder"
 ARCHIVE_FOLDER = "archive"
+
+# The marked workbook — the roster with every Present/Absent column written in.
+# It is the one artefact people actually hand around, and the pipeline REPLACES
+# it on Drive every Monday, so without a dated copy last week's marking is gone.
+# Deliberately a different label from the SOURCE roster snapshot, which holds the
+# sheet as the owners maintain it, unmarked.
+MARKED_LABEL = "Master_Batch_Rosters_marked"
 
 # What gets snapshotted, in priority order. `key` is the config key holding the
 # Sheet id; a missing or unconfigured id is skipped, not an error — BSIAI and the
@@ -85,8 +94,10 @@ def ensure_folder(svc, parent_id: str, name: str = ARCHIVE_FOLDER) -> str:
 
 
 def run(svc, cfg: dict, store_folder_id: str, when: date | None = None,
-        store_bytes: bytes | None = None, log=print) -> dict:
-    """Snapshot every configured source Sheet (+ optionally the store).
+        store_bytes: bytes | None = None, marked_bytes: bytes | None = None,
+        log=print) -> dict:
+    """Snapshot every configured source Sheet (+ optionally the store and the
+    marked workbook).
 
     Returns {"saved": [...], "skipped": [...], "errors": [...]}. NEVER raises:
     losing an archive is bad, but failing the weekly refresh over it would be
@@ -138,6 +149,8 @@ def run(svc, cfg: dict, store_folder_id: str, when: date | None = None,
     if store_bytes:
         _put(snapshot_name("attendance_store", when, "duckdb"),
              store_bytes, "application/octet-stream")
+    if marked_bytes:
+        _put(snapshot_name(MARKED_LABEL, when), marked_bytes, XLSX_MIME)
 
     for line in out["saved"]:
         log(f"   archived {line}")
