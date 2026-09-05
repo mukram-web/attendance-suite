@@ -860,6 +860,10 @@ with tab_fcst:
 
         _acc = _f.get("accuracy") or {}
         _rows = _f["sessions"]
+        # Sessions already run are kept on screen so the prediction can be read
+        # against what happened, but they must never be counted as work ahead.
+        _ahead = [r for r in _rows if not r.get("is_past")]
+        _done = [r for r in _rows if r.get("is_past")]
 
         st.caption(
             f"Predicted attendance for the next {_f['horizon_weeks']} weeks, from "
@@ -871,10 +875,13 @@ with tab_fcst:
         # Count SESSIONS, not per-batch rows: one session that three batches sit
         # in is one thing to run and staff, not three. The rows are still there
         # in the detail table and the full CSV.
-        m1.metric("Sessions ahead", f"{len(_f.get('by_session') or []):,}",
-                  help=f"{len(_rows):,} batch-slots across them — a session that "
-                       "several batches attend counts once here.")
-        m2.metric("Predicted attendees", f"{sum(r['pred'] for r in _rows):,}")
+        _sess_ahead = [x for x in (_f.get("by_session") or [])
+                       if not x.get("is_past")]
+        m1.metric("Sessions ahead", f"{len(_sess_ahead):,}",
+                  help=f"{len(_ahead):,} batch-slots across them — a session "
+                       "that several batches attend counts once here. Sessions "
+                       "already run are listed below but not counted here.")
+        m2.metric("Predicted attendees", f"{sum(r['pred'] for r in _ahead):,}")
         if _acc.get("mape_1_4wk") is not None:
             m3.metric("Typical error, 1–4 wks", f"±{_acc['mape_1_4wk']}%",
                       help="Mean absolute % error on headcount, measured by "
@@ -929,6 +936,11 @@ with tab_fcst:
             _r["Range"] = f"{s['lo']:,} – {s['hi']:,}"
             _r["Of"] = s["denom"]
             _r["%"] = s["pred_pct"]
+            if _done:
+                _a = s.get("actual")
+                _r["Actual"] = _a
+                _r["Err %"] = (round((_a - s["pred"]) / s["pred"] * 100, 1)
+                               if _a is not None and s["pred"] else None)
             _r["≈"] = "≈" if s["any_assumed"] else ""
             _tbl.append(_r)
 

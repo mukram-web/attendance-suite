@@ -293,12 +293,49 @@ class TestBuild(unittest.TestCase):
             self.assertLessEqual(date.fromisoformat(r["date"]),
                                  TODAY + timedelta(weeks=3))
 
-    def test_past_sessions_are_never_forecast(self):
-        past = [TODAY - timedelta(days=7), TODAY]
-        tabs = make_tabs(past + self.future, ["B4"], self._whole)
+    def test_today_is_forecast_not_dropped(self):
+        """The window used to start strictly AFTER today, so a run at 03:04 hid
+        that same day's sessions and the tab jumped to the following weekend."""
+        tabs = make_tabs([TODAY] + self.future, ["B4"], self._whole)
         f = forecast.build(self.DATA, tabs, TODAY, horizon_weeks=4)
-        for r in f["sessions"]:
-            self.assertGreater(date.fromisoformat(r["date"]), TODAY)
+        rows = [r for r in f["sessions"] if r["date"] == TODAY.isoformat()]
+        self.assertTrue(rows, "today's own sessions must be forecast")
+        self.assertFalse(rows[0]["is_past"], "today is not the past")
+
+    def test_recent_past_sessions_are_shown_and_flagged(self):
+        past = TODAY - timedelta(days=7)
+        tabs = make_tabs([past] + self.future, ["B4"], self._whole)
+        f = forecast.build(self.DATA, tabs, TODAY, horizon_weeks=4,
+                           lookback_weeks=2)
+        rows = [r for r in f["sessions"] if r["date"] == past.isoformat()]
+        self.assertTrue(rows, "last week must stay visible for checking")
+        self.assertTrue(rows[0]["is_past"])
+        self.assertTrue(all(not r["is_past"] for r in f["sessions"]
+                            if date.fromisoformat(r["date"]) > TODAY))
+
+    def test_sessions_older_than_the_lookback_are_excluded(self):
+        old = TODAY - timedelta(weeks=6)
+        tabs = make_tabs([old] + self.future, ["B4"], self._whole)
+        f = forecast.build(self.DATA, tabs, TODAY, horizon_weeks=4,
+                           lookback_weeks=2)
+        self.assertFalse([r for r in f["sessions"]
+                          if r["date"] == old.isoformat()])
+
+    def test_a_past_row_is_scored_WITHOUT_seeing_its_own_result(self):
+        """In-sample fitting would flatter the model exactly where it is checked.
+
+        The offset for a past date must come only from sessions before it, so a
+        batch whose entire history is that one date cannot be scored at all."""
+        curve = {0: 0.0, 1: 0.0}
+        obs = {"B4": [(0, TODAY - timedelta(days=14), 4.0),
+                      (1, TODAY - timedelta(days=7), 3.0)]}
+        before = forecast._offset_asof(obs, curve, "B4", TODAY - timedelta(days=7))
+        self.assertEqual(before, 4.0, "only the earlier session may be used")
+        both = forecast._offset_asof(obs, curve, "B4", TODAY)
+        self.assertEqual(both, 3.5)
+        self.assertIsNone(
+            forecast._offset_asof(obs, curve, "B4", TODAY - timedelta(days=21)),
+            "no prior session means no honest prediction")
 
     def test_week_beyond_observed_life_is_skipped_not_extrapolated(self):
         """No curve point => no forecast. Silence beats a made-up number.
@@ -341,7 +378,7 @@ class TestBuild(unittest.TestCase):
         f = forecast.build(self.DATA, tabs, TODAY, horizon_weeks=4)
         allowed = {"date", "date_lbl", "batch", "pod", "topic", "trainer", "kind",
                    "wk", "horizon_wks", "denom", "pred_pct", "pred", "lo", "hi",
-                   "assumed_strength"}
+                   "assumed_strength", "is_past", "actual", "err_pct"}
         for r in f["sessions"]:
             self.assertEqual(set(r), allowed)
 
