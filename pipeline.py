@@ -326,6 +326,23 @@ def main() -> None:
     print(f"   {len(report)} session column(s) marked "
           f"({new_n} new) · {len(warnings)} warning(s)")
 
+    # Same rule as the attendee and day-1 gates: a session dropped because Zoom
+    # exported the wrong shape is a session MISSING from the dashboard. The file
+    # downloaded fine, so the gate above cannot see it, and one bad batch still
+    # produces batches, so the day-1 gate below cannot either. Left ungated this
+    # publishes quietly incomplete numbers on a green run. Fix the export, or
+    # pass --allow-partial to publish the week without those sessions.
+    unreadable = [w for w in warnings if ac.ZERO_ATTENDEE_TAG in w]
+    if unreadable and not args.allow_partial:
+        raise SystemExit(
+            f"Refusing to publish: {len(unreadable)} attendee file(s) yielded no "
+            "attendees, so their sessions were skipped rather than marking those "
+            "batches absent — the previous store is left in place:\n  - "
+            + "\n  - ".join(unreadable[:5])
+            + (f"\n  ... and {len(unreadable) - 5} more" if len(unreadable) > 5 else "")
+            + "\nRe-export those sessions as a Zoom Attendee Report, or pass "
+              "--allow-partial to publish this week without them.")
+
     if not args.no_upload and not cfg["store_folder_id"]:
         raise SystemExit("STORE_FOLDER_ID missing — where should the store "
                          "be uploaded? (or run with --no-upload)")

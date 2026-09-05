@@ -290,7 +290,14 @@ def read_roster(rows: list) -> dict | None:
 # ────────────────────────────── attendee side ────────────────────────────────
 def read_attendees(raw: bytes) -> tuple:
     """(people, unique_viewers) from a Zoom attendee report. people maps email ->
-    {phones, minutes, intervals}; only rows with recorded time count as present."""
+    {phones, minutes, intervals}; only rows with recorded time count as present.
+
+    Raises ValueError when `raw` is not an Attendee Report at all. Zoom's flat
+    participant list has none of the sections this walks, so it used to return an
+    empty dict and publish a real-looking 0% day-one. Raising routes it into
+    build()'s `errors`, which stops the pipeline replacing a good store with a
+    wrong one. A report whose sections exist but are empty still returns {}.
+    """
     text = raw.decode("utf-8-sig", errors="replace")
     rows = list(csv.reader(io.StringIO(text)))
 
@@ -339,6 +346,16 @@ def read_attendees(raw: bytes) -> tuple:
                 p["minutes"] += float(g("time in session (minutes)"))
             except ValueError:
                 pass
+
+    # Gate on the RAW parse, before the internal/zero-minute filter. An empty
+    # `people` means no row in the file was readable at all, which is a broken
+    # export, not a quiet session. Publishing it would put a real-looking 0% day
+    # one on the dashboard and keep the weekly run green. Raising instead routes
+    # it into build()'s `errors`, which refuses to replace a good store.
+    # An empty `attended` with a non-empty `people` is left alone: that is the
+    # filter doing its job on internal accounts and no-show joins.
+    if not people:
+        raise ValueError(f"{ac.ZERO_ATTENDEE_TAG} - {ac.zero_attendee_reason(text)}")
 
     attended = {e: p for e, p in people.items()
                 if not INTERNAL_PAT.search(e) and _minutes(p) > 0}

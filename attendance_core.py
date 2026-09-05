@@ -159,6 +159,76 @@ def parse_l2(l2_bytes, with_labels=False, with_mentors=False):
     return (out, labels) if with_labels else out
 
 # ---------------- Zoom attendee report ----------------
+# Zoom exports two different shapes for the same webinar. Only one is usable.
+#
+#   Attendee Report  — has an `Attended` / `First Name` header row, and named
+#                      sections ("Attendee Details", "Other Attended"). Carries
+#                      Phone, which is ~9% of our roster matches.
+#   flat list        — `Name (original name), Email, Join time, Leave time,
+#                      Duration (minutes), Guest, ...`. No Attended column, no
+#                      Phone. Zoom emits this for webinars run WITHOUT
+#                      registration, so two sessions on the same day can differ.
+#
+# The flat shape used to parse to zero attendees WITHOUT raising, in both
+# `parse_attendees` (here) and `day1_analysis.read_attendees`. That marked a
+# whole batch absent, published a real-looking 0%, and left the run green.
+# `is_attendee_report` is the single definition of "usable shape" that all three
+# callers now gate on. Only `bsiai.sessions_from_files` ever guarded this.
+# The gate is the PARSE RESULT, not the shape. Shape detection alone is not
+# enough: a tab-delimited or UTF-16 report still carries a readable "Attendee
+# Details" line, so it looks like a report, yet `parse_attendees` (comma dialect)
+# reads zero rows out of it. Keying on "did we actually get anybody" catches the
+# flat list, the wrong delimiter, a renamed column and whatever Zoom does next.
+# `is_attendee_report` then only chooses which CAUSE to name in the warning.
+ZERO_ATTENDEE_TAG = 'parsed to ZERO attendees'
+UNREADABLE_FORMAT_TAG = 'not a Zoom Attendee Report'
+
+_SECTION_MARKERS = {'attendee details', 'other attended',
+                    'host details', 'panelist details'}
+
+
+def zero_attendee_reason(text) -> str:
+    """Why a file yielded nobody, phrased for the person who has to fix it.
+
+    Two very different failures land here: a wrong export shape is fixed at the
+    extractor, a report whose rows will not parse is usually a delimiter or an
+    encoding problem. Saying which saves the triage."""
+    if not is_attendee_report(text):
+        return (f'{UNREADABLE_FORMAT_TAG} - no Attended/First Name header and no '
+                f'Attendee Details section. A flat participant list? Re-export it '
+                f'as an Attendee Report.')
+    return ('it looks like an Attendee Report, but no row yielded an Email or '
+            'Phone - wrong delimiter (tab, not comma), a non-UTF-8 encoding, or '
+            'renamed columns.')
+
+
+def is_attendee_report(text) -> bool:
+    """True when `text` is a real Zoom *Attendee Report* rather than a flat
+    participant list.
+
+    Accepts EITHER marker, because the two parsers key on different ones: the
+    marker here wants the `Attended` + `First Name` header row, while
+    `day1_analysis.read_attendees` walks the named sections. A genuine report
+    has both; the flat list has neither.
+
+    A report whose header exists but carries NO data rows is a genuinely empty
+    session (nobody joined), not a format problem — this returns True for it, so
+    a real zero is still allowed to be zero. Scans with early exit rather than
+    materialising the file, since attendee CSVs run to ~100 MB in memory.
+    """
+    if not text:
+        return False
+    for r in csv.reader(io.StringIO(text)):
+        if not r:
+            continue
+        c0 = r[0].strip()
+        if c0 == 'Attended' and 'First Name' in r:
+            return True
+        if c0.lower() in _SECTION_MARKERS:
+            return True
+    return False
+
+
 def parse_attendees(text):
     rows = list(csv.reader(io.StringIO(text)))
     hidx = next((i for i, r in enumerate(rows)
@@ -166,13 +236,22 @@ def parse_attendees(text):
     emails, ph_full, ph_last10 = set(), set(), set()
     if hidx is None: return emails, ph_full, ph_last10
     h = rows[hidx]
-    try: ei, pi = h.index('Email'), h.index('Phone')
-    except ValueError: return emails, ph_full, ph_last10
+    # EITHER key is enough. Matching is an OR (email hit or phone hit), so a
+    # report carrying only one of the two columns still marks everyone whose
+    # roster row agrees on that one. Requiring both used to throw away a whole
+    # readable file: a registration form that never collected a phone number has
+    # no Phone column, `h.index('Phone')` raised, and the emails that WERE there
+    # went in the bin — the session then looked like a broken export and was
+    # skipped. Only a report with neither column is genuinely unusable.
+    ei = h.index('Email') if 'Email' in h else None
+    pi = h.index('Phone') if 'Phone' in h else None
+    if ei is None and pi is None: return emails, ph_full, ph_last10
     for r in rows[hidx + 1:]:
-        if not r or len(r) <= ei: continue
+        if not r: continue
         if r[0].strip() == 'Attended': break
-        e = re.sub(r'\s', '', (r[ei] or '')).lower()
-        p = _digits(re.sub(r'\.0$', '', ((r[pi] if len(r) > pi else '') or '').strip()))
+        e = re.sub(r'\s', '', (r[ei] or '')).lower() if ei is not None and len(r) > ei else ''
+        p = (_digits(re.sub(r'\.0$', '', (r[pi] or '').strip()))
+             if pi is not None and len(r) > pi else '')
         if e: emails.add(e)
         if p:
             ph_full.add(p)
@@ -253,32 +332,86 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
         k = _sheet_key(name)
         if k and k not in key_sheet: key_sheet[k] = name
 
-    blob = {}                                            # name -> raw bytes
-    chosen = {}                                          # (wid,ymd) -> name (prefer non "(1)")
+    # (wid,ymd) -> [(name, bytes), ...]. The bytes ride along instead of sitting
+    # in a name-keyed dict: the two Shared Drives use the SAME folder and file
+    # naming for a shared session, so keying on the path made the second copy
+    # overwrite the first and the good copy could be gone before any fallback
+    # below could reach it.
+    cands: dict = {}
     for name, data in attendee_files:
-        blob[name] = data
         pf = _parse_filename(name.split('/')[-1])
         if not pf: continue
-        if pf in chosen and '(1)' in name: continue
-        chosen[pf] = name
+        cands.setdefault(pf, []).append((name, data))
+
+    # The same webinar is often uploaded twice: the two Shared Drives overlap
+    # (166 sessions as of Sep 2026), and a single drive can hold "(1)" copies.
+    # Only ONE copy is marked, so which one wins decides the numbers.
+    #
+    # Order of preference, highest first:
+    #   1. the LAST caller-supplied copy that is not a "(1)" duplicate. Callers
+    #      list drives in `attendee_folder_id` order, so the drive named last —
+    #      "Zoom extracts", the authoritative one per the owner, 2026-09-06 —
+    #      wins. This used to fall out of a last-one-wins dict write; it is
+    #      explicit now, because swapping the ids in the secret silently
+    #      reversed it.
+    #   2. "(1)" copies, only if nothing else is left.
+    #
+    # Preference alone is not enough: the preferred copy can be the unreadable
+    # export shape. So callers below try candidates in this order and take the
+    # first that yields anybody, rather than skipping a session outright when a
+    # perfectly good copy exists on the other drive.
+    chosen = {}
+    for pf, items in cands.items():
+        chosen[pf] = ([c for c in reversed(items) if '(1)' not in c[0]]
+                      + [c for c in reversed(items) if '(1)' in c[0]])
 
     # accumulate attendee sets per (sheet_name, mmdd, POD), merging multiple files
     acc, warnings = {}, []
     unknown_pods = set()
-    for (wid, ymd), info in chosen.items():
+    for (wid, ymd), ranked in chosen.items():
+        info = ranked[0][0]
         keys, topic = wid_map.get(wid, (None, ''))
         if keys is None:                                 # not in L2 -> recover from folder
-            keys = _folder_batches(info)
-            if keys:
-                warnings.append(f'Webinar {wid}: not in L2 — batch taken from folder name')
+            for cand, _data in ranked:                   # drives may name folders differently
+                keys = _folder_batches(cand)
+                if keys:
+                    warnings.append(f'Webinar {wid}: not in L2 — batch taken from folder name')
+                    break
         if not keys:
             warnings.append(f'Webinar {wid}: no batch info in L2 or folder — skipped ({info.split("/")[-1]})')
             continue
-        try:
-            text = blob[info].decode('utf-8-sig', errors='replace')
-        except Exception as e:
-            warnings.append(f'Could not read {info}: {e}'); continue
-        em, pf, p10 = parse_attendees(text)
+
+        # Take the first copy that yields anybody. A session is only skipped when
+        # EVERY copy is unreadable, so an unusable export on the preferred drive
+        # can no longer cost a session that the other drive holds intact.
+        em = pf = p10 = None
+        tried = []
+        for cand, data in ranked:
+            try:
+                text = data.decode('utf-8-sig', errors='replace')
+            except Exception as e:
+                tried.append(f'{cand.split("/")[-1]}: {e}')
+                continue
+            c_em, c_pf, c_p10 = parse_attendees(text)
+            if c_em or c_pf:
+                info, em, pf, p10 = cand, c_em, c_pf, c_p10
+                break
+            tried.append(f'{cand.split("/")[-1]} - {zero_attendee_reason(text)}')
+
+        # SKIP rather than mark. A file we cannot read yields nobody, and marking
+        # that session would write Absent against every student in the batch —
+        # indistinguishable, on the dashboard, from a session nobody attended.
+        # Skipping means the column is never created, so the session is visibly
+        # MISSING instead of silently wrong. pipeline.py turns this warning into a
+        # refusal to publish. A webinar that genuinely had no attendees is caught
+        # by the same net; that is deliberate, since it is far rarer than a broken
+        # export and publishing a whole batch as absent is the worse error.
+        if em is None and pf is None:
+            warnings.append(
+                f'Webinar {wid}: {ZERO_ATTENDEE_TAG} in all {len(ranked)} copy(ies) '
+                f'- {"; ".join(tried)}. Session SKIPPED rather than marking the '
+                f'whole batch absent.')
+            continue
         mm = f'{int(ymd[5:7]):02d}_{int(ymd[8:10]):02d}'
 
         # Which POD is this session for? L2's own label is authoritative; the

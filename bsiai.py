@@ -35,7 +35,8 @@ import io
 import re
 from collections import defaultdict
 
-from attendance_core import _digits, _mmdd, parse_attendees
+from attendance_core import (ZERO_ATTENDEE_TAG, _digits, _mmdd, parse_attendees,
+                             zero_attendee_reason)
 from data import date_label
 
 # Roster batch labels carry a group suffix the shared parser cannot read:
@@ -207,8 +208,11 @@ def sessions_from_files(attendee_files, l2_map) -> tuple[dict, list]:
         if not emails and not ph_full:
             if wid not in seen_zero:
                 seen_zero.add(wid)
-                warnings.append(f"Webinar {wid} ({fname}): parsed to ZERO attendees "
-                                "- not a Zoom Attendee Report? skipped")
+                # Skip either way, but say WHICH failure it was: a wrong export
+                # shape is fixed at the extractor, a delimiter/encoding problem
+                # is not. Shared with the AI CAP marker so the two agree.
+                warnings.append(f"Webinar {wid} ({fname}): {ZERO_ATTENDEE_TAG} - "
+                                f"{zero_attendee_reason(text)} Skipped.")
             continue
 
         for n in bsi:
