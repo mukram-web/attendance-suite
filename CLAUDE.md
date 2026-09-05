@@ -59,7 +59,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
 | `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
-| `archive.py` | dated snapshots of the four source Sheets (+ the store) into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
+| `archive.py` | dated snapshots of the four source Sheets, the store, **and the marked workbook** into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
 | `site_build.py`, `site_templates/` | the static-website build. See §7 — it is **wired to deploy**, not inert. |
 
 ## 4. Data sources
@@ -198,8 +198,14 @@ L2 is the worst case: `REQUIRE_L2` (§5.6) means a session with no L2 row is
 staling it.
 
 Step `[8b]` copies each Sheet as `<Label>_<YYYY-MM-DD>.xlsx` into an `archive/`
-folder beside the store, plus that week's `attendance_store_<date>.duckdb`.
-About 18 MB a week.
+folder beside the store, plus that week's `attendance_store_<date>.duckdb` and
+`Master_Batch_Rosters_marked_<date>.xlsx`. About 27 MB a week.
+
+**The marked workbook is archived separately from the source roster**, and both
+matter. The source snapshot is the sheet as its owners keep it; the marked one is
+that sheet with every Present/Absent column written in — the artefact people
+actually download and pass around, and the one the pipeline overwrites on Drive
+each Monday. `MARKED_LABEL` keeps the two names apart.
 
 - **Snapshots are immutable.** A name that already exists is skipped, never
   replaced — re-running on the same day must not overwrite the morning's copy
@@ -234,10 +240,12 @@ mistake it for today. Two things to know:
   are immutable so they cache permanently rather than on the live store's
   30-minute TTL, and they must never be written to `_STORE_PATH` — that would
   leave last month's data where the live loader expects today's.
-- **The marked .xlsx is not archived per week.** Only the current
-  `Master_Batch_Rosters_marked.xlsx` exists on Drive and the pipeline replaces it
-  every Monday, so the download button is suppressed while viewing history. Left
-  enabled it would hand over today's workbook labelled as that week's.
+- **The marked .xlsx download follows the week you are viewing.** An archived
+  week's store still carries `marked_xlsx_file_id`, but that id points at the
+  LIVE `Master_Batch_Rosters_marked.xlsx`, which the pipeline replaces every
+  Monday — following it would hand over today's workbook labelled as that week's.
+  `_archived_marked()` looks up the dated copy instead. Weeks refreshed before
+  2026-09-05 have none, and the app says so rather than serving the wrong file.
 - The selector only appears when `store_folder_id` is configured AND at least one
   snapshot exists, so a fresh install shows nothing rather than an empty control.
 

@@ -479,7 +479,8 @@ def main() -> None:
     print("[8b] Archiving the source sheets …", flush=True)
     try:
         archive.run(svc, cfg, cfg["store_folder_id"],
-                    when=datetime.now(IST).date(), store_bytes=store_bytes)
+                    when=datetime.now(IST).date(), store_bytes=store_bytes,
+                    marked_bytes=marked_bytes)
     except Exception as e:
         print(f"   WARNING: archive step failed entirely ({e})")
 

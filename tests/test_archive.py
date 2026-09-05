@@ -164,6 +164,36 @@ class TestRun(ArchiveTest):
         self.assertIn("attendance_store_2026-09-05.duckdb", self.fake.uploaded)
         self.assertEqual(len(out["saved"]), 5)
 
+    def test_marked_workbook_is_archived_when_given(self):
+        """The pipeline overwrites the live marked .xlsx every Monday, so the
+        dated copy is the only record of what last week's marking looked like."""
+        out = self._run(marked_bytes=b"marked-xlsx")
+        self.assertIn("Master_Batch_Rosters_marked_2026-09-05.xlsx",
+                      self.fake.uploaded)
+        self.assertEqual(len(out["saved"]), 5)
+
+    def test_marked_snapshot_does_not_collide_with_the_source_roster(self):
+        """Two different artefacts: the sheet as its owners keep it, and the
+        workbook with attendance written in. Both must survive the same run."""
+        self._run(marked_bytes=b"marked-xlsx")
+        self.assertIn("Master_Batch_Rosters_2026-09-05.xlsx", self.fake.uploaded)
+        self.assertIn("Master_Batch_Rosters_marked_2026-09-05.xlsx",
+                      self.fake.uploaded)
+
+    def test_marked_and_store_together(self):
+        out = self._run(store_bytes=b"db", marked_bytes=b"xlsx")
+        self.assertEqual(len(out["saved"]), 6)
+
+    def test_marked_omitted_when_not_given(self):
+        self._run()
+        self.assertFalse(any("marked" in n for n in self.fake.uploaded))
+
+    def test_marked_rerun_same_day_is_skipped(self):
+        self._run(marked_bytes=b"xlsx")
+        before = list(self.fake.uploaded)
+        self._run(marked_bytes=b"different-bytes")
+        self.assertEqual(self.fake.uploaded, before)
+
     def test_store_omitted_when_not_given(self):
         self._run()
         self.assertFalse(any(n.endswith(".duckdb") for n in self.fake.uploaded))
