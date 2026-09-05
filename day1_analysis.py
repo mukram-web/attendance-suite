@@ -289,8 +289,10 @@ def read_roster(rows: list) -> dict | None:
 
 # ────────────────────────────── attendee side ────────────────────────────────
 def read_attendees(raw: bytes) -> tuple:
-    """(people, unique_viewers) from a Zoom attendee report. people maps email ->
-    {phones, minutes, intervals}; only rows with recorded time count as present.
+    """(people, unique_viewers) from a Zoom attendee report. people maps a person
+    key -> {phones, minutes, intervals}; only rows with recorded time count as
+    present. The key is the Email when the report carries one, else "phone:<last
+    10 digits>", so a report with only one of the two columns still counts.
 
     Raises ValueError when `raw` is not an Attendee Report at all. Zoom's flat
     participant list has none of the sections this walks, so it used to return an
@@ -330,12 +332,21 @@ def read_attendees(raw: bytes) -> tuple:
             return row[j].strip() if j is not None and j < len(row) else ""
 
         email = g("email").lower()
-        if not email or "@" not in email:
+        if "@" not in email:
+            email = ""
+        ph = norm_phone(g("phone"))
+        # EITHER key identifies a person, exactly as the roster join below does.
+        # Keying on email alone dropped every row of a report whose registration
+        # form never collected one: `people` came out empty, which the gate at
+        # the end of this function reads as a broken export and turns into a
+        # refusal to publish the week. A phone-keyed entry never collides with an
+        # email one - roster emails contain "@", this prefix does not.
+        who = email or (f"phone:{ph}" if ph else "")
+        if not who:
             continue
         if (g("attended").lower() or "yes") != "yes":
             continue
-        p = people.setdefault(email, {"phones": set(), "minutes": 0.0, "intervals": []})
-        ph = norm_phone(g("phone"))
+        p = people.setdefault(who, {"phones": set(), "minutes": 0.0, "intervals": []})
         if ph:
             p["phones"].add(ph)
         join, leave = _parse_time(g("join time")), _parse_time(g("leave time"))
@@ -425,8 +436,10 @@ def analyse_session(roster: dict, raw: bytes, session: dict) -> dict:
     present_flags = [False] * len(entries)
     pay_counts, close_counts, matched = defaultdict(int), defaultdict(int), 0
 
-    for email, p in attended.items():
-        i = roster["by_email"].get(email)
+    for who, p in attended.items():
+        # `who` is an email or a "phone:" key; the latter simply misses here and
+        # falls through to the phone match, which is the only one it can win.
+        i = roster["by_email"].get(who)
         if i is None:
             for ph in p["phones"]:
                 if ph in roster["by_phone"]:

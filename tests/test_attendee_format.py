@@ -359,5 +359,63 @@ class TestEitherKeyIsEnough(unittest.TestCase):
         self.assertFalse([w for w in warnings if ac.ZERO_ATTENDEE_TAG in w])
 
 
+
+class TestDay1EitherKey(unittest.TestCase):
+    """Day-1 identifies a person by email OR phone, like the roster join it
+    feeds. A report with only one of the two columns must still produce numbers
+    rather than an empty parse the publish gate reads as a broken export."""
+
+    def _rep(self, header, rows):
+        return chr(10).join(
+            ["Attendee Report", "",
+             "Topic,Webinar ID,Actual Start Time,Unique Viewers",
+             "Some Session,91695866411,09/09/2026 19:00,2", "",
+             "Attendee Details", header] + rows).encode()
+
+    BOTH = ("Attended,First Name,Last Name,Email,Phone,Join Time,Leave Time,"
+            "Time in Session (minutes)")
+    NO_EMAIL = ("Attended,First Name,Last Name,Phone,Join Time,Leave Time,"
+                "Time in Session (minutes)")
+    NO_PHONE = ("Attended,First Name,Last Name,Email,Join Time,Leave Time,"
+                "Time in Session (minutes)")
+
+    def test_email_and_phone(self):
+        people, viewers = day1_analysis.read_attendees(self._rep(self.BOTH, [
+            "Yes,A,B,a@x.com,919000000001,09/09/2026 19:02,09/09/2026 20:31,89"]))
+        self.assertEqual(set(people), {"a@x.com"})
+        self.assertEqual(people["a@x.com"]["phones"], {"9000000001"})
+        self.assertEqual(viewers, 2)
+
+    def test_email_only_column(self):
+        people, _ = day1_analysis.read_attendees(self._rep(self.NO_PHONE, [
+            "Yes,A,B,a@x.com,09/09/2026 19:02,09/09/2026 20:31,89"]))
+        self.assertEqual(set(people), {"a@x.com"})
+
+    def test_phone_only_column_is_keyed_by_phone(self):
+        people, _ = day1_analysis.read_attendees(self._rep(self.NO_EMAIL, [
+            "Yes,A,B,919000000001,09/09/2026 19:02,09/09/2026 20:31,89"]))
+        self.assertEqual(set(people), {"phone:9000000001"})
+        # the phone must still be in `phones`, since that is what the roster
+        # join actually matches on
+        self.assertEqual(people["phone:9000000001"]["phones"], {"9000000001"})
+
+    def test_a_phone_only_report_does_not_raise(self):
+        # It used to: empty people -> ValueError -> the whole week unpublished.
+        day1_analysis.read_attendees(self._rep(self.NO_EMAIL, [
+            "Yes,A,B,919000000001,09/09/2026 19:02,09/09/2026 20:31,89",
+            "Yes,C,D,919000000002,09/09/2026 19:05,09/09/2026 20:30,85"]))
+
+    def test_rows_with_neither_key_are_still_dropped(self):
+        with self.assertRaises(ValueError):
+            day1_analysis.read_attendees(self._rep(self.BOTH, [
+                "Yes,A,B,,,09/09/2026 19:02,09/09/2026 20:31,89"]))
+
+    def test_a_phone_key_never_collides_with_an_email_one(self):
+        people, _ = day1_analysis.read_attendees(self._rep(self.BOTH, [
+            "Yes,A,B,a@x.com,919000000001,09/09/2026 19:02,09/09/2026 20:31,89",
+            "Yes,C,D,,919000000002,09/09/2026 19:05,09/09/2026 20:30,85"]))
+        self.assertEqual(set(people), {"a@x.com", "phone:9000000002"})
+
+
 if __name__ == "__main__":
     unittest.main()
