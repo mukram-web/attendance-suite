@@ -21,6 +21,7 @@ import io
 import json
 import pickle
 import datetime as _dt
+import html as _html
 from datetime import datetime
 
 import polls as _polls_mod          # the NPS rule, shared with the pipeline
@@ -1222,13 +1223,19 @@ with sub_recap:
             st.subheader("This week")
             for _a, _col in zip(_r["awards"], st.columns(len(_r["awards"]))):
                 with _col:
+                    # The topic and mentor are hand-typed in L2 and this block
+                    # renders with unsafe_allow_html, so they are escaped. A
+                    # stray '<' in a session title would otherwise eat the rest
+                    # of the card, and anything worse than that would run.
+                    _esc = _html.escape
                     st.markdown(
-                        f"**{_a['award']}**  \n"
-                        f"### {_a['value']}  \n"
-                        f"{_a['batch']} · {_a['topic'][:44]}"
-                        + (f" · {_a['pod']}" if _a.get("pod") else "")
-                        + (f"  \n_{_a['mentor']}_" if _a.get("mentor") else "")
-                        + f"  \n<span style='color:#7a8598;font-size:12px'>{_a['why']}</span>",
+                        f"**{_esc(_a['award'])}**  \n"
+                        f"### {_esc(_a['value'])}  \n"
+                        f"{_esc(_a['batch'])} · {_esc(_a['topic'][:44])}"
+                        + (f" · {_esc(_a['pod'])}" if _a.get("pod") else "")
+                        + (f"  \n_{_esc(_a['mentor'])}_" if _a.get("mentor") else "")
+                        + "  \n<span style='color:#7a8598;font-size:12px'>"
+                        + _esc(_a["why"]) + "</span>",
                         unsafe_allow_html=True)
 
         st.subheader("Week by week")
@@ -1310,8 +1317,22 @@ with tab_students:
             if _g is None or _g.empty:
                 st.warning(f"No roster grid stored for {_b}.")
             else:
+                # Count only the sessions the Dashboard shows. The grid keeps a
+                # column for every marked session, including the ones
+                # data.REQUIRE_L2 hides — counting those put five phantom
+                # sessions in every B35 student's denominator and deflated
+                # attendance by 13-22 points against the dashboard's own figure.
+                _bd = (store.get("DATA") or {}).get(_b)
+                _vis = _students.visible_keys(_bd["sessions"]) if _bd else None
+                if _bd is None:
+                    st.warning(
+                        f"{_b} has a roster grid but no dashboard data yet, so "
+                        "there is no L2-checked session list to measure against. "
+                        "Every marked column is counted below — treat the "
+                        "percentages as provisional until the batch appears on "
+                        "the Dashboard tab.")
                 _summ = _students.summarise(list(_g.columns),
-                                            _g.to_dict("records"))
+                                            _g.to_dict("records"), visible=_vis)
                 st.caption(
                     f"**{_summ['n_students']:,} students · {_summ['n_sessions']} "
                     "sessions.** A student is counted only against sessions they "
