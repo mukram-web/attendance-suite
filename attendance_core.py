@@ -159,6 +159,44 @@ def parse_l2(l2_bytes, with_labels=False, with_mentors=False):
     if with_mentors: return out, mentors
     return (out, labels) if with_labels else out
 
+
+def l2_mentor_emails(l2_bytes) -> dict:
+    """{mentor name as typed -> their email}, from L2's own two columns.
+
+    The Mentor cell is hand-typed and drifts ('Swapnil', 'Swapnil Narayan',
+    'Swapnil (Play Simulive)'), so the email beside it is the only hard evidence
+    that two spellings are one person. Many names legitimately map to one
+    address — that is the point, and `trainers.resolve` collapses them.
+
+    Headers are matched EXACTLY, for the same reason `parse_l2` does: the row
+    also carries "In-house/Freelancer mentor", and a substring test on 'mentor'
+    would bind to whichever column came first.
+
+    Coverage is partial by nature — the email column is absent from the older
+    monthly tabs entirely — so callers must treat a missing name as "cluster it
+    by spelling instead", never as "not a real trainer".
+    """
+    wb = load_workbook(io.BytesIO(l2_bytes), data_only=True)
+    out: dict = {}
+    for ws in wb.worksheets:
+        mcol = ecol = hrow = None
+        for r in range(1, min(ws.max_row or 1, 6) + 1):
+            for c in range(1, (ws.max_column or 1) + 1):
+                v = str(ws.cell(r, c).value or '').strip().lower()
+                if v == 'mentor': mcol, hrow = c, r
+                elif v in ("mentor's email", 'mentors email', 'mentor email'):
+                    ecol = c
+            if mcol and ecol: break
+        if not (mcol and ecol and hrow): continue
+        for r in range(hrow + 1, (ws.max_row or hrow) + 1):
+            name = str(ws.cell(r, mcol).value or '').strip()
+            email = str(ws.cell(r, ecol).value or '').strip().lower()
+            # first-wins, like every other L2 map, so a later typo cannot
+            # silently repoint a name that already resolved
+            if name and '@' in email:
+                out.setdefault(name, email)
+    return out
+
 # ---------------- Zoom attendee report ----------------
 # Zoom exports two different shapes for the same webinar. Only one is usable.
 #

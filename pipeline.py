@@ -54,6 +54,8 @@ import polls                          # noqa: E402
 import day1_analysis                  # noqa: E402
 import forecast                       # noqa: E402
 import archive                        # noqa: E402
+import recap                          # noqa: E402
+import trainers                       # noqa: E402
 import sheets as dsheets              # noqa: E402
 import live_data                      # noqa: E402
 
@@ -208,6 +210,27 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         except Exception as e:
             forecast_section = forecast.empty_result(f"forecast build failed: {e}")
 
+    # Recap and per-trainer rollups. Built here for the same reason the forecast
+    # is: they need the finished DATA and nothing else, so they cannot disagree
+    # with the dashboard, and the app stays a pure reader of the store.
+    # Neither may take the run down - a recap is a nice-to-have beside the
+    # attendance numbers people actually depend on.
+    recap_section = trainer_section = None
+    try:
+        recap_section = recap.build(DATA, datetime.now(IST).date())
+    except Exception as e:
+        recap_section = {"weeks": [], "latest": None, "awards": [],
+                         "leaderboard": [], "sessions": [],
+                         "warnings": [f"recap build failed: {e}"]}
+    try:
+        rows = recap.collect_sessions(DATA, datetime.now(IST).date())
+        emails = ac.l2_mentor_emails(l2_bytes) if l2_bytes else {}
+        trainer_section = trainers.build(rows, emails)
+    except Exception as e:
+        trainer_section = {"trainers": [], "ambiguous": [], "merged": {},
+                           "n_raw": 0, "n_people": 0,
+                           "warnings": [f"trainer build failed: {e}"]}
+
     df = dc.compute(marked_bytes)
     smap = dc.batch_sheet_map(marked_bytes)
     # only real batch tabs — helper tabs like 'l2 cx data' or 'Auto pay' pass
@@ -251,6 +274,10 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         # None means "not configured" (no BSIAI_ROSTER_ID). A section whose DATA
         # is empty means "configured, nothing to show yet". The app distinguishes.
         "bsiai": bsiai_section,
+        # Aggregates only — counts and percentages, never a respondent or a
+        # student — so both are safe in the store and on the public site.
+        "recap": recap_section,
+        "trainers": trainer_section,
     }
     con.execute("CREATE TABLE meta (key VARCHAR, value VARCHAR)")
     con.executemany("INSERT INTO meta VALUES (?, ?)",
