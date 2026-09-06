@@ -720,10 +720,10 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-(tab_dash, tab_sessions, tab_roster, tab_day1, tab_fcst, tab_students,
+(tab_dash, tab_sessions, tab_roster, tab_day1, tab_fcst,
  tab_bsiai) = st.tabs(
     ["📊 Dashboard", "📚 Sessions", "📋 Roster (marked attendance)",
-     "🎯 Day-1 analysis", "🔮 Forecast", "🧑‍🎓 Students", "🧩 BSIAI"]
+     "🎯 Day-1 analysis", "🔮 Forecast", "🧩 BSIAI"]
 )
 
 # Browse / This week / Trainers are three views of the SAME thing — the session
@@ -1300,96 +1300,7 @@ with sub_trainer:
                 + ", ".join(f"**{n}**" for n in _t["ambiguous"])
                 + ". Add their email to L2's *Mentor's email* column to resolve them.")
 
-# ============================ TAB 7 - STUDENTS ===============================
-with tab_students:
-    if not store_mode:
-        st.info("The per-student view reads the prebuilt roster grids.")
-    else:
-        import pandas as _pd
-        import students as _students
-        _batches = store.get("batches") or []
-        if not _batches:
-            st.warning("No batches in the store.")
-        else:
-            _b = st.selectbox("Batch", _batches,
-                              index=len(_batches) - 1, key="stu_batch")
-            _g = _store_grid(store["path"], _b, store["generated_at_iso"])
-            if _g is None or _g.empty:
-                st.warning(f"No roster grid stored for {_b}.")
-            else:
-                # Count only the sessions the Dashboard shows. The grid keeps a
-                # column for every marked session, including the ones
-                # data.REQUIRE_L2 hides — counting those put five phantom
-                # sessions in every B35 student's denominator and deflated
-                # attendance by 13-22 points against the dashboard's own figure.
-                _bd = (store.get("DATA") or {}).get(_b)
-                _vis = _students.visible_keys(_bd["sessions"]) if _bd else None
-                if _bd is None:
-                    st.warning(
-                        f"{_b} has a roster grid but no dashboard data yet, so "
-                        "there is no L2-checked session list to measure against. "
-                        "Every marked column is counted below — treat the "
-                        "percentages as provisional until the batch appears on "
-                        "the Dashboard tab.")
-                _summ = _students.summarise(list(_g.columns),
-                                            _g.to_dict("records"), visible=_vis)
-                st.caption(
-                    f"**{_summ['n_students']:,} students · {_summ['n_sessions']} "
-                    "sessions.** A student is counted only against sessions they "
-                    "were invited to — every whole-batch session plus their own "
-                    "pod's. You cannot be absent from a session you were never "
-                    "invited to, and dividing by every column is how a pod-heavy "
-                    "batch comes to look like it collapsed."
-                )
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("Students", f"{_summ['n_students']:,}")
-                c2.metric("Attended ≥1", f"{_summ['attended_any']:,}")
-                c3.metric("Never attended", f"{_summ['never_attended']:,}")
-                _bk = _summ["buckets"]
-                c4.metric("Core (≥75%)", f"{_bk.get('core', 0):,}")
-
-                st.subheader("How the batch splits")
-                st.caption("An average hides whether everyone comes a third of "
-                           "the time or a third of them come always — and those "
-                           "need completely different responses.")
-                _order = [("core", "Core ≥75%"), ("regular", "Regular 50-75%"),
-                          ("occasional", "Occasional 25-50%"),
-                          ("rare", "Rare <25%"), ("never", "Never attended")]
-                st.dataframe(_pd.DataFrame(
-                    [{"Group": lbl, "Students": _bk.get(k, 0),
-                      "Share": (round(_bk.get(k, 0) / _summ["n_students"] * 100, 1)
-                                if _summ["n_students"] else 0)}
-                     for k, lbl in _order]), width='stretch', hide_index=True)
-
-                st.subheader("Students")
-                _q = st.text_input("Search email or phone", key="stu_q").strip().lower()
-                _people = _summ["students"]
-                if _q:
-                    _people = [p for p in _people
-                               if _q in str(p["email"]).lower()
-                               or _q in str(p["phone"]).lower()]
-                _mask = st.checkbox("Show full contact details", value=False,
-                                    key="stu_mask")
-                st.dataframe(_pd.DataFrame([{
-                    "Email": p["email"] if _mask else mask_email(p["email"]),
-                    "Phone": p["phone"] if _mask else mask_phone(p["phone"]),
-                    "POD": p["pod"], "Active": p["active"],
-                    "Attended": p["attended"], "Invited": p["invited"],
-                    "Attendance %": p["pct"], "Unmarked": p["unmarked"],
-                } for p in _people[:2000]]), width='stretch', hide_index=True,
-                    height=460)
-                if len(_people) > 2000:
-                    st.caption(f"Showing the top 2,000 of {len(_people):,} by "
-                               "attendance. Narrow with the search box — the "
-                               "counts above always cover everyone.")
-                if _summ["skipped_columns"]:
-                    with st.expander("Columns not treated as sessions"):
-                        st.write(", ".join(f"`{c}`" for c in _summ["skipped_columns"]))
-                        st.caption("Matched on the date pattern, so a preference "
-                                   "column can never be counted as a session and "
-                                   "inflate everyone's denominator.")
-
-# ============================ TAB 8 - BSIAI ==================================
+# ============================ TAB 6 - BSIAI ==================================
 with tab_bsiai:
     st.caption("The BSIAI programme. Separate roster, separate batch numbering - "
                "a session counts only once the L2 schedule lists its webinar.")

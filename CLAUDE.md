@@ -48,7 +48,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | File | Role |
 |---|---|
 | `pipeline.py` | the weekly job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--no-upload`, `--no-site`, `--allow-partial`, `--mode`. |
-| `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), Roster, Day-1 analysis, Forecast, **Students**, BSIAI). Reads the store; does not compute. |
+| `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), Roster, Day-1 analysis, Forecast, BSIAI). Reads the store; does not compute. |
 | `attendance_core.py` | the marker engine: parses Zoom reports + L2, writes Present/Absent into the workbook. |
 | `dashboard_core.py` | `compute()` (per batch × session) and `roster_grid()` (per-student grid). |
 | `data.py` | pure data layer → the `DATA`/`summary` objects the dashboard renders. No I/O, unit-tested. |
@@ -62,7 +62,6 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. |
 | `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
 | `trainers.py` | per-trainer rollups + identity resolution (91 L2 spellings -> 63 people). Pure, unit-tested. See §4e. |
-| `students.py` | per-student records out of `grid_<batch>`. Pure, unit-tested. See §4e. |
 | `archive.py` | dated snapshots of the four source Sheets, the store, **and the marked workbook** into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
 | `site_build.py`, `site_templates/` | the static-website build. See §7 — it is **wired to deploy**, not inert. |
 
@@ -288,15 +287,18 @@ misspelled — 'Simuliive', one doubled letter, split one trainer into three.
 classification belongs to the PERSON: filling it per person lifts coverage from
 17.5% of rows to 405 of 484 sessions.
 
-**`students.py` has four traps, all of which shipped as bugs once:**
+**A per-student view was built and REMOVED (owner's call, 2026-09-06).**
+`students.py` and its tests are gone; recover them from git if it is ever wanted.
+Four traps cost real bugs there and apply to ANY future per-student work, so they
+are worth keeping in mind:
 1. Match session columns with `_mmdd`, not an ISO regex — older tabs carry
    '9th May', and an anchored pattern dropped 59 real columns.
 2. Canonicalise the roster's pod cell with `pods.from_roster_cell`. The header
    says `Techies`, the cell says `Techies - Ai Career Accelerator Program B35`;
    comparing raw matched ZERO of 3,236 students and dropped every pod session.
-3. Pass `visible_keys(DATA[batch]["sessions"])` — the grid keeps columns
-   `REQUIRE_L2` hides, and counting them deflated attendance 13-22 points below
-   the Dashboard's own figure for the same batch.
+3. Exclude the sessions `REQUIRE_L2` hides — `roster_grid` keeps their columns,
+   and counting them deflated attendance 13-22 points below the Dashboard's own
+   figure for the same batch.
 4. A student with no pod is whole-batch only, never a member of every pod.
 
 ## 5. Invariants — break these and the numbers go silently wrong
