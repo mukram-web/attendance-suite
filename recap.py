@@ -128,27 +128,28 @@ def collect_sessions(DATA: dict, today: date) -> list:
                    if wk is not None else None)
             pct = s.get("pct")
             rows.append({
+                # PASS THE SESSION DICT THROUGH rather than re-listing fields.
+                # Hand-copying is how `l2_batch` and `rating_trainer` went
+                # missing: both were sitting in `s` and simply were not on the
+                # list, so the Sessions tab showed a bare batch code and an
+                # empty Trainer rating column on all 522 rows. Anything data.py
+                # adds to a session from now on arrives here for free.
+                **s,
                 "batch": code,
                 "date": dt.isoformat(),
                 "week": week_start(dt).isoformat(),
-                "mm": s["mm"],
-                "date_lbl": s.get("date_lbl"),
                 "topic": s.get("topic") or "",
-                # How L2 names it ("AI CAP B35, B36, B37 - Techies"). Without
-                # this the Sessions tab can only show the bare batch code, and a
-                # shared session looks like three unrelated ones.
                 "l2_batch": s.get("l2_batch") or "",
                 "pod": s.get("pod") or "",
                 "mentor": (s.get("mentor") or "").strip(),
                 "present": s.get("present") or 0,
                 "total": s.get("total") or 0,
-                "pct": pct,
+                "rating_n": s.get("rating_n") or 0,
                 "wk": wk,
                 "expected_pct": round(exp, 1) if exp else None,
                 # The headline. 1.0 = exactly on curve for a cohort this old.
                 "index": (round(pct / exp, 3) if (exp and pct is not None) else None),
-                "rating": s.get("rating"),
-                "rating_n": s.get("rating_n") or 0,
+                # Short aliases the recap and trainer rollups already use.
                 "nps": s.get("rating_nps"),
                 "dist": s.get("rating_dist") or {},
             })
