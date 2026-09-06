@@ -716,9 +716,10 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-tab_dash, tab_roster, tab_day1, tab_fcst, tab_bsiai = st.tabs(
+(tab_dash, tab_roster, tab_day1, tab_fcst, tab_recap, tab_trainer,
+ tab_students, tab_bsiai) = st.tabs(
     ["📊 Dashboard", "📋 Roster (marked attendance)", "🎯 Day-1 analysis",
-     "🔮 Forecast", "🧩 BSIAI"]
+     "🔮 Forecast", "🏆 Recap", "🎓 Trainers", "🧑‍🎓 Students", "🧩 BSIAI"]
 )
 
 # ============================ TAB 1 — DASHBOARD ==============================
@@ -1015,7 +1016,199 @@ with tab_fcst:
                         _bo.items(), key=lambda kv: dc.batch_key(kv[0]))]),
                     width='stretch', hide_index=True, height=240)
 
-# ============================ TAB 5 - BSIAI ==================================
+# ============================ TAB 5 - RECAP ==================================
+with tab_recap:
+    _r = (store or {}).get("recap") if store_mode else None
+    if not store_mode:
+        st.info("The recap is built by the weekly pipeline, so it needs the "
+                "prebuilt data file. This server is running in live/upload mode.")
+    elif not _r or not _r.get("weeks"):
+        st.warning("No recap in the last refresh."
+                   + ("  \n• " + "  \n• ".join(_r.get("warnings") or []) if _r else ""))
+    else:
+        import pandas as _pd
+        _lat = _r["latest"]
+        st.caption(
+            "Every headline here is a **residual** — what a session actually drew "
+            "over what the decay curve says a batch of that age, level and pod "
+            "should draw. Ranking on raw attendance just crowns the youngest "
+            "cohort every week, because attendance falls about 10% a week over a "
+            f"batch's life. An index of 1.00 is exactly on curve. "
+            f"Built {store['generated_at']}."
+        )
+
+        def _d(v, pct=False, signed=True):
+            if v is None:
+                return None
+            return f"{v:+.1f}{'%' if pct else ''}" if signed else f"{v:.1f}"
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        k1.metric("Sessions", f"{_lat['sessions']:,}")
+        k2.metric("Learners present", f"{_lat['present']:,}",
+                  _d(_lat["delta"]["present"]))
+        k3.metric("Attendance", f"{_lat['pct']:.1f}%" if _lat["pct"] else "—",
+                  _d(_lat["delta"]["pct"], pct=True))
+        k4.metric("vs curve", f"{_lat['index']:.2f}x" if _lat["index"] else "—",
+                  _d(_lat["delta"]["index"]),
+                  help="Above 1.00 means these sessions beat what cohorts of "
+                       "their age normally draw. This is the one to watch — the "
+                       "raw percentage falls every week by design.")
+        k5.metric("NPS", f"{_lat['nps']:+d}" if _lat["nps"] is not None else "—",
+                  _d(_lat["delta"]["nps"]),
+                  help="Promoter 5, passive 4, detractor 1-3, on the poll's "
+                       "recommend question.")
+
+        if _r.get("awards"):
+            st.subheader("This week")
+            for _a, _col in zip(_r["awards"], st.columns(len(_r["awards"]))):
+                with _col:
+                    st.markdown(
+                        f"**{_a['award']}**  \n"
+                        f"### {_a['value']}  \n"
+                        f"{_a['batch']} · {_a['topic'][:44]}"
+                        + (f" · {_a['pod']}" if _a.get("pod") else "")
+                        + (f"  \n_{_a['mentor']}_" if _a.get("mentor") else "")
+                        + f"  \n<span style='color:#7a8598;font-size:12px'>{_a['why']}</span>",
+                        unsafe_allow_html=True)
+
+        st.subheader("Week by week")
+        st.dataframe(_pd.DataFrame([{
+            "Week of": w["week"], "Sessions": w["sessions"],
+            "Batches": len(w["batches"]), "Present": w["present"],
+            "Invited": w["invited"], "Attendance %": w["pct"],
+            "vs curve": w["index"], "Rating": w["rating"], "NPS": w["nps"],
+        } for w in reversed(_r["weeks"])]), width='stretch', hide_index=True)
+
+        if _r.get("leaderboard"):
+            st.subheader("Trainers, this week")
+            st.caption("Ranked on the residual, so a trainer who taught an old "
+                       "cohort is not punished for its age.")
+            st.dataframe(_pd.DataFrame([{
+                "Trainer": b["mentor"], "Sessions": b["sessions"],
+                "Present": b["present"], "Attendance %": b["pct"],
+                "vs curve": b["index"], "Rating": b["rating"], "NPS": b["nps"],
+            } for b in _r["leaderboard"]]), width='stretch', hide_index=True)
+
+# ============================ TAB 6 - TRAINERS ===============================
+with tab_trainer:
+    _t = (store or {}).get("trainers") if store_mode else None
+    if not store_mode:
+        st.info("Trainer rollups are built by the weekly pipeline.")
+    elif not _t or not _t.get("trainers"):
+        st.warning("No trainer data in the last refresh."
+                   + ("  \n• " + "  \n• ".join(_t.get("warnings") or []) if _t else ""))
+    else:
+        import pandas as _pd
+        st.caption(
+            f"**{_t['n_raw']} spellings in L2 resolve to {_t['n_people']} people.** "
+            "The Mentor cell is hand-typed, so one person arrives as 'Swapnil', "
+            "'Swapnil Narayan' and 'Swapnil (Play Simulive)'. Where L2 carries an "
+            "email it is trusted; otherwise a short name joins a longer one only "
+            "when it is an unambiguous prefix of it."
+        )
+        _min = st.slider("Minimum sessions", 1, 25, 5, key="tr_min",
+                         help="A trainer's index over one session is noise.")
+        _rows = [x for x in _t["trainers"] if x["sessions"] >= _min]
+        st.dataframe(_pd.DataFrame([{
+            "Trainer": x["trainer"], "Sessions": x["sessions"],
+            "Co-taught": x["co_taught"], "Batches": len(x["batches"]),
+            "Present": x["present"], "Invited": x["invited"],
+            "Attendance %": x["pct"], "vs curve": x["index"],
+            "Rating": x["rating"], "Responses": x["rating_n"], "NPS": x["nps"],
+            "First": x["first"], "Last": x["last"],
+        } for x in _rows]), width='stretch', hide_index=True, height=520)
+        st.caption(f"{len(_rows)} of {_t['n_people']} shown. **Co-taught** counts "
+                   "sessions credited to more than one trainer — both get the "
+                   "session, so totals across trainers exceed the session count.")
+
+        if _t.get("merged"):
+            with st.expander(f"Spellings merged ({len(_t['merged'])} people)"):
+                st.dataframe(_pd.DataFrame(
+                    [{"Shown as": k, "Merged from": ", ".join(v)}
+                     for k, v in sorted(_t["merged"].items())]),
+                    width='stretch', hide_index=True)
+        if _t.get("ambiguous"):
+            st.warning(
+                "Left unmerged because the name could be more than one person: "
+                + ", ".join(f"**{n}**" for n in _t["ambiguous"])
+                + ". Add their email to L2's *Mentor's email* column to resolve them.")
+
+# ============================ TAB 7 - STUDENTS ===============================
+with tab_students:
+    if not store_mode:
+        st.info("The per-student view reads the prebuilt roster grids.")
+    else:
+        import pandas as _pd
+        import students as _students
+        _batches = store.get("batches") or []
+        if not _batches:
+            st.warning("No batches in the store.")
+        else:
+            _b = st.selectbox("Batch", _batches,
+                              index=len(_batches) - 1, key="stu_batch")
+            _g = _store_grid(store["path"], _b, store["generated_at_iso"])
+            if _g is None or _g.empty:
+                st.warning(f"No roster grid stored for {_b}.")
+            else:
+                _summ = _students.summarise(list(_g.columns),
+                                            _g.to_dict("records"))
+                st.caption(
+                    f"**{_summ['n_students']:,} students · {_summ['n_sessions']} "
+                    "sessions.** A student is counted only against sessions they "
+                    "were invited to — every whole-batch session plus their own "
+                    "pod's. You cannot be absent from a session you were never "
+                    "invited to, and dividing by every column is how a pod-heavy "
+                    "batch comes to look like it collapsed."
+                )
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Students", f"{_summ['n_students']:,}")
+                c2.metric("Attended ≥1", f"{_summ['attended_any']:,}")
+                c3.metric("Never attended", f"{_summ['never_attended']:,}")
+                _bk = _summ["buckets"]
+                c4.metric("Core (≥75%)", f"{_bk.get('core', 0):,}")
+
+                st.subheader("How the batch splits")
+                st.caption("An average hides whether everyone comes a third of "
+                           "the time or a third of them come always — and those "
+                           "need completely different responses.")
+                _order = [("core", "Core ≥75%"), ("regular", "Regular 50-75%"),
+                          ("occasional", "Occasional 25-50%"),
+                          ("rare", "Rare <25%"), ("never", "Never attended")]
+                st.dataframe(_pd.DataFrame(
+                    [{"Group": lbl, "Students": _bk.get(k, 0),
+                      "Share": (round(_bk.get(k, 0) / _summ["n_students"] * 100, 1)
+                                if _summ["n_students"] else 0)}
+                     for k, lbl in _order]), width='stretch', hide_index=True)
+
+                st.subheader("Students")
+                _q = st.text_input("Search email or phone", key="stu_q").strip().lower()
+                _people = _summ["students"]
+                if _q:
+                    _people = [p for p in _people
+                               if _q in str(p["email"]).lower()
+                               or _q in str(p["phone"]).lower()]
+                _mask = st.checkbox("Show full contact details", value=False,
+                                    key="stu_mask")
+                st.dataframe(_pd.DataFrame([{
+                    "Email": p["email"] if _mask else mask_email(p["email"]),
+                    "Phone": p["phone"] if _mask else mask_phone(p["phone"]),
+                    "POD": p["pod"], "Active": p["active"],
+                    "Attended": p["attended"], "Invited": p["invited"],
+                    "Attendance %": p["pct"], "Unmarked": p["unmarked"],
+                } for p in _people[:2000]]), width='stretch', hide_index=True,
+                    height=460)
+                if len(_people) > 2000:
+                    st.caption(f"Showing the top 2,000 of {len(_people):,} by "
+                               "attendance. Narrow with the search box — the "
+                               "counts above always cover everyone.")
+                if _summ["skipped_columns"]:
+                    with st.expander("Columns not treated as sessions"):
+                        st.write(", ".join(f"`{c}`" for c in _summ["skipped_columns"]))
+                        st.caption("Matched on the date pattern, so a preference "
+                                   "column can never be counted as a session and "
+                                   "inflate everyone's denominator.")
+
+# ============================ TAB 8 - BSIAI ==================================
 with tab_bsiai:
     st.caption("The BSIAI programme. Separate roster, separate batch numbering - "
                "a session counts only once the L2 schedule lists its webinar.")
