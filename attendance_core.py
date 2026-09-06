@@ -160,6 +160,58 @@ def parse_l2(l2_bytes, with_labels=False, with_mentors=False):
     return (out, labels) if with_labels else out
 
 
+def l2_mentor_types(l2_bytes) -> tuple:
+    """({mentor name -> 'In-house'|'Freelance'}, {name: {raw: n}} for conflicts).
+
+    From L2's 'In-house/Freelancer mentor' column. Two things make this less
+    trivial than it looks, both measured on the live L2 (1,610 mentor rows):
+
+    * **The column is blank on 1,328 rows (82%).** But the classification is a
+      property of the PERSON, not of one session, so a name typed once with a
+      type carries it everywhere. That lifts coverage from 17.5% of rows to 73
+      of the ~66 resolved people — nearly all of them. Filling per row instead
+      would leave the column mostly empty and the filter useless.
+    * **The vocabulary drifts** ('freelancer', 'inhouse', 'in-house') and three
+      people are typed BOTH ways: 'rohit sham' 9 freelancer / 1 inhouse,
+      'dipti kala' 16 / 3, 'swapnil narayan' 11 / 1. A 9-to-1 split is a
+      data-entry slip, so the majority wins — and the raw counts come back so
+      the UI can say which names were ambiguous rather than hiding it.
+
+    Keyed on the NORMALISED name, so 'Swapnil' and 'Swapnil Narayan' resolve to
+    the same classification.
+    """
+    import trainers as _tr
+    wb = load_workbook(io.BytesIO(l2_bytes), data_only=True)
+    votes: dict = {}
+    for ws in wb.worksheets:
+        mcol = tcol = hrow = None
+        for r in range(1, min(ws.max_row or 1, 6) + 1):
+            for c in range(1, (ws.max_column or 1) + 1):
+                v = str(ws.cell(r, c).value or '').strip().lower()
+                if v == 'mentor': mcol, hrow = c, r
+                elif v == 'in-house/freelancer mentor': tcol = c
+            if mcol and tcol: break
+        if not (mcol and tcol and hrow): continue
+        for r in range(hrow + 1, (ws.max_row or hrow) + 1):
+            name = _tr.norm_name(ws.cell(r, mcol).value)
+            raw = str(ws.cell(r, tcol).value or '').strip().lower()
+            if not name or not raw:
+                continue
+            votes.setdefault(name, {}).setdefault(raw, 0)
+            votes[name][raw] += 1
+    out, conflicts = {}, {}
+    for name, tally in votes.items():
+        buckets: dict = {}
+        for raw, n in tally.items():
+            label = "Freelance" if "free" in raw else ("In-house" if "house" in raw
+                                                      else raw.title())
+            buckets[label] = buckets.get(label, 0) + n
+        out[name] = max(buckets, key=lambda k: buckets[k])
+        if len(buckets) > 1:
+            conflicts[name] = buckets
+    return out, conflicts
+
+
 def l2_mentor_emails(l2_bytes) -> dict:
     """{mentor name as typed -> their email}, from L2's own two columns.
 

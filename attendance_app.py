@@ -20,7 +20,10 @@ import hmac
 import io
 import json
 import pickle
+import datetime as _dt
 from datetime import datetime
+
+import polls as _polls_mod          # the NPS rule, shared with the pipeline
 from pathlib import Path
 
 import streamlit as st
@@ -716,10 +719,11 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-(tab_dash, tab_roster, tab_day1, tab_fcst, tab_recap, tab_trainer,
- tab_students, tab_bsiai) = st.tabs(
-    ["📊 Dashboard", "📋 Roster (marked attendance)", "🎯 Day-1 analysis",
-     "🔮 Forecast", "🏆 Recap", "🎓 Trainers", "🧑‍🎓 Students", "🧩 BSIAI"]
+(tab_dash, tab_sessions, tab_roster, tab_day1, tab_fcst, tab_recap,
+ tab_trainer, tab_students, tab_bsiai) = st.tabs(
+    ["📊 Dashboard", "📚 Sessions", "📋 Roster (marked attendance)",
+     "🎯 Day-1 analysis", "🔮 Forecast", "🏆 Recap", "🎓 Trainers",
+     "🧑‍🎓 Students", "🧩 BSIAI"]
 )
 
 # ============================ TAB 1 — DASHBOARD ==============================
@@ -1015,6 +1019,155 @@ with tab_fcst:
                     [{"Batch": k, "×": v} for k, v in sorted(
                         _bo.items(), key=lambda kv: dc.batch_key(kv[0]))]),
                     width='stretch', hide_index=True, height=240)
+
+# ============================ TAB 2 - SESSIONS ===============================
+with tab_sessions:
+    _S = (store or {}).get("sessions") if store_mode else None
+    if not store_mode:
+        st.info("The session browser reads the prebuilt data file.")
+    elif not _S:
+        st.warning("No sessions in the last refresh.")
+    else:
+        import pandas as _pd
+        st.caption(
+            "Every logged session across every batch. Select a row for the full "
+            "breakdown. **Attendance % = present ÷ batch strength**, taken from "
+            "the roster automatically — so it is filled in for all "
+            f"{len({s['batch'] for s in _S})} batches, not only the ones somebody "
+            "remembered to configure."
+        )
+
+        # ── filters ──────────────────────────────────────────────────────────
+        _dates = sorted({s["date"] for s in _S})
+        f1, f2, f3 = st.columns([2, 1, 1])
+        _dr = f1.date_input(
+            "Date range",
+            value=(_dt.date.fromisoformat(_dates[0]), _dt.date.fromisoformat(_dates[-1])),
+            min_value=_dt.date.fromisoformat(_dates[0]),
+            max_value=_dt.date.fromisoformat(_dates[-1]), key="ss_dates")
+        _fb = f2.multiselect("Batch", sorted({s["batch"] for s in _S},
+                                             key=dc.batch_key), key="ss_batch")
+        _fp = f3.multiselect("POD", sorted({s["pod"] for s in _S if s["pod"]}),
+                             key="ss_pod")
+        g1, g2, g3 = st.columns([2, 1, 2])
+        _ft = g1.multiselect("Trainer", sorted({t for s in _S
+                                                for t in (s.get("trainers") or [])}),
+                             key="ss_trainer")
+        _fy = g2.multiselect("Trainer type",
+                             sorted({s["trainer_type"] for s in _S
+                                     if s.get("trainer_type")}), key="ss_ttype")
+        _fq = g3.text_input("Search title", key="ss_q").strip().lower()
+
+        _v = _S
+        if isinstance(_dr, (tuple, list)) and len(_dr) == 2:
+            _a, _b = _dr[0].isoformat(), _dr[1].isoformat()
+            _v = [s for s in _v if _a <= s["date"] <= _b]
+        if _fb:
+            _v = [s for s in _v if s["batch"] in _fb]
+        if _fp:
+            _v = [s for s in _v if s["pod"] in _fp]
+        if _ft:
+            _v = [s for s in _v if set(s.get("trainers") or []) & set(_ft)]
+        if _fy:
+            _v = [s for s in _v if s.get("trainer_type") in _fy]
+        if _fq:
+            _v = [s for s in _v if _fq in (s["topic"] or "").lower()]
+
+        # ── headline numbers, over the FILTERED set ──────────────────────────
+        _rated = [s for s in _v if s.get("rating") is not None]
+        _rn = sum(s["rating_n"] for s in _rated)
+        _merged = _polls_mod.merge_dists(s.get("dist") for s in _v)
+        _pres = sum(s["present"] for s in _v)
+        _inv = sum(s["total"] for s in _v)
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Sessions", f"{len(_v):,}")
+        m2.metric("Attendance", f"{_pres / _inv * 100:.1f}%" if _inv else "—",
+                  help=f"{_pres:,} present of {_inv:,} invited, pooled — not a "
+                       "mean of per-session percentages.")
+        m3.metric("Avg overall",
+                  f"{sum(s['rating'] * s['rating_n'] for s in _rated) / _rn:.2f}"
+                  if _rn else "—",
+                  help="Weighted by responses, so a 12-response session does not "
+                       "outweigh a 900-response one.")
+        _trd = [s for s in _v if s.get("rating_trainer") is not None]
+        _trn = sum(s["rating_n"] for s in _trd)
+        m4.metric("Avg trainer",
+                  f"{sum(s['rating_trainer'] * s['rating_n'] for s in _trd) / _trn:.2f}"
+                  if _trn else "—")
+        _nps = _polls_mod.nps_from_dist(_merged.get("recommend"))
+        m5.metric("NPS", f"{_nps:+d}" if _nps is not None else "—",
+                  help="Promoter 5, passive 4, detractor 1-3, computed from the "
+                       "SUMMED 1-5 histograms of every session shown — not an "
+                       "average of their NPS percentages.")
+
+        # ── the table ────────────────────────────────────────────────────────
+        _tbl = _pd.DataFrame([{
+            "Date": s["date"], "Trainer": s.get("trainer") or "—",
+            "Type": s.get("trainer_type") or "—",
+            "Title": s["topic"], "Batch": s.get("l2_batch") or s["batch"],
+            "POD": s["pod"] or "—",
+            "Attendance %": s["pct"], "Present": s["present"],
+            "Invited": s["total"], "vs curve": s.get("index"),
+            "Overall": s.get("rating"), "Trainer rating": s.get("rating_trainer"),
+            "NPS": s.get("nps"), "Responses": s["rating_n"],
+            "Simulive": s.get("session_type") or "",
+        } for s in _v])
+        _sel = st.dataframe(
+            _tbl, width='stretch', hide_index=True, height=460,
+            on_select="rerun", selection_mode="single-row",
+            column_config={
+                "Overall": st.column_config.ProgressColumn(
+                    "Overall", min_value=0, max_value=5, format="%.2f"),
+                "Attendance %": st.column_config.NumberColumn(format="%.1f%%"),
+                "vs curve": st.column_config.NumberColumn(
+                    format="%.2fx", help="Above 1.00 beats what a cohort of this "
+                                         "age normally draws."),
+            })
+
+        st.caption(
+            "**Duration** and **Peak** are deliberately absent. Both live only in "
+            "the Zoom attendee report's own header, which the weekly job does not "
+            "fetch for past sessions — and Zoom's 'Actual Duration' tracks when "
+            "the host finally left, not when teaching ended (measured: 112 to 279 "
+            "minutes for nominally 3-hour classes). **Simulive** is blank unless "
+            "L2 says so; only 49 of 1,610 mentor rows record it, so a blank means "
+            "not recorded rather than Live."
+        )
+
+        _rowsel = (_sel.selection.rows if getattr(_sel, "selection", None) else [])
+        if _rowsel:
+            s = _v[_rowsel[0]]
+            st.divider()
+            st.subheader(s["topic"] or "Session")
+            st.caption(f"{s.get('l2_batch') or s['batch']} · {s['date_lbl']} "
+                       f"({s['date']})"
+                       + (f" · {s['pod']}" if s["pod"] else "")
+                       + (f" · {s['trainer']}" if s.get("trainer") else "")
+                       + (f" ({s['trainer_type']})" if s.get("trainer_type") else ""))
+            d1, d2, d3, d4 = st.columns(4)
+            d1.metric("Present", f"{s['present']:,}")
+            d2.metric("Invited", f"{s['total']:,}")
+            d3.metric("Attendance", f"{s['pct']:.1f}%" if s["pct"] else "—")
+            d4.metric("vs curve", f"{s['index']:.2f}x" if s.get("index") else "—",
+                      help=(f"the curve expects {s['expected_pct']:.1f}% for a "
+                            f"{s['batch']} session {s['wk']} weeks in"
+                            if s.get("expected_pct") else
+                            "no curve point for this week — not scored"))
+            _dist = (s.get("dist") or {})
+            if any(_dist.values()):
+                st.markdown("**How the room rated it**")
+                _cols = st.columns(3)
+                for _c, _kind in zip(_cols, ("session", "trainer", "recommend")):
+                    _h = _dist.get(_kind) or {}
+                    if not sum(_h.values()):
+                        continue
+                    with _c:
+                        st.caption(_kind.title())
+                        st.bar_chart(_pd.DataFrame(
+                            {"count": [_h.get(str(i), 0) for i in range(1, 6)]},
+                            index=[str(i) for i in range(1, 6)]))
+            else:
+                st.caption("No poll was run for this session.")
 
 # ============================ TAB 5 - RECAP ==================================
 with tab_recap:

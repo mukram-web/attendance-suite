@@ -216,6 +216,7 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
     # Neither may take the run down - a recap is a nice-to-have beside the
     # attendance numbers people actually depend on.
     recap_section = trainer_section = None
+    sessions_section = []
     try:
         recap_section = recap.build(DATA, datetime.now(IST).date())
     except Exception as e:
@@ -225,11 +226,17 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
     try:
         rows = recap.collect_sessions(DATA, datetime.now(IST).date())
         emails = ac.l2_mentor_emails(l2_bytes) if l2_bytes else {}
-        trainer_section = trainers.build(rows, emails)
+        mtypes, tconf = (ac.l2_mentor_types(l2_bytes) if l2_bytes else ({}, {}))
+        trainer_section = trainers.build(rows, emails, mtypes)
+        trainer_section["type_conflicts"] = tconf
+        # Every session, flat and filterable — this is what the Sessions tab
+        # reads. ~500 rows of aggregates, so it costs nothing in the store.
+        sessions_section = trainers.annotate(rows, emails, mtypes)
     except Exception as e:
         trainer_section = {"trainers": [], "ambiguous": [], "merged": {},
-                           "n_raw": 0, "n_people": 0,
+                           "n_raw": 0, "n_people": 0, "type_conflicts": {},
                            "warnings": [f"trainer build failed: {e}"]}
+        sessions_section = []
 
     df = dc.compute(marked_bytes)
     smap = dc.batch_sheet_map(marked_bytes)
@@ -278,6 +285,7 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         # student — so both are safe in the store and on the public site.
         "recap": recap_section,
         "trainers": trainer_section,
+        "sessions": sessions_section,
     }
     con.execute("CREATE TABLE meta (key VARCHAR, value VARCHAR)")
     con.executemany("INSERT INTO meta VALUES (?, ?)",
