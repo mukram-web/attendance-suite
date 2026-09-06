@@ -293,12 +293,27 @@ class TestBuild(unittest.TestCase):
             self.assertLessEqual(date.fromisoformat(r["date"]),
                                  TODAY + timedelta(weeks=3))
 
-    def test_past_sessions_are_never_forecast(self):
-        past = [TODAY - timedelta(days=7), TODAY]
-        tabs = make_tabs(past + self.future, ["B4"], self._whole)
+    def test_today_is_forecast_not_dropped(self):
+        """The window started strictly AFTER today, so a 03:04 run hid that same
+        day's sessions and the tab jumped to the following weekend."""
+        tabs = make_tabs([TODAY] + self.future, ["B4"], self._whole)
         f = forecast.build(self.DATA, tabs, TODAY, horizon_weeks=4)
-        for r in f["sessions"]:
-            self.assertGreater(date.fromisoformat(r["date"]), TODAY)
+        self.assertTrue([r for r in f["sessions"]
+                         if r["date"] == TODAY.isoformat()])
+
+    def test_the_last_couple_of_days_stay_visible(self):
+        y = TODAY - timedelta(days=1)
+        tabs = make_tabs([y] + self.future, ["B4"], self._whole)
+        f = forecast.build(self.DATA, tabs, TODAY, horizon_weeks=4)
+        self.assertTrue([r for r in f["sessions"] if r["date"] == y.isoformat()])
+
+    def test_anything_older_is_still_excluded(self):
+        """This is the current weekend, not a history panel."""
+        old = TODAY - timedelta(days=7)
+        tabs = make_tabs([old] + self.future, ["B4"], self._whole)
+        f = forecast.build(self.DATA, tabs, TODAY, horizon_weeks=4)
+        self.assertFalse([r for r in f["sessions"]
+                          if r["date"] == old.isoformat()])
 
     def test_week_beyond_observed_life_is_skipped_not_extrapolated(self):
         """No curve point => no forecast. Silence beats a made-up number.

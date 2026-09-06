@@ -449,7 +449,7 @@ def _split_kind(topics: list[str]) -> str:
 
 # ── 4. the forecast ──────────────────────────────────────────────────────────
 def build(DATA: dict, curric_tabs: dict, today: date,
-          horizon_weeks: int = 8) -> dict:
+          horizon_weeks: int = 8, lookback_days: int = 2) -> dict:
     """Predicted attendance for every scheduled session inside the horizon.
 
     Aggregates only — safe to ship in the store and to render publicly.
@@ -496,9 +496,14 @@ def build(DATA: dict, curric_tabs: dict, today: date,
             "treat these as indicative.")
 
     horizon_end = today + timedelta(weeks=horizon_weeks)
+    # The window used to start strictly AFTER `today`, so the Sunday 03:04 run
+    # dropped that same Sunday's sessions and the tab jumped to the following
+    # weekend — the forecast was invisible on the day it was needed. A couple of
+    # days of lookback keeps the weekend just gone on screen too. Kept small on
+    # purpose: this is the current weekend, not a history panel.
     grouped = defaultdict(list)
     for r in rows:
-        if today < r["date"] <= horizon_end:
+        if today - timedelta(days=lookback_days) <= r["date"] <= horizon_end:
             grouped[(r["date"], r["batch"])].append(r)
 
     out, skipped_weeks = [], set()
