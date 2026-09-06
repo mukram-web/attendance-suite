@@ -221,7 +221,7 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
     recap_section = trainer_section = None
     sessions_section = []
     try:
-        recap_section = recap.build(DATA, datetime.now(IST).date())
+        recap_section = None      # built below, from the enriched rows
     except Exception as e:
         recap_section = {"weeks": [], "latest": None, "awards": [],
                          "leaderboard": [], "sessions": [],
@@ -240,6 +240,15 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
             r["duration_hrs"] = m.get("span_hrs") or m.get("duration_hrs")
             r["peak"] = m.get("peak_computed") or m.get("peak")
             r["unique_viewers"] = m.get("unique_viewers")
+            # The retention curve and stickiness ride along: same sweep, and
+            # ~0.5 MB across the whole corpus.
+            r["retention"] = m.get("curve")
+            r["stick10"] = m.get("stick10")
+            r["stick30"] = m.get("stick30")
+        # Now that the rows carry retention, the weekly stickiness KPI and the
+        # Best-retention award see the same numbers the session rows do.
+        recap_section = recap.build(DATA, datetime.now(IST).date(),
+                                    rows=sessions_section)
     except Exception as e:
         trainer_section = {"trainers": [], "ambiguous": [], "merged": {},
                            "n_raw": 0, "n_people": 0, "type_conflicts": {},

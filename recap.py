@@ -33,12 +33,22 @@ which is what makes them comparable — but the index is not a clean out-of-samp
 score and must not be quoted as one. `test_recap` pins this behaviour so it
 cannot be quietly forgotten.
 
-WHAT IT DELIBERATELY DOES NOT DO
---------------------------------
-No "best retention" award: retention needs per-attendee join/leave times, which
-the weekly run does not fetch (see `live_data.fetch_new_attendees` — it pulls
-only unmarked sessions). Inventing one from attendance would be a different
-metric wearing the same name.
+TWO DIFFERENT YARDSTICKS, ON PURPOSE
+------------------------------------
+**Attendance** awards use the residual, for the reason above. **Rating** awards
+use the raw score, because a rating does not decay with cohort age — a 4.8 in a
+batch's tenth week is the same claim as a 4.8 in its first. So "Session of the
+week" is the best rated session and "Beat the curve" is the best residual, and
+neither is pretending to be the other.
+
+RETENTION IS REAL NOW
+---------------------
+This file used to say a "best retention" award was impossible because the weekly
+run did not fetch the attendee reports for past sessions. Since 2026-09-06 it
+fetches all 1,284 of them in about 76 seconds, and `sessionmeta.measure` sweeps
+the join/leave intervals into a per-minute concurrency curve. Stickiness is the
+mean of the closing 30 minutes over the session's peak — of the fullest the room
+ever was, how much was still there at the end.
 """
 from __future__ import annotations
 
@@ -174,6 +184,12 @@ def _agg(rows: list) -> dict:
     merged = _polls.merge_dists(r["dist"] for r in rows)
     rated = [r for r in rows if r["rating"] is not None]
     rn = sum(r["rating_n"] for r in rated)
+    # Stickiness is a plain mean over sessions, NOT weighted by headcount: it
+    # already is a ratio of a session to itself, so a big room's 40% and a small
+    # room's 40% are the same fact about how well each held its audience.
+    sticks = [r["stick30"] for r in rows if r.get("stick30") is not None]
+    trated = [r for r in rows if r.get("rating_trainer") is not None]
+    trn = sum(r["rating_n"] for r in trated)
     return {
         "sessions": len(rows),
         "batches": sorted({r["batch"] for r in rows}),
@@ -186,6 +202,10 @@ def _agg(rows: list) -> dict:
                    if rn else None),
         "rating_n": rn,
         "nps": _polls.nps_from_dist(merged.get("recommend")),
+        "rating_trainer": (round(sum(r["rating_trainer"] * r["rating_n"]
+                                     for r in trated) / trn, 2) if trn else None),
+        "stickiness": round(sum(sticks) / len(sticks), 1) if sticks else None,
+        "n_sticky": len(sticks),
         "dist": merged,
     }
 
@@ -208,11 +228,37 @@ def _awards(rows: list) -> list:
     rule is just an assertion.
     """
     out = []
+    # Session of the week is judged on the RATING, not the residual. Ratings do
+    # not decay with cohort age the way attendance does, so a raw comparison is
+    # fair here in a way it never is for attendance -- which is why the
+    # attendance award below stays on the residual.
+    scored = [r for r in rows
+              if r["rating"] is not None and r["rating_n"] >= MIN_POLL_N]
+    if len(scored) >= MIN_CONTENDERS:
+        w = max(scored, key=lambda r: r["rating"])
+        out.append({
+            "award": "Session of the week",
+            "batch": w["batch"], "topic": w["topic"], "pod": w["pod"],
+            "mentor": w["mentor"], "date_lbl": w["date_lbl"],
+            "value": f"{w['rating']:.2f}",
+            "why": f"rated by {w['rating_n']} learners",
+        })
+    sticky = [r for r in rows if r.get("stick30") is not None]
+    if len(sticky) >= MIN_CONTENDERS:
+        w = max(sticky, key=lambda r: r["stick30"])
+        out.append({
+            "award": "Best retention",
+            "batch": w["batch"], "topic": w["topic"], "pod": w["pod"],
+            "mentor": w["mentor"], "date_lbl": w["date_lbl"],
+            "value": f"{w['stick30']:.0f}%",
+            "why": ("of its peak audience was still in the room over the "
+                    "closing half hour"),
+        })
     indexed = [r for r in rows if r["index"] is not None]
     if len(indexed) >= MIN_CONTENDERS:
         w = max(indexed, key=lambda r: r["index"])
         out.append({
-            "award": "Session of the week",
+            "award": "Beat the curve",
             "batch": w["batch"], "topic": w["topic"], "pod": w["pod"],
             "mentor": w["mentor"], "date_lbl": w["date_lbl"],
             "value": f"{w['index']:.2f}x",
@@ -241,14 +287,18 @@ def _awards(rows: list) -> list:
     return out
 
 
-def build(DATA: dict, today: date, weeks: int = 8) -> dict:
+def build(DATA: dict, today: date, weeks: int = 8, rows: list | None = None) -> dict:
     """The recap payload: recent weeks, the latest week's detail, awards.
 
     `weeks` bounds how much history is summarised, not how much is scored —
     every session is still used to fit the curve the residuals are measured
     against, so a short window does not change anyone's index.
     """
-    rows = collect_sessions(DATA, today)
+    # `rows` lets the caller pass sessions that have already been enriched with
+    # duration, peak and stickiness. Without it this recomputes from DATA alone,
+    # which carries no retention data -- that is how the weekly stickiness KPI
+    # came out empty while the per-session award had the numbers.
+    rows = rows if rows is not None else collect_sessions(DATA, today)
     if not rows:
         return {"weeks": [], "latest": None, "awards": [], "leaderboard": [],
                 "sessions": [], "warnings": ["no dated sessions to recap"]}
@@ -268,6 +318,9 @@ def build(DATA: dict, today: date, weeks: int = 8) -> dict:
             "index": _delta(cur["index"], prev and prev["index"]),
             "nps": _delta(cur["nps"], prev and prev["nps"]),
             "rating": _delta(cur["rating"], prev and prev["rating"]),
+            "rating_trainer": _delta(cur["rating_trainer"],
+                                     prev and prev["rating_trainer"]),
+            "stickiness": _delta(cur["stickiness"], prev and prev["stickiness"]),
             "present": _delta(cur["present"], prev and prev["present"]),
         }
         weekly.append(cur)

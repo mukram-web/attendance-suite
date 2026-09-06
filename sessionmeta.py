@@ -120,6 +120,10 @@ def parse_header(text) -> dict | None:
     return out
 
 
+# A session left open overnight would otherwise store a thousand zeros. Six
+# hours covers every real class in the corpus (longest measured span: 5.2 h).
+MAX_MINUTES = 360
+
 _TIME_FMTS = ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S",
               "%m/%d/%Y %I:%M %p", "%Y-%m-%d %H:%M:%S")
 
@@ -198,7 +202,41 @@ def measure(text) -> dict:
         peak = max(peak, cur)
     span = (round((last - first).total_seconds() / 3600, 1)
             if first and last else None)
-    return {"peak_computed": peak or None, "span_hrs": span, "timed_rows": rows}
+
+    # The per-minute concurrency series — the retention curve. It is the SAME
+    # sweep as the peak above, recorded instead of maxed, so it costs one more
+    # pass over events already in hand. Capped at MAX_MINUTES: a session left
+    # open overnight would otherwise store a thousand zeros.
+    curve = []
+    if first and last:
+        total = int((last - first).total_seconds() // 60) + 1
+        buckets = [0] * (min(total, MAX_MINUTES) + 1)
+        for t, delta in events:
+            m = int((t - first).total_seconds() // 60)
+            if 0 <= m < len(buckets):
+                buckets[m] += delta
+            elif m < 0:
+                buckets[0] += delta
+        run = 0
+        for b in buckets[:-1]:
+            run += b
+            curve.append(max(0, run))
+
+    def _tail_mean(n):
+        """Mean concurrency over the last n minutes, as a share of peak.
+
+        This is 'stickiness': of the fullest the room ever was, how much of it
+        was still there at the end. A mean rather than the final value, because
+        one person leaving on the last minute should not move it.
+        """
+        if not curve or not peak:
+            return None
+        tail = curve[-n:] if len(curve) >= n else curve
+        return round(sum(tail) / len(tail) / peak * 100, 1) if tail else None
+
+    return {"peak_computed": peak or None, "span_hrs": span, "timed_rows": rows,
+            "curve": curve or None,
+            "stick10": _tail_mean(10), "stick30": _tail_mean(30)}
 
 
 def name_key(name) -> tuple | None:

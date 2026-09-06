@@ -25,6 +25,8 @@ import html as _html
 from datetime import datetime
 
 import polls as _polls_mod          # the NPS rule, shared with the pipeline
+import recap as _recap_mod          # award rules, shared with the pipeline
+import trainers as _trainers_mod    # identity resolution, shared likewise
 from pathlib import Path
 
 import streamlit as st
@@ -720,10 +722,11 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-(tab_dash, tab_sessions, tab_roster, tab_day1, tab_fcst,
+(tab_dash, tab_sessions, tab_weekend, tab_roster, tab_day1, tab_fcst,
  tab_bsiai) = st.tabs(
-    ["📊 Dashboard", "📚 Sessions", "📋 Roster (marked attendance)",
-     "🎯 Day-1 analysis", "🔮 Forecast", "🧩 BSIAI"]
+    ["📊 Dashboard", "📚 Sessions", "🎬 Weekend Recap",
+     "📋 Roster (marked attendance)", "🎯 Day-1 analysis", "🔮 Forecast",
+     "🧩 BSIAI"]
 )
 
 # Browse / This week / Trainers are three views of the SAME thing — the session
@@ -1416,6 +1419,173 @@ with sub_trainer:
                 "Left unmerged because the name could be more than one person: "
                 + ", ".join(f"**{n}**" for n in _t["ambiguous"])
                 + ". Add their email to L2's *Mentor's email* column to resolve them.")
+
+# ========================= TAB 3 - WEEKEND RECAP =============================
+with tab_weekend:
+    _W = (store or {}).get("recap") if store_mode else None
+    _WS = (store or {}).get("sessions") if store_mode else None
+    if not store_mode:
+        st.info("The weekend recap is built by the weekly pipeline.")
+    elif not _W or not _W.get("weeks"):
+        st.warning("No recap in the last refresh.")
+    else:
+        import pandas as _pd
+        _lbl = {}
+        for _w0 in reversed(_W["weeks"]):            # newest first
+            _d0 = _dt.date.fromisoformat(_w0["week"])
+            _lbl[f"{_d0:%d %b} \u2013 {_d0 + _dt.timedelta(days=6):%d %b %Y}"] = _w0
+        _pickw = st.selectbox("Select week (Monday\u2013Sunday)", list(_lbl),
+                              key="wr_week")
+        _w = _lbl[_pickw]
+        _d0 = _dt.date.fromisoformat(_w["week"])
+        _dl = _w.get("delta") or {}
+
+        st.markdown(
+            "<div style='background:#f7f9fc;border:1px solid #e6e9ef;"
+            "border-radius:12px;padding:20px 22px;margin:6px 0 14px'>"
+            "<div style='font-size:11px;letter-spacing:.09em;color:#2a5bd7;"
+            "font-weight:700'>WEEKEND RECAP</div>"
+            f"<div style='font-size:30px;font-weight:700;margin:4px 0 2px'>"
+            f"Week of {_d0:%d %B %Y}</div>"
+            f"<div style='color:#7a8598;font-size:13px'>{_w['sessions']} sessions"
+            f" &middot; {_d0:%d %b} \u2013 {_d0 + _dt.timedelta(days=6):%d %b %Y}"
+            f" &middot; {len(_w['batches'])} batches</div></div>",
+            unsafe_allow_html=True)
+
+        def _dtxt(v):
+            """Streamlit's delta arrow, or nothing when there is no prior week.
+            None is not zero -- a first week has no change, it has no comparison."""
+            return None if v is None else f"{v:+g}"
+
+        k = st.columns(6)
+        k[0].metric("Sessions", f"{_w['sessions']:,}")
+        k[1].metric("Avg overall", f"{_w['rating']:.2f}" if _w.get("rating") else "\u2014",
+                    _dtxt(_dl.get("rating")))
+        k[2].metric("Avg trainer",
+                    f"{_w['rating_trainer']:.2f}" if _w.get("rating_trainer") else "\u2014",
+                    _dtxt(_dl.get("rating_trainer")))
+        k[3].metric("Avg NPS", f"{_w['nps']:+d}" if _w.get("nps") is not None else "\u2014",
+                    _dtxt(_dl.get("nps")))
+        k[4].metric("Learners", f"{_w['present']:,}", _dtxt(_dl.get("present")),
+                    help="Attendances across the week. Someone who came to three "
+                         "sessions counts three times \u2014 attendances, not people.")
+        k[5].metric("Avg stickiness",
+                    f"{_w['stickiness']:.0f}%" if _w.get("stickiness") else "\u2014",
+                    _dtxt(_dl.get("stickiness")),
+                    help="Of the fullest each room got, how much was still there "
+                         "over the closing half hour. Averaged over the "
+                         f"{_w.get('n_sticky', 0)} sessions with a Zoom report.")
+
+        # Awards are recomputed for the SELECTED week, using the same rules the
+        # pipeline uses, so picking an older week does not show this week's.
+        _rows_w = [r for r in (_WS or []) if r.get("week") == _w["week"]]
+        _aw = _recap_mod._awards(_rows_w) if _rows_w else (_W.get("awards") or [])
+        if _aw:
+            st.subheader("Highlights of the week")
+            for _a, _c in zip(_aw, st.columns(len(_aw))):
+                with _c:
+                    st.markdown(
+                        "<div style='border:1px solid #e6e9ef;border-radius:10px;"
+                        "padding:12px 14px'>"
+                        "<div style='font-size:10px;letter-spacing:.08em;"
+                        f"color:#7a8598;font-weight:700'>"
+                        f"{_html.escape(_a['award']).upper()}</div>"
+                        f"<div style='font-weight:650;margin:6px 0 2px;"
+                        f"font-size:13px'>{_html.escape(_a['topic'][:46])}</div>"
+                        f"<div style='color:#7a8598;font-size:12px'>"
+                        f"{_html.escape(_a['batch'])}"
+                        + (f" &middot; {_html.escape(_a['mentor'])}"
+                           if _a.get("mentor") else "")
+                        + "</div><div style='font-size:26px;font-weight:700;"
+                        f"margin-top:8px'>{_html.escape(_a['value'])}</div>"
+                        f"<div style='color:#9aa3b2;font-size:11px;margin-top:4px;"
+                        f"line-height:1.35'>{_html.escape(_a['why'])}</div></div>",
+                        unsafe_allow_html=True)
+
+        if _rows_w:
+            _lb = [t for t in (_trainers_mod.build(_rows_w).get("trainers") or [])
+                   if t.get("rating") is not None]
+            _lb.sort(key=lambda t: -t["rating"])
+            if _lb:
+                st.subheader("Trainer leaderboard")
+                st.caption("By average session rating this week. A session taught "
+                           "by two people credits both.")
+                st.dataframe(_pd.DataFrame([{
+                    "#": i + 1, "Trainer": t["trainer"],
+                    "Type": t.get("type") or "\u2014",
+                    "Sessions": t["sessions"], "Learners": t["present"],
+                    "Avg rating": t["rating"], "NPS": t["nps"],
+                } for i, t in enumerate(_lb[:12])]),
+                    width="stretch", hide_index=True)
+
+        if _rows_w:
+            st.subheader("Session breakdown")
+            _byk = {}
+            for _r0 in _rows_w:
+                _byk[f"{_r0['date']} \u00b7 {(_r0.get('topic') or 'Session')[:50]}"
+                     + (f" \u00b7 {_r0['pod']}" if _r0.get("pod") else "")
+                     + f" \u00b7 {_r0.get('l2_batch') or _r0['batch']}"] = _r0
+            _pick = st.selectbox("Session", list(_byk), key="wr_sess")
+            r = _byk[_pick]
+            c = st.columns(6)
+            c[0].metric("Overall", f"{r['rating']:.2f}" if r.get("rating") else "\u2014")
+            c[1].metric("Trainer", f"{r['rating_trainer']:.2f}"
+                        if r.get("rating_trainer") else "\u2014")
+            c[2].metric("NPS", f"{r['nps']:+d}" if r.get("nps") is not None else "\u2014")
+            c[3].metric("Responses", f"{r.get('rating_n', 0):,}")
+            c[4].metric("Duration", f"{r['duration_hrs']:.1f} h"
+                        if r.get("duration_hrs") else "\u2014")
+            c[5].metric("Peak", f"{r['peak']:,}" if r.get("peak") else "\u2014")
+
+            s1, s2, s3 = st.columns(3)
+            s1.metric("Stickiness (10 min)",
+                      f"{r['stick10']:.0f}%" if r.get("stick10") else "\u2014",
+                      help="Mean concurrency over the closing 10 minutes, "
+                           "as a share of the session's peak.")
+            s2.metric("Stickiness (30 min)",
+                      f"{r['stick30']:.0f}%" if r.get("stick30") else "\u2014")
+            s3.metric("Attendance", f"{r['pct']:.1f}%" if r.get("pct") else "\u2014")
+
+            _curve = r.get("retention")
+            if _curve:
+                st.markdown("**Retention curve**")
+                st.caption("People in the room, minute by minute, from the first "
+                           "join to the last leave \u2014 swept from the Zoom "
+                           "report's join/leave times, the same pass that gives "
+                           "the peak.")
+                st.area_chart(_pd.DataFrame({"in the room": _curve}), height=240)
+                st.download_button(
+                    "Download retention data (CSV)",
+                    _pd.DataFrame({"minute": range(len(_curve)),
+                                   "attendees": _curve}).to_csv(index=False).encode(),
+                    file_name=f"retention_{r['date']}_{r['batch']}.csv",
+                    mime="text/csv", key="wr_dl_curve")
+            else:
+                st.caption("No Zoom report for this session, so no retention "
+                           "curve. Nothing is inferred from attendance \u2014 that "
+                           "would be a different metric wearing the same name.")
+
+            _dist = r.get("dist") or r.get("rating_dist") or {}
+            if any(sum((_dist.get(kk) or {}).values())
+                   for kk in ("session", "trainer", "recommend")):
+                st.markdown("**Rating breakdown**")
+                for _c2, _kind in zip(st.columns(3),
+                                      ("session", "trainer", "recommend")):
+                    _h = _dist.get(_kind) or {}
+                    if not sum(_h.values()):
+                        continue
+                    with _c2:
+                        st.caption(_kind.title())
+                        st.bar_chart(_pd.DataFrame(
+                            {"responses": [_h.get(str(i), 0) for i in range(1, 6)]},
+                            index=[str(i) for i in range(1, 6)]), height=200)
+
+        st.caption("**Phase-wise retention (Teaching / Q&A) is deliberately "
+                   "absent.** It needs someone to record when Q&A started; the "
+                   "reference app asks for it at upload time. Nothing in L2, the "
+                   "curriculum sheet or the Zoom report carries it, so a boundary "
+                   "here would be a guess wearing a percentage.")
+
 
 # ============================ TAB 6 - BSIAI ==================================
 with tab_bsiai:
