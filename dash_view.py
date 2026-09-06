@@ -17,6 +17,7 @@ import plotly.graph_objects as go
 
 import data as D
 import polls as _polls          # pure; the NPS rule must live in one place only
+import pods as _pods            # for the WHOLE_BATCH sentinel below
 
 # prototype colour bands
 _BAND = {
@@ -156,8 +157,17 @@ def pod_view(d: dict, pod: str | None) -> dict:
                 # loses the trainer and the column reads blank for pod days
                 "mentor": next((x.get("mentor") for x in same
                                 if (x.get("mentor") or "").strip()), ""),
-                "rating_trainer": (rated[0].get("rating_trainer")
-                                   if len(rated) == 1 else None),
+                # Weighted by responses like the overall rating above. It used
+                # to be carried only when exactly one POD had a poll, which was
+                # fine for a tooltip but leaves a dedicated column blank on every
+                # multi-POD day - which is most of them since 23 Aug.
+                "rating_trainer": (
+                    round(sum(x["rating_trainer"] * (x.get("rating_n") or 1)
+                              for x in rated if x.get("rating_trainer") is not None)
+                          / sum((x.get("rating_n") or 1) for x in rated
+                                if x.get("rating_trainer") is not None), 2)
+                    if any(x.get("rating_trainer") is not None for x in rated)
+                    else None),
                 "rating_recommend": (rated[0].get("rating_recommend")
                                      if len(rated) == 1 else None),
                 # NPS is a percentage, so pod rows are combined by SUMMING their
@@ -179,6 +189,21 @@ def pod_view(d: dict, pod: str | None) -> dict:
         # intro rows live on d["sessions"] and have no date bucket - keep them
         sess = [s for s in d["sessions"] if s.get("is_intro")] + sess
         return dict(d, sessions=sess)
+
+    if pod == _pods.WHOLE_BATCH:
+        # The sessions L2 runs for EVERYONE. Its Batch Name cell says so in six
+        # different ways across the live sheet -- 'All Domains', 'AllDomains',
+        # 'Common', 'General', or just the bare batch -- and pods.from_l2_label
+        # folds all of them to WHOLE_BATCH, so they carry no pod and were only
+        # reachable under 'All PODs', mixed in with the domain sessions.
+        # Strength stays the whole batch, because the whole batch was invited.
+        sess = [s for s in d["sessions"] if not s.get("pod")]
+        if not sess:
+            return dict(d, sessions=[], n_sessions=0, avg_pct=0.0, peak=0.0, low=0.0)
+        pcts = [s["pct"] for s in sess]
+        return dict(d, sessions=sess, n_sessions=len(sess),
+                    avg_pct=round(sum(pcts) / len(pcts), 1),
+                    peak=max(pcts), low=min(pcts))
 
     sess = [s for s in d["sessions"] if s.get("pod") == pod]
     if not sess:
@@ -202,6 +227,22 @@ def closing_rows_html(d: dict) -> str:
             f'<div class="cl-count">{ch["count"]:,} · {ch["pct"]:.0f}%</div>'
             f'<div>{_pill(ch["att"])}</div></div>')
     return "".join(rows)
+
+
+def _num2(v) -> str:
+    """A 1-5 score to 2dp, or a muted dash when no poll ran."""
+    if not isinstance(v, (int, float)):
+        return '<span style="color:#9aa3b2">&mdash;</span>'
+    return f"{v:.2f}"
+
+
+def _signed(v) -> str:
+    """NPS, always signed: -20 and +20 are opposite findings and a bare '20'
+    hides which one you are looking at."""
+    if not isinstance(v, (int, float)):
+        return '<span style="color:#9aa3b2">&mdash;</span>'
+    colour = "#1f8b4c" if v >= 50 else ("#b07d18" if v >= 0 else "#c0392b")
+    return f'<span style="color:{colour};font-weight:600">{v:+.0f}</span>'
 
 
 def _mentor(s: dict) -> str:
@@ -273,12 +314,16 @@ def sessions_table_html(d: dict) -> str:
             f'<td class="num">{s["present"]:,}</td><td class="num">{absent}</td>'
             f'<td class="num">{_pill(s["pct"])}</td>'
             f'<td>{_mentor(s)}</td>'
-            f'<td class="num">{_rating(s)}</td></tr>')
+            f'<td class="num">{_rating(s)}</td>'
+            f'<td class="num">{_num2(s.get("rating_trainer"))}</td>'
+            f'<td class="num">{_signed(s.get("rating_nps"))}</td></tr>')
     return ('<table class="sess"><thead><tr><th>Date</th><th>Session</th>'
             '<th class="num">Present</th><th class="num">Absent</th>'
             '<th class="num">% of strength</th>'
             '<th>Trainer</th>'
-            '<th class="num">Rating</th></tr></thead><tbody>'
+            '<th class="num">Rating</th>'
+            '<th class="num">Trainer &#9733;</th>'
+            '<th class="num">NPS</th></tr></thead><tbody>'
             + "".join(trs) + "</tbody></table>")
 
 
@@ -348,10 +393,17 @@ def render(DATA: dict, summary: dict, source_note: str = "", *,
     pod_sel = None
     if plist:
         pinfo = d.get("pods") or {}
-        opts = ["All PODs"] + [f"{p} ({pinfo[p]['strength']:,})" for p in plist]
+        n_whole = sum(1 for s in d["sessions"] if not s.get("pod") and s.get("mm"))
+        whole_lbl = f"All Domains ({n_whole})" if n_whole else None
+        opts = (["All PODs"] + ([whole_lbl] if whole_lbl else [])
+                + [f"{p} ({pinfo[p]['strength']:,})" for p in plist])
         picked = st.segmented_control("POD", opts, default=opts[0], key=f"{key}_pod")
         if picked and picked != "All PODs":
-            pod_sel = plist[opts.index(picked) - 1]
+            if whole_lbl and picked == whole_lbl:
+                # not a POD - the sessions the whole batch was invited to
+                pod_sel = _pods.WHOLE_BATCH
+            else:
+                pod_sel = plist[opts.index(picked) - (2 if whole_lbl else 1)]
         if d.get("pod_guessed"):
             st.caption(f"{d['pod_guessed']} student(s) list more than one POD; the "
                        "last one in the cell was used.")

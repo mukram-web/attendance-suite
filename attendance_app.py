@@ -1109,34 +1109,101 @@ with sub_browse:
                        "average of their NPS percentages.")
 
         # ── the table ────────────────────────────────────────────────────────
+        # ONE SESSION, MANY BATCHES. A session several batches sit in produces
+        # one row per batch, because attendance is measured against each batch's
+        # own roster. Showing those as separate lines repeats the title, trainer,
+        # duration and rating 2-3 times over -- 140 of 522 rows were repeats.
+        # So the rows are kept (you need the per-batch attendance) and the shared
+        # columns are MERGED with rowspan, exactly as they would be in a
+        # spreadsheet. The group key is L2's own batch cell plus the date, pod
+        # and title, so it is L2 that decides what counts as one session.
+        _groups: dict = {}
+        for s in _v:
+            k = (s["date"], s.get("l2_batch") or s["batch"],
+                 s.get("pod") or "", s.get("topic") or "")
+            _groups.setdefault(k, []).append(s)
+
+        def _f(v, fmt="{:.1f}", dash="—"):
+            return fmt.format(v) if isinstance(v, (int, float)) else dash
+
+        def _bar(v):
+            if not isinstance(v, (int, float)):
+                return "—"
+            return (f'<div class="bw"><div class="bf" style="width:'
+                    f'{max(0, min(100, v / 5 * 100)):.0f}%"></div>'
+                    f'<span>{v:.2f}</span></div>')
+
+        _rows_html = []
+        for k in sorted(_groups, key=lambda x: (x[0], x[1]), reverse=True):
+            grp = sorted(_groups[k], key=lambda s: dc.batch_key(s["batch"]))
+            n = len(grp)
+            g0 = grp[0]
+            # merged cells: written once, spanning every batch row in the session
+            merged = (
+                f'<td rowspan="{n}">{_html.escape(g0["date"])}</td>'
+                f'<td rowspan="{n}" class="t">{_html.escape(g0.get("topic") or "—")}</td>'
+                f'<td rowspan="{n}">{_html.escape(g0.get("trainer") or "—")}</td>'
+                f'<td rowspan="{n}">{_html.escape(g0.get("trainer_type") or "—")}</td>'
+                f'<td rowspan="{n}">{_html.escape(g0.get("pod") or "—")}</td>')
+            tail = (
+                f'<td rowspan="{n}" class="n">{_f(g0.get("duration_hrs"))}</td>'
+                f'<td rowspan="{n}" class="n">{_f(g0.get("peak"), "{:,.0f}")}</td>'
+                f'<td rowspan="{n}" class="n">{_f(g0.get("rating_trainer"), "{:.2f}")}</td>'
+                f'<td rowspan="{n}">{_bar(g0.get("rating"))}</td>'
+                f'<td rowspan="{n}" class="n">'
+                f'{_f(g0.get("nps"), "{:+.0f}")}</td>'
+                f'<td rowspan="{n}" class="n">{g0["rating_n"]:,}</td>')
+            for i, s in enumerate(grp):
+                # per-batch: the whole reason the rows are not collapsed
+                per = (f'<td>{_html.escape(s["batch"])}</td>'
+                       f'<td class="n">{_f(s.get("pct"))}%</td>')
+                _rows_html.append("<tr>" + (merged if i == 0 else "") + per
+                                  + (tail if i == 0 else "") + "</tr>")
+
+        st.markdown(
+            """<style>
+            .sess-wrap{max-height:560px;overflow:auto;border:1px solid #e6e9ef;border-radius:8px}
+            table.sess{border-collapse:collapse;width:100%;font-size:12px}
+            table.sess th{position:sticky;top:0;background:#f4f6f9;text-align:left;
+              padding:7px 9px;font-weight:600;color:#4a5568;border-bottom:1px solid #e6e9ef;
+              white-space:nowrap;z-index:1}
+            table.sess td{padding:6px 9px;border-bottom:1px solid #f1f3f6;
+              border-right:1px solid #f6f7f9;white-space:nowrap;vertical-align:middle}
+            table.sess td.n{text-align:right;font-variant-numeric:tabular-nums}
+            table.sess td.t{max-width:300px;overflow:hidden;text-overflow:ellipsis}
+            table.sess td[rowspan]{background:#fcfdff}
+            .bw{display:flex;align-items:center;gap:6px;min-width:96px}
+            .bf{height:7px;background:#2f6df6;border-radius:4px}
+            .bw span{font-variant-numeric:tabular-nums;color:#4a5568}
+            </style>""", unsafe_allow_html=True)
+        st.markdown(
+            '<div class="sess-wrap"><table class="sess"><tr>'
+            '<th>Date</th><th>Title</th><th>Trainer</th><th>Type</th><th>POD</th>'
+            '<th>Batch</th><th>Att %</th>'
+            '<th>Dur (h)</th><th>Peak</th><th>Trainer ★</th><th>Overall</th>'
+            '<th>NPS</th><th>Resp</th></tr>'
+            + "".join(_rows_html) + '</table></div>',
+            unsafe_allow_html=True)
+        st.caption(f"{len(_groups):,} sessions · {len(_v):,} batch rows. "
+                   "Title, trainer, duration, peak and the ratings are one "
+                   "session's facts, so they span its batches; attendance is "
+                   "per batch, because each is measured against its own roster.")
+
         _tbl = _pd.DataFrame([{
-            "Date": s["date"], "Trainer": s.get("trainer") or "—",
-            "Type": s.get("trainer_type") or "—",
-            "Title": s["topic"], "Batch": s.get("l2_batch") or s["batch"],
-            "POD": s["pod"] or "—",
-            "Attendance %": s["pct"], "Duration (hrs)": s.get("duration_hrs"),
-            "Present": s["present"], "Invited": s["total"],
-            "Peak": s.get("peak"), "vs curve": s.get("index"),
-            "Trainer rating": s.get("rating_trainer"),
-            "Overall": s.get("rating"),
+            "Date": s["date"], "Title": s["topic"], "Trainer": s.get("trainer"),
+            "Type": s.get("trainer_type"), "Batch": s["batch"],
+            "L2 batch": s.get("l2_batch"), "POD": s["pod"],
+            "Attendance %": s["pct"], "Present": s["present"],
+            "Invited": s["total"], "vs curve": s.get("index"),
+            "Duration (hrs)": s.get("duration_hrs"), "Peak": s.get("peak"),
+            "Trainer rating": s.get("rating_trainer"), "Overall": s.get("rating"),
             "NPS": s.get("nps"), "Responses": s["rating_n"],
             "Simulive": s.get("session_type") or "",
         } for s in _v])
-        _sel = st.dataframe(
-            _tbl, width='stretch', hide_index=True, height=460,
-            on_select="rerun", selection_mode="single-row",
-            column_config={
-                "Overall": st.column_config.ProgressColumn(
-                    "Overall", min_value=0, max_value=5, format="%.2f"),
-                "Attendance %": st.column_config.NumberColumn(format="%.1f%%"),
-                "vs curve": st.column_config.NumberColumn(
-                    format="%.2fx", help="Above 1.00 beats what a cohort of this "
-                                         "age normally draws."),
-                "Duration (hrs)": st.column_config.NumberColumn(format="%.1f"),
-                "Peak": st.column_config.NumberColumn(
-                    format="%d", help="Most people in the room at once, from the "
-                                      "join/leave times."),
-            })
+        st.download_button("Download these sessions (CSV)",
+                           _tbl.to_csv(index=False).encode(),
+                           file_name="sessions.csv", mime="text/csv",
+                           key="dl_sessions")
 
         st.caption(
             "**Duration (hrs)** is first-join to last-leave, not Zoom's "
@@ -1150,25 +1217,46 @@ with sub_browse:
             "recorded*, never *Live*."
         )
 
-        _rowsel = (_sel.selection.rows if getattr(_sel, "selection", None) else [])
-        if _rowsel:
-            s = _v[_rowsel[0]]
-            st.divider()
+        # An HTML table cannot carry Streamlit's row selection, so the drill-down
+        # gets its own picker. Options are SESSIONS, not batch rows, matching the
+        # merge above.
+        st.divider()
+        _opts = sorted(_groups, key=lambda x: (x[0], x[1]), reverse=True)
+        _pick = st.selectbox(
+            "Session breakdown",
+            options=range(len(_opts)),
+            format_func=lambda i: (f"{_opts[i][0]} · {_opts[i][3][:52] or 'Session'}"
+                                   + (f" · {_opts[i][2]}" if _opts[i][2] else "")
+                                   + f" · {_opts[i][1]}"),
+            index=None, placeholder="Pick a session to see its breakdown",
+            key="ss_pick")
+        if _pick is not None:
+            _grp = sorted(_groups[_opts[_pick]],
+                          key=lambda s: dc.batch_key(s["batch"]))
+            s = _grp[0]
             st.subheader(s["topic"] or "Session")
             st.caption(f"{s.get('l2_batch') or s['batch']} · {s['date_lbl']} "
                        f"({s['date']})"
                        + (f" · {s['pod']}" if s["pod"] else "")
                        + (f" · {s['trainer']}" if s.get("trainer") else "")
                        + (f" ({s['trainer_type']})" if s.get("trainer_type") else ""))
-            d1, d2, d3, d4 = st.columns(4)
-            d1.metric("Present", f"{s['present']:,}")
-            d2.metric("Invited", f"{s['total']:,}")
-            d3.metric("Attendance", f"{s['pct']:.1f}%" if s["pct"] else "—")
-            d4.metric("vs curve", f"{s['index']:.2f}x" if s.get("index") else "—",
-                      help=(f"the curve expects {s['expected_pct']:.1f}% for a "
-                            f"{s['batch']} session {s['wk']} weeks in"
-                            if s.get("expected_pct") else
-                            "no curve point for this week — not scored"))
+            # Pooled across every batch that sat in this session, because the
+            # room was one room. The per-batch split is right below.
+            _p = sum(x["present"] for x in _grp)
+            _t = sum(x["total"] for x in _grp)
+            d1, d2, d3, d4, d5 = st.columns(5)
+            d1.metric("Present", f"{_p:,}",
+                      help="across all batches in this session" if len(_grp) > 1 else None)
+            d2.metric("Invited", f"{_t:,}")
+            d3.metric("Attendance", f"{_p / _t * 100:.1f}%" if _t else "—")
+            d4.metric("Duration", f"{s['duration_hrs']:.1f} h"
+                      if s.get("duration_hrs") else "—")
+            d5.metric("Peak", f"{s['peak']:,}" if s.get("peak") else "—",
+                      help="most people in the room at once")
+            if len(_grp) > 1:
+                st.dataframe(_pd.DataFrame([{
+                    "Batch": x["batch"], "Attendance %": x["pct"],
+                } for x in _grp]), width='stretch', hide_index=True)
             _dist = (s.get("dist") or {})
             if any(_dist.values()):
                 st.markdown("**How the room rated it**")
