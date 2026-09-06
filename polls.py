@@ -77,10 +77,90 @@ def _score(v) -> float | None:
     return f if 1.0 <= f <= 5.0 else None
 
 
+def nps(scores) -> int | None:
+    """Net Promoter Score from Be10x's 1-5 recommend question, top-box.
+
+        promoter = 5, passive = 4, detractor = 1-3
+        NPS = (promoters - detractors) / answered x 100
+
+    Why top-box and not a rescale. Rescaling 1-5 onto 0-10 linearly gives
+    x10 = (x5 - 1) x 2.5, so 5 -> 10 (promoter), 4 -> 7.5 (passive) and 3 -> 5
+    (detractor): exactly this split. The convention and the arithmetic agree, so
+    nothing is being fudged to make the number look better.
+
+    Why the scale is NOT sniffed from the data. The obvious implementation picks
+    the 0-10 rule when it sees a value above 5 and the 1-5 rule otherwise. That
+    is a trap: a genuine 0-10 poll where everybody answered 5 or less would then
+    be scored on the 1-5 rule, turning every detractor into a promoter and a
+    -100 session into +100. Measured over all 1,113 cached poll files, Be10x has
+    never asked a 0-10 recommend question - answers are {1: 4188, 2: 4747,
+    3: 19380, 4: 71401, 5: 216290} - so this function commits to 1-5 and
+    `_score` already rejects anything outside it. If a 0-10 question is ever
+    introduced, add an explicit scale argument; do not infer it from the values.
+
+    Returns None when nobody answered, never 0 - "no data" and "as many
+    detractors as promoters" must not render as the same number.
+    """
+    return nps_from_dist(_distribution(scores))
+
+
+def nps_from_dist(dist) -> int | None:
+    """The same rule as `nps`, for callers holding counts rather than answers.
+
+    This is the one place the promoter/detractor split is written down, so the
+    rollup on the dashboard and the per-session number can never drift apart.
+
+    To combine several sessions (the eleven POD sessions on one date, or a whole
+    week), SUM their histograms and call this — never average their NPS
+    percentages. A 13-response pod would otherwise weigh the same as a
+    316-response one.
+    """
+    if not dist:
+        return None
+    c = {str(i): int(dist.get(str(i), 0) or 0) for i in range(1, 6)}
+    n = sum(c.values())
+    if not n:
+        return None
+    return round((c["5"] - c["1"] - c["2"] - c["3"]) / n * 100)
+
+
+def merge_dists(dists) -> dict:
+    """Sum several {kind: {'1'…'5': n}} histograms into one."""
+    out: dict = {}
+    for d in dists or ():
+        for kind, hist in (d or {}).items():
+            m = out.setdefault(kind, {str(i): 0 for i in range(1, 6)})
+            for b, n in (hist or {}).items():
+                if b in m:
+                    m[b] += int(n or 0)
+    return out
+
+
+def _distribution(scores) -> dict:
+    """{'1': n, …, '5': n} over 1-5, zeros included.
+
+    Every bucket is present even when empty: the UI draws a five-bar chart, and
+    a missing key would silently shorten it rather than showing a gap.
+    """
+    out = {str(i): 0 for i in range(1, 6)}
+    for v in scores or ():
+        if v is None:
+            continue
+        b = str(int(round(v)))
+        if b in out:
+            out[b] += 1
+    return out
+
+
 def parse(text: str) -> dict:
     """Poll CSV -> {'session': avg|None, 'trainer': …, 'recommend': …,
-    'responses': int}. Averages are rounded to 1dp; `responses` is the number of
-    people who gave at least one rating."""
+    'responses': int, 'dist': {kind: {'1'…'5': n}}, 'nps': int|None}.
+
+    Averages are rounded to 1dp; `responses` is the number of people who gave at
+    least one rating. `dist` is the full 1-5 histogram per kind — the mean alone
+    cannot tell a room that was uniformly lukewarm from one that was half
+    delighted and half furious, and those need different responses.
+    """
     rows = list(csv.reader(io.StringIO(text)))
     buckets: dict[str, list] = {k: [] for k in _KINDS}
     respondents = 0
@@ -144,6 +224,12 @@ def parse(text: str) -> dict:
 
     out = {k: (round(sum(v) / len(v), 2) if v else None) for k, v in buckets.items()}
     out["responses"] = respondents
+    # The raw scores are in hand at this point whichever export shape was read,
+    # so the histogram and the NPS cost nothing extra. Both ride the existing
+    # {(batch, mm, pod): ratings} payload through lookup_by_session and into the
+    # store, so no new plumbing is needed downstream.
+    out["dist"] = {k: _distribution(v) for k, v in buckets.items()}
+    out["nps"] = nps(buckets["recommend"])
     return out
 
 
