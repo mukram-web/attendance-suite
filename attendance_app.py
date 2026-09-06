@@ -1520,11 +1520,15 @@ with tab_weekend:
 
         if _rows_w:
             st.subheader("Session breakdown")
+            # Sessions WITH a retention curve first, so the tab does not open on
+            # "no Zoom report for this session" and read as broken.
             _byk = {}
-            for _r0 in _rows_w:
+            for _r0 in sorted(_rows_w,
+                              key=lambda x: (not x.get("retention"), x["date"])):
                 _byk[f"{_r0['date']} \u00b7 {(_r0.get('topic') or 'Session')[:50]}"
                      + (f" \u00b7 {_r0['pod']}" if _r0.get("pod") else "")
-                     + f" \u00b7 {_r0.get('l2_batch') or _r0['batch']}"] = _r0
+                     + f" \u00b7 {_r0.get('l2_batch') or _r0['batch']}"
+                     + ("" if _r0.get("retention") else "  (no report)")] = _r0
             _pick = st.selectbox("Session", list(_byk), key="wr_sess")
             r = _byk[_pick]
             c = st.columns(6)
@@ -1553,7 +1557,10 @@ with tab_weekend:
                            "join to the last leave \u2014 swept from the Zoom "
                            "report's join/leave times, the same pass that gives "
                            "the peak.")
-                st.area_chart(_pd.DataFrame({"in the room": _curve}), height=240)
+                _cdf = _pd.DataFrame({"Attendees": _curve})
+                _cdf.index.name = "Time (min)"
+                st.area_chart(_cdf, height=260,
+                              x_label="Time (min)", y_label="Attendees")
                 st.download_button(
                     "Download retention data (CSV)",
                     _pd.DataFrame({"minute": range(len(_curve)),
