@@ -719,12 +719,19 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-(tab_dash, tab_sessions, tab_roster, tab_day1, tab_fcst, tab_recap,
- tab_trainer, tab_students, tab_bsiai) = st.tabs(
+(tab_dash, tab_sessions, tab_roster, tab_day1, tab_fcst, tab_students,
+ tab_bsiai) = st.tabs(
     ["📊 Dashboard", "📚 Sessions", "📋 Roster (marked attendance)",
-     "🎯 Day-1 analysis", "🔮 Forecast", "🏆 Recap", "🎓 Trainers",
-     "🧑‍🎓 Students", "🧩 BSIAI"]
+     "🎯 Day-1 analysis", "🔮 Forecast", "🧑‍🎓 Students", "🧩 BSIAI"]
 )
+
+# Browse / This week / Trainers are three views of the SAME thing — the session
+# list — so they are sub-tabs rather than three more entries on a strip that was
+# already too wide to read. The containers are created here and filled further
+# down, exactly as the outer tabs are.
+with tab_sessions:
+    sub_browse, sub_recap, sub_trainer = st.tabs(
+        ["🔎 Browse", "🏆 This week", "🎓 Trainers"])
 
 # ============================ TAB 1 — DASHBOARD ==============================
 with tab_dash:
@@ -1020,8 +1027,8 @@ with tab_fcst:
                         _bo.items(), key=lambda kv: dc.batch_key(kv[0]))]),
                     width='stretch', hide_index=True, height=240)
 
-# ============================ TAB 2 - SESSIONS ===============================
-with tab_sessions:
+# ===================== SESSIONS - BROWSE (sub-tab) ===========================
+with sub_browse:
     _S = (store or {}).get("sessions") if store_mode else None
     if not store_mode:
         st.info("The session browser reads the prebuilt data file.")
@@ -1169,8 +1176,8 @@ with tab_sessions:
             else:
                 st.caption("No poll was run for this session.")
 
-# ============================ TAB 5 - RECAP ==================================
-with tab_recap:
+# ===================== SESSIONS - THIS WEEK (sub-tab) ========================
+with sub_recap:
     _r = (store or {}).get("recap") if store_mode else None
     if not store_mode:
         st.info("The recap is built by the weekly pipeline, so it needs the "
@@ -1242,8 +1249,8 @@ with tab_recap:
                 "vs curve": b["index"], "Rating": b["rating"], "NPS": b["nps"],
             } for b in _r["leaderboard"]]), width='stretch', hide_index=True)
 
-# ============================ TAB 6 - TRAINERS ===============================
-with tab_trainer:
+# ===================== SESSIONS - TRAINERS (sub-tab) =========================
+with sub_trainer:
     _t = (store or {}).get("trainers") if store_mode else None
     if not store_mode:
         st.info("Trainer rollups are built by the weekly pipeline.")
