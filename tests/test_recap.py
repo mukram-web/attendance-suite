@@ -154,19 +154,42 @@ class TestAwards(unittest.TestCase):
         return [{"index": 1.0 + i / 10, "pct": 40.0, "expected_pct": 40.0,
                  "wk": 3, "batch": f"B{i}", "topic": f"T{i}", "pod": "",
                  "mentor": "M", "date_lbl": "5 Sep", "present": 100 + i,
-                 "total": 500, "nps": 50 + i, "rating_n": 100, "rating": 4.5,
-                 "dist": {}} for i in range(n)]
+                 "total": 500, "nps": 50 + i, "rating_n": 100,
+                 "rating": 4.0 + i / 100, "rating_trainer": 4.1 + i / 100,
+                 "stick30": 40.0 + i, "dist": {}} for i in range(n)]
 
     def test_awards_need_a_real_field(self):
         # One contender is a fact, not a competition.
         self.assertEqual(recap._awards(self._rows(1)), [])
         self.assertTrue(recap._awards(self._rows(4)))
 
-    def test_session_of_the_week_is_the_best_residual(self):
+    def test_session_of_the_week_is_the_best_RATING(self):
+        """Ratings do not decay with cohort age, so a raw comparison is fair
+        here in a way it never is for attendance."""
         aw = recap._awards(self._rows(4))
         sotw = next(a for a in aw if a["award"] == "Session of the week")
-        self.assertEqual(sotw["batch"], "B3")     # highest index
-        self.assertIn("normally draws", sotw["why"])
+        self.assertEqual(sotw["batch"], "B3")          # highest rating
+        self.assertIn("rated by", sotw["why"])
+
+    def test_the_attendance_award_stays_on_the_residual(self):
+        aw = recap._awards(self._rows(4))
+        btc = next(a for a in aw if a["award"] == "Beat the curve")
+        self.assertEqual(btc["batch"], "B3")          # highest index
+        self.assertIn("normally draws", btc["why"])
+
+    def test_best_retention_is_the_stickiest_session(self):
+        aw = recap._awards(self._rows(4))
+        br = next(a for a in aw if a["award"] == "Best retention")
+        self.assertEqual(br["batch"], "B3")           # highest stick30
+        self.assertIn("closing half hour", br["why"])
+
+    def test_a_thin_poll_cannot_win_session_of_the_week_either(self):
+        rows = self._rows(4)
+        rows[0]["rating"] = 5.0
+        rows[0]["rating_n"] = 3          # three people is not a mandate
+        aw = recap._awards(rows)
+        sotw = next(a for a in aw if a["award"] == "Session of the week")
+        self.assertNotEqual(sotw["batch"], "B0")
 
     def test_a_thin_poll_cannot_win_crowd_favourite(self):
         rows = self._rows(4)
