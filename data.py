@@ -270,6 +270,10 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             # the store and safe on the public static site.
             "rating_nps": rt.get("nps"),
             "rating_dist": rt.get("dist") or {},
+            # When the room began answering the poll — used to mark the
+            # retention curve. An absolute timestamp here; the pipeline turns it
+            # into minutes-from-first-join once it knows the session's t0.
+            "poll_at": rt.get("submitted_first"),
             "present": present, "absent": max(0, denom - present), "total": denom,
             "pct": round(present / denom * 100, 1),
             "present_only": absent == 0,

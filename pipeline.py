@@ -245,6 +245,21 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
             r["retention"] = m.get("curve")
             r["stick10"] = m.get("stick10")
             r["stick30"] = m.get("stick30")
+            # Poll marker, in minutes along the curve. Both sides come from the
+            # session's own files — the poll's first submission and the first
+            # join — so no manual log is needed. Dropped when either is missing
+            # or the result lands outside the curve, which would be a marker
+            # pointing at nothing.
+            r["poll_at_min"] = None
+            if r.get("poll_at") and m.get("t0") and r.get("retention"):
+                try:
+                    _pt = datetime.fromisoformat(r["poll_at"])
+                    _t0 = datetime.fromisoformat(m["t0"])
+                    _mins = int((_pt - _t0).total_seconds() // 60)
+                    if 0 <= _mins < len(r["retention"]):
+                        r["poll_at_min"] = _mins
+                except Exception:
+                    pass
         # Now that the rows carry retention, the weekly stickiness KPI and the
         # Best-retention award see the same numbers the session rows do.
         recap_section = recap.build(DATA, datetime.now(IST).date(),

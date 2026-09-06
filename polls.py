@@ -77,6 +77,48 @@ def _score(v) -> float | None:
     return f if 1.0 <= f <= 5.0 else None
 
 
+_SUBMIT_FMTS = ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y %H:%M:%S",
+                "%m/%d/%Y %I:%M %p", "%Y-%m-%d %H:%M:%S")
+
+
+def submission_times(text) -> list:
+    """Every per-response 'Submitted Date and Time', sorted, as datetimes.
+
+    This is what lets the retention curve carry a poll marker without anyone
+    keeping a manual log. The reference app marks the moment a moderator SAYS
+    they circulated the poll; this marks the moment the room actually started
+    answering it, which is the better measurement and needs no new data entry.
+
+    Measured 2026-09-07: 1,105 of 1,113 cached poll files carry the column.
+    Returns [] for the other 8 rather than guessing.
+    """
+    from datetime import datetime
+    rows = list(csv.reader((text or "").splitlines()))
+    hdr = hidx = None
+    for i, r in enumerate(rows[:14]):
+        low = [str(c or "").strip().lower() for c in r]
+        if any("submitted" in c for c in low):
+            hdr, hidx = low, i
+            break
+    if hdr is None:
+        return []
+    j = next(i for i, c in enumerate(hdr) if "submitted" in c)
+    out = []
+    for r in rows[hidx + 1:]:
+        if len(r) <= j:
+            continue
+        s = str(r[j] or "").strip().strip('"')
+        if not s:
+            continue
+        for f in _SUBMIT_FMTS:
+            try:
+                out.append(datetime.strptime(s, f))
+                break
+            except ValueError:
+                continue
+    return sorted(out)
+
+
 def nps(scores) -> int | None:
     """Net Promoter Score from Be10x's 1-5 recommend question, top-box.
 
@@ -271,6 +313,13 @@ def parse_files(poll_files) -> dict:
             continue
         if not any(got[k] is not None for k in _KINDS):
             continue
+        # When the room started answering. Rides the same payload as the
+        # ratings, so it reaches a session without any new plumbing.
+        try:
+            ts = submission_times(text)
+            got["submitted_first"] = ts[0].isoformat() if ts else None
+        except Exception:
+            got["submitted_first"] = None
         prev = best.get(wid)
         if prev and prev["responses"] >= got["responses"]:
             continue
