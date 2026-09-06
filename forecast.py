@@ -449,7 +449,7 @@ def _split_kind(topics: list[str]) -> str:
 
 # ── 4. the forecast ──────────────────────────────────────────────────────────
 def build(DATA: dict, curric_tabs: dict, today: date,
-          horizon_weeks: int = 8, lookback_weeks: int = 2) -> dict:
+          horizon_weeks: int = 8) -> dict:
     """Predicted attendance for every scheduled session inside the horizon.
 
     Aggregates only — safe to ship in the store and to render publicly.
@@ -496,27 +496,10 @@ def build(DATA: dict, curric_tabs: dict, today: date,
             "treat these as indicative.")
 
     horizon_end = today + timedelta(weeks=horizon_weeks)
-    # Include TODAY, and the recent past. The window used to start strictly after
-    # `today`, so a Sunday 03:04 run dropped that same Sunday's sessions and the
-    # tab jumped to the following weekend — the forecast was invisible on the day
-    # it mattered. The lookback then keeps the just-run sessions on screen with
-    # what actually happened beside the prediction, which is the only way anyone
-    # can see whether the model is any good without exporting two stores.
-    window_start = today - timedelta(weeks=lookback_weeks)
     grouped = defaultdict(list)
     for r in rows:
-        if window_start <= r["date"] <= horizon_end:
+        if today < r["date"] <= horizon_end:
             grouped[(r["date"], r["batch"])].append(r)
-
-    # What actually happened, for the past half of that window.
-    actual_by = {}
-    for code, v in DATA.items():
-        for sx in v.get("sessions", []):
-            if sx.get("mm"):
-                actual_by[(code, sx["mm"], sx.get("pod") or "ALL")] = sx.get("present")
-
-    def _actual(dt_, bat, pod):
-        return actual_by.get((bat, f"{dt_.month:02d}_{dt_.day:02d}", pod))
 
     out, skipped_weeks = [], set()
     for (dt_, bat), g in sorted(grouped.items()):
@@ -528,19 +511,12 @@ def build(DATA: dict, curric_tabs: dict, today: date,
             continue
         h = max(1, round((dt_ - today).days / 7))
         sd = _sd_for(fit["sd_by_horizon"], h)
-        is_past = dt_ < today
-        # A past row is scored as it WOULD have been a week earlier, never with a
-        # curve that has already seen the answer.
-        off = _offset_asof(fit["obs"], curve, bat, dt_) if is_past else offsets[bat]
-        if off is None:
-            continue                      # nothing to fit on: no honest number
-        rate = math.exp(curve[wk] + off)
+        rate = math.exp(curve[wk] + offsets[bat])
         kind = _split_kind([r["topic"] for r in g])
         if kind == "whole":
             top = max(g, key=lambda r: len(r["topic"]))
             out.append(_row(dt_, bat, "ALL", top["topic"], top["trainer"], "whole",
-                            wk, h, strength[bat], rate, sd, bat in assumed,
-                            actual=_actual(dt_, bat, "ALL"), is_past=is_past))
+                            wk, h, strength[bat], rate, sd, bat in assumed))
         else:
             seen = set()
             for r in sorted(g, key=lambda r: r["pod"]):
@@ -554,8 +530,7 @@ def build(DATA: dict, curric_tabs: dict, today: date,
                     continue
                 out.append(_row(dt_, bat, r["pod"], r["topic"], r["trainer"], "pod",
                                 wk, h, den, rate * pod_mult.get(r["pod"], 1.0),
-                                sd, bat in assumed or (bat, r["pod"]) not in known_pod,
-                                actual=_actual(dt_, bat, r["pod"]), is_past=is_past))
+                                sd, bat in assumed or (bat, r["pod"]) not in known_pod))
     if skipped_weeks:
         warnings.append(
             f"{len(skipped_weeks)} scheduled week(s) sit beyond any batch's observed "
@@ -569,30 +544,21 @@ def build(DATA: dict, curric_tabs: dict, today: date,
 
     by_session = _roll_up_sessions(out)
 
-    by_date = defaultdict(lambda: {"sessions": 0, "batches": set(), "pred": 0,
-                                   "lo": 0, "hi": 0, "actual": 0,
-                                   "all_marked": True, "is_past": True})
+    by_date = defaultdict(lambda: {"sessions": 0, "batches": set(),
+                                   "pred": 0, "lo": 0, "hi": 0})
     for r in out:
         a = by_date[r["date"]]
         a["sessions"] += 1
         a["batches"].add(r["batch"])
         for k in ("pred", "lo", "hi"):
             a[k] += r[k]
-        a["is_past"] = a["is_past"] and r["is_past"]
-        if r["actual"] is None:
-            a["all_marked"] = False
-        else:
-            a["actual"] += r["actual"]
     dates = [{"date": d, "sessions": v["sessions"], "batches": len(v["batches"]),
-              "pred": v["pred"], "lo": v["lo"], "hi": v["hi"],
-              "is_past": v["is_past"],
-              "actual": v["actual"] if v["all_marked"] else None}
+              "pred": v["pred"], "lo": v["lo"], "hi": v["hi"]}
              for d, v in sorted(by_date.items())]
 
     return {
         "generated_for": today.isoformat(),
         "horizon_weeks": horizon_weeks,
-        "lookback_weeks": lookback_weeks,
         "sessions": out,
         "by_session": by_session,
         "by_date": dates,
@@ -637,8 +603,7 @@ def _roll_up_sessions(rows: list) -> list:
             "per_batch": {r["batch"]: {"pred": r["pred"], "lo": r["lo"],
                                        "hi": r["hi"], "denom": r["denom"],
                                        "pred_pct": r["pred_pct"], "wk": r["wk"],
-                                       "assumed": r["assumed_strength"],
-                                       "actual": r["actual"]}
+                                       "assumed": r["assumed_strength"]}
                           for r in rs},
             "denom": sum(r["denom"] for r in rs),
             "pred": sum(r["pred"] for r in rs),
@@ -647,30 +612,11 @@ def _roll_up_sessions(rows: list) -> list:
             "pred_pct": round(100 * sum(r["pred"] for r in rs)
                               / max(1, sum(r["denom"] for r in rs)), 1),
             "any_assumed": any(r["assumed_strength"] for r in rs),
-            "is_past": all(r["is_past"] for r in rs),
-            # None unless EVERY batch in the session has been marked — a partial
-            # total silently compared against a full prediction reads as a miss.
-            "actual": (sum(r["actual"] for r in rs)
-                       if rs and all(r["actual"] is not None for r in rs) else None),
         })
     return sorted(out, key=lambda s: (s["date"], s["pod"], s["topic"]))
 
 
-def _offset_asof(obs: dict, curve: dict, code: str, cutoff) -> float | None:
-    """The batch offset as it would have been fitted BEFORE `cutoff`.
-
-    A past date shown on the forecast must not be scored with a curve that has
-    already seen it — that is in-sample fitting, and it would flatter the model
-    exactly where someone is checking it. Returns None when the batch had no
-    prior session to fit on, in which case no honest prediction exists.
-    """
-    res = [lp - curve[wk] for wk, dt_, lp in obs.get(code, [])
-           if wk in curve and dt_ < cutoff]
-    return sum(res) / len(res) if res else None
-
-
-def _row(dt_, bat, pod, topic, trainer, kind, wk, h, den, rate, sd, assumed,
-         actual=None, is_past=False) -> dict:
+def _row(dt_, bat, pod, topic, trainer, kind, wk, h, den, rate, sd, assumed) -> dict:
     n = den * rate / 100
     return {
         "date": dt_.isoformat(),
@@ -683,13 +629,6 @@ def _row(dt_, bat, pod, topic, trainer, kind, wk, h, den, rate, sd, assumed,
         "lo": round(n * math.exp(-Z80 * sd)),
         "hi": round(n * math.exp(Z80 * sd)),
         "assumed_strength": bool(assumed),
-        # Past rows keep their prediction so it can be checked against what
-        # happened. `actual` is None for anything still in the future, and for a
-        # past session whose attendance has not been marked yet.
-        "is_past": bool(is_past),
-        "actual": actual,
-        "err_pct": (round((actual - round(n)) / round(n) * 100, 1)
-                    if actual is not None and round(n) else None),
     }
 
 
