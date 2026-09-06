@@ -57,7 +57,18 @@ _HONORIFICS = {"dr", "mr", "mrs", "ms", "miss", "prof", "sir", "sri", "smt", "sh
 # Session notes that got typed into the name WITHOUT brackets, so _PARENS misses
 # them: 'Varun Sahdev live', 'Swapnil simulive'. They describe how one week was
 # delivered, not who delivered it, and left in they split one person in two.
-_NOISE = {"live", "simulive", "recording", "recorded", "play", "sub", "backup"}
+_NOISE = {"live", "recording", "recorded", "play", "sub", "backup"}
+
+# Delivery notes matched on a PREFIX, because they are typed by hand and get
+# misspelled. A single doubled letter — 'Simuliive' — split Aman Saurav into
+# three separate trainers ranked 20, 30 and 41, and fabricated the app's only
+# "ambiguous name" warning. An exact-match set cannot survive a typo; the prefix
+# can, and no real given name in this data starts with 'simul'.
+_NOISE_PREFIX = ("simul", "simmul")
+
+
+def _is_noise(tok: str) -> bool:
+    return tok in _NOISE or tok.startswith(_NOISE_PREFIX)
 
 
 def split_mentors(cell) -> list:
@@ -82,7 +93,7 @@ def norm_name(v) -> str:
     """A name reduced to comparable tokens: lowercase, no notes, no honorifics."""
     s = _PARENS.sub(" ", str(v or "")).lower()
     s = re.sub(r"[^a-z\s]", " ", s)
-    toks = [t for t in s.split() if t and t not in _HONORIFICS and t not in _NOISE]
+    toks = [t for t in s.split() if t and t not in _HONORIFICS and not _is_noise(t)]
     return " ".join(toks)
 
 
@@ -190,6 +201,27 @@ def session_type(mentor_cell) -> str:
     return "Simulive" if _SIMULIVE.search(str(mentor_cell or "")) else ""
 
 
+def _types_by_display(groups: dict, types: dict) -> dict:
+    """{display name -> In-house/Freelance}, resolved across EVERY spelling.
+
+    The classification is typed against whichever spelling the person happened
+    to be entered as that week, which is often the short one ('Swapnil') while
+    the display name is the full one ('Swapnil Narayan'). Looking it up by the
+    display name alone therefore missed it. Every raw variant in the group is
+    checked, and if two variants disagree the majority of the group wins.
+    """
+    out = {}
+    for display, members in (groups or {}).items():
+        tally: dict = {}
+        for m in members:
+            t = (types or {}).get(norm_name(m))
+            if t:
+                tally[t] = tally.get(t, 0) + 1
+        if tally:
+            out[display] = max(tally, key=lambda k: tally[k])
+    return out
+
+
 def annotate(session_rows, emails=None, types=None) -> list:
     """Session rows + resolved trainer identity, trainer type and session type.
 
@@ -201,7 +233,9 @@ def annotate(session_rows, emails=None, types=None) -> list:
     raw_names = []
     for r in (session_rows or ()):
         raw_names.extend(split_mentors(r.get("mentor")))
-    canon = resolve(raw_names, emails)["canon"]
+    res = resolve(raw_names, emails)
+    canon = res["canon"]
+    by_display = _types_by_display(res["groups"], types)
     out = []
     for r in (session_rows or ()):
         people = split_mentors(r.get("mentor"))
@@ -210,7 +244,7 @@ def annotate(session_rows, emails=None, types=None) -> list:
         # co-taught rows list both people in `trainers` anyway.
         tt = ""
         for p in shown:
-            tt = types.get(norm_name(p)) or ""
+            tt = by_display.get(p) or ""
             if tt:
                 break
         out.append({**r,
@@ -235,6 +269,7 @@ def build(session_rows, emails=None, types=None) -> dict:
         raw_names.extend(split_mentors(r["mentor"]))
     res = resolve(raw_names, emails)
     canon = res["canon"]
+    by_display = _types_by_display(res["groups"], types)
 
     per: dict = defaultdict(list)
     co: dict = defaultdict(int)
@@ -257,7 +292,7 @@ def build(session_rows, emails=None, types=None) -> dict:
         merged = _polls.merge_dists(x.get("dist") for x in rs)
         out.append({
             "trainer": name,
-            "type": (types or {}).get(norm_name(name), ""),
+            "type": by_display.get(name, ""),
             "sessions": len(rs),
             "co_taught": co.get(name, 0),
             "batches": sorted({x["batch"] for x in rs}),
