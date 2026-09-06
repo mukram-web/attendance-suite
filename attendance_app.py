@@ -1114,9 +1114,11 @@ with sub_browse:
             "Type": s.get("trainer_type") or "—",
             "Title": s["topic"], "Batch": s.get("l2_batch") or s["batch"],
             "POD": s["pod"] or "—",
-            "Attendance %": s["pct"], "Present": s["present"],
-            "Invited": s["total"], "vs curve": s.get("index"),
-            "Overall": s.get("rating"), "Trainer rating": s.get("rating_trainer"),
+            "Attendance %": s["pct"], "Duration (hrs)": s.get("duration_hrs"),
+            "Present": s["present"], "Invited": s["total"],
+            "Peak": s.get("peak"), "vs curve": s.get("index"),
+            "Trainer rating": s.get("rating_trainer"),
+            "Overall": s.get("rating"),
             "NPS": s.get("nps"), "Responses": s["rating_n"],
             "Simulive": s.get("session_type") or "",
         } for s in _v])
@@ -1130,16 +1132,22 @@ with sub_browse:
                 "vs curve": st.column_config.NumberColumn(
                     format="%.2fx", help="Above 1.00 beats what a cohort of this "
                                          "age normally draws."),
+                "Duration (hrs)": st.column_config.NumberColumn(format="%.1f"),
+                "Peak": st.column_config.NumberColumn(
+                    format="%d", help="Most people in the room at once, from the "
+                                      "join/leave times."),
             })
 
         st.caption(
-            "**Duration** and **Peak** are deliberately absent. Both live only in "
-            "the Zoom attendee report's own header, which the weekly job does not "
-            "fetch for past sessions — and Zoom's 'Actual Duration' tracks when "
-            "the host finally left, not when teaching ended (measured: 112 to 279 "
-            "minutes for nominally 3-hour classes). **Simulive** is blank unless "
-            "L2 says so; only 49 of 1,610 mentor rows record it, so a blank means "
-            "not recorded rather than Live."
+            "**Duration (hrs)** is first-join to last-leave, not Zoom's "
+            "'Actual Duration' — that one runs from the host starting to the host "
+            "leaving, so a trainer who forgets to end the webinar inflates it. "
+            "**Peak** is the highest number of people in the room at once, swept "
+            "from the join/leave times: it matches Zoom's own *Max Concurrent "
+            "Views* exactly on 93% of the reports that carry that field, and "
+            "covers the 64% that do not. **Simulive** is blank unless L2 says so — "
+            "only 49 of 1,610 mentor rows record it, so a blank means *not "
+            "recorded*, never *Live*."
         )
 
         _rowsel = (_sel.selection.rows if getattr(_sel, "selection", None) else [])
