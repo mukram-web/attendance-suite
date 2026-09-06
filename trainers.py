@@ -172,7 +172,56 @@ def resolve(names, emails=None) -> dict:
             "groups": {k: sorted(v) for k, v in groups.items()}}
 
 
-def build(session_rows, emails=None) -> dict:
+_SIMULIVE = re.compile(r"\bsimulive\b", re.I)
+
+
+def session_type(mentor_cell) -> str:
+    """'Simulive' when the Mentor cell says so, else '' — never 'Live'.
+
+    Deliberately not a Live-vs-Simulive verdict. Measured on the live L2, only
+    44 of 1,610 mentor rows carry a simulive marker and 5 say 'live'; the other
+    1,559 are a plain name. Blank means NOT RECORDED, and rendering it as 'Live'
+    would assert 1,559 facts nobody entered. The reference app shows 'Live' for
+    everything for exactly this reason, and it is wrong to.
+
+    A real Live/Simulive flag needs the attendee report's own presenter marker,
+    which the weekly run does not fetch.
+    """
+    return "Simulive" if _SIMULIVE.search(str(mentor_cell or "")) else ""
+
+
+def annotate(session_rows, emails=None, types=None) -> list:
+    """Session rows + resolved trainer identity, trainer type and session type.
+
+    Returns NEW dicts; the input is not mutated. `types` is keyed on the
+    normalised name (as `attendance_core.l2_mentor_types` returns it), so a
+    classification typed against 'Swapnil' also reaches 'Swapnil Narayan'.
+    """
+    types = types or {}
+    raw_names = []
+    for r in (session_rows or ()):
+        raw_names.extend(split_mentors(r.get("mentor")))
+    canon = resolve(raw_names, emails)["canon"]
+    out = []
+    for r in (session_rows or ()):
+        people = split_mentors(r.get("mentor"))
+        shown = [canon.get(p, p) for p in people]
+        # A person's type, not a session's. First one found wins for the row;
+        # co-taught rows list both people in `trainers` anyway.
+        tt = ""
+        for p in shown:
+            tt = types.get(norm_name(p)) or ""
+            if tt:
+                break
+        out.append({**r,
+                    "trainers": shown,
+                    "trainer": ", ".join(shown),
+                    "trainer_type": tt,
+                    "session_type": session_type(r.get("mentor"))})
+    return out
+
+
+def build(session_rows, emails=None, types=None) -> dict:
     """Per-trainer rollups from recap.collect_sessions() rows.
 
     Percentages are pooled by headcount, and the NPS by summed histogram — the
@@ -208,6 +257,7 @@ def build(session_rows, emails=None) -> dict:
         merged = _polls.merge_dists(x.get("dist") for x in rs)
         out.append({
             "trainer": name,
+            "type": (types or {}).get(norm_name(name), ""),
             "sessions": len(rs),
             "co_taught": co.get(name, 0),
             "batches": sorted({x["batch"] for x in rs}),
