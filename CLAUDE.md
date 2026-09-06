@@ -60,6 +60,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `sheets.py` | L2 webinar→topic lookup. |
 | `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
 | `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. |
+| `sessionmeta.py` | duration, peak, the per-minute retention curve and stickiness, swept from the attendee report's own join/leave times. Pure, unit-tested. See §4e. |
 | `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
 | `trainers.py` | per-trainer rollups + identity resolution (91 L2 spellings -> 63 people). Pure, unit-tested. See §4e. |
 | `archive.py` | dated snapshots of the four source Sheets, the store, **and the marked workbook** into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
@@ -287,6 +288,27 @@ misspelled — 'Simuliive', one doubled letter, split one trainer into three.
 classification belongs to the PERSON: filling it per person lifts coverage from
 17.5% of rows to 405 of 484 sessions.
 
+**The retention curve is a concurrency sweep, and it ends one minute early on
+purpose** (`sessionmeta.measure`). The last leave always lands in the final
+bucket, so the raw sweep always finished on an empty minute — measured
+2026-09-07, 521 of 521 curves in the live store, exactly one zero each. That
+minute is an artefact of the bucketing, not a minute anyone sat through, and
+counting it divided every stickiness tail by one minute more than existed:
+**−5.4 points on the 10-minute figure and −2.5 on the 30-minute**, every session,
+in the same direction. The trim is pinned by a test. Any future statistic taken
+off the tail of `retention` inherits this — check the last value before you
+average it.
+
+**The poll marker is measured, not logged.** Zoom's poll export timestamps every
+individual response (`polls.submission_times`; present on 1,105 of 1,113 cached
+files), so the Weekend Recap curve marks *when the room began answering* rather
+than when a moderator says they circulated it. `pipeline.py` turns it into
+`poll_at_min` = first submission − the curve's `t0`, where **`t0` is the first
+JOIN, not the host's start** — using Zoom's `Actual Start Time` would slide the
+marker several minutes. A marker that lands outside the curve is dropped rather
+than clamped: an early bird answering a poll left open from the previous session
+produces a negative minute, and minute 0 is a different claim from "no marker".
+
 **A per-student view was built and REMOVED (owner's call, 2026-09-06).**
 `students.py` and its tests are gone; recover them from git if it is ever wanted.
 Four traps cost real bugs there and apply to ANY future per-student work, so they
@@ -492,6 +514,12 @@ python pipeline.py --no-upload --no-site
 
 # tests — stdlib unittest; pytest is NOT in requirements.txt
 python -m unittest tests.test_data
+
+# all of them (281 as of 2026-09-07). `discover` does not work: tests/ has no
+# __init__.py, so the start directory is "not importable" — name them instead.
+python -m unittest tests.test_data tests.test_polls tests.test_recap \
+  tests.test_trainers tests.test_forecast tests.test_pods tests.test_bsiai \
+  tests.test_archive tests.test_attendee_format tests.test_sessionmeta
 ```
 
 Use `--no-site` locally unless you mean to rebuild the site: `site_build` starts by

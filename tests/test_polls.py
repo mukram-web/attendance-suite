@@ -171,5 +171,63 @@ class TestParseCarriesThem(unittest.TestCase):
         self.assertIn("dist", by_wid["91695866411"])
 
 
+class TestSubmissionTimes(unittest.TestCase):
+    """The poll marker's input: when the room actually started answering.
+
+    The reference app marks the moment a moderator SAYS they circulated the
+    poll. This reads the timestamp Zoom already writes against every response,
+    so the marker needs no new data entry and cannot drift from what happened.
+    """
+
+    def test_times_come_back_sorted_even_when_the_export_is_not(self):
+        text = "\n".join([
+            "Poll Report", "",
+            "#,User Name,Email Address,Submitted Date and Time,Q",
+            "1,A,a@x.com,08/30/2026 20:41:00,5",
+            "2,B,b@x.com,08/30/2026 20:11:04,4",
+        ])
+        ts = polls.submission_times(text)
+        self.assertEqual([t.strftime("%H:%M:%S") for t in ts],
+                         ["20:11:04", "20:41:00"])
+
+    def test_am_pm_and_24_hour_shapes_both_parse(self):
+        for stamp in ("08/30/2026 08:11:04 PM", "08/30/2026 20:11:04",
+                      "2026-08-30 20:11:04"):
+            ts = polls.submission_times(
+                "#,User Name,Email Address,Submitted Date and Time,Q\n"
+                f"1,A,a@x.com,{stamp},5")
+            self.assertEqual(len(ts), 1, stamp)
+            self.assertEqual(ts[0].hour, 20, stamp)
+
+    def test_a_file_without_the_column_returns_empty_not_a_guess(self):
+        # 8 of 1,113 cached poll files carry no submitted column. They must
+        # yield no marker rather than a plausible-looking wrong one.
+        self.assertEqual(polls.submission_times(
+            "#,User Name,Email Address,Q\n1,A,a@x.com,5"), [])
+
+    def test_unparseable_stamps_are_skipped_not_zeroed(self):
+        # A zero would place the marker at minute 0 of the curve -- a claim
+        # that the room answered before the session began.
+        ts = polls.submission_times(
+            "#,User Name,Email Address,Submitted Date and Time,Q\n"
+            "1,A,a@x.com,not a date,5\n"
+            "2,B,b@x.com,08/30/2026 20:11:04,4")
+        self.assertEqual(len(ts), 1)
+
+    def test_parse_files_carries_the_first_submission(self):
+        by_wid = polls.parse_files([
+            ("poll_91695866411_2026_08_30.csv", wide([5, 4]).encode())])
+        self.assertEqual(by_wid["91695866411"]["submitted_first"],
+                         "2026-08-30T20:11:04")
+
+    def test_submitted_first_is_None_when_there_is_no_column(self):
+        text = ("Poll Report\n\n#,User Name,Email Address,"
+                "How likely would you recommend it to your friends?\n"
+                "1,A,a@x.com,5")
+        by_wid = polls.parse_files([
+            ("poll_91695866411_2026_08_30.csv", text.encode())])
+        self.assertIsNone(by_wid["91695866411"]["submitted_first"])
+
+
 if __name__ == "__main__":
     unittest.main()

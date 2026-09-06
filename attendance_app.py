@@ -1449,7 +1449,13 @@ with tab_weekend:
             f"Week of {_d0:%d %B %Y}</div>"
             f"<div style='color:#7a8598;font-size:13px'>{_w['sessions']} sessions"
             f" &middot; {_d0:%d %b} \u2013 {_d0 + _dt.timedelta(days=6):%d %b %Y}"
-            f" &middot; {len(_w['batches'])} batches</div></div>",
+            f" &middot; {len(_w['batches'])} batches</div>"
+            # The build stamp belongs ON this page, not only in the sidebar.
+            # Four times now a stale cached store has been read as missing
+            # data ("no reports", "no curve") because the only clue that the
+            # store predated the code was a caption on another tab.
+            f"<div style='color:#9aa4b5;font-size:11px;margin-top:6px'>"
+            f"Built from the store of {store['generated_at']}</div></div>",
             unsafe_allow_html=True)
 
         def _dtxt(v):
@@ -1522,13 +1528,19 @@ with tab_weekend:
             st.subheader("Session breakdown")
             # Sessions WITH a retention curve first, so the tab does not open on
             # "no Zoom report for this session" and read as broken.
+            # When NO row has a curve the store simply predates the sweep, and
+            # tagging all 75 of them "(no report)" says the Zoom reports are
+            # missing when they are not. The tag only earns its place when it
+            # distinguishes one session from another.
+            _anyc = any(x.get("retention") for x in _rows_w)
             _byk = {}
             for _r0 in sorted(_rows_w,
                               key=lambda x: (not x.get("retention"), x["date"])):
                 _byk[f"{_r0['date']} \u00b7 {(_r0.get('topic') or 'Session')[:50]}"
                      + (f" \u00b7 {_r0['pod']}" if _r0.get("pod") else "")
                      + f" \u00b7 {_r0.get('l2_batch') or _r0['batch']}"
-                     + ("" if _r0.get("retention") else "  (no report)")] = _r0
+                     + ("" if _r0.get("retention") or not _anyc
+                        else "  (no report)")] = _r0
             _pick = st.selectbox("Session", list(_byk), key="wr_sess")
             r = _byk[_pick]
             c = st.columns(6)
@@ -1557,16 +1569,58 @@ with tab_weekend:
                            "join to the last leave \u2014 swept from the Zoom "
                            "report's join/leave times, the same pass that gives "
                            "the peak.")
-                _cdf = _pd.DataFrame({"Attendees": _curve})
-                _cdf.index.name = "Time (min)"
-                st.area_chart(_cdf, height=260,
-                              x_label="Time (min)", y_label="Attendees")
+                import plotly.graph_objects as _go
+                _fig = _go.Figure(_go.Scatter(
+                    x=list(range(len(_curve))), y=_curve, mode="lines",
+                    line=dict(color="#2a5bd7", width=2),
+                    fill="tozeroy", fillcolor="rgba(42,91,215,0.10)",
+                    hovertemplate="minute %{x}<br>%{y:,} in the room<extra></extra>"))
+                _pm = r.get("poll_at_min")
+                if _pm is not None:
+                    # Where the room STARTED ANSWERING the poll -- the first
+                    # submission in the poll export, not a moderator's note.
+                    _fig.add_vline(x=_pm, line_width=1, line_dash="dash",
+                                   line_color="#c0392b")
+                    _fig.add_annotation(x=_pm, y=max(_curve), yshift=12,
+                                        text="poll", showarrow=False,
+                                        font=dict(size=11, color="#c0392b"))
+                _fig.update_layout(
+                    height=280, margin=dict(l=10, r=10, t=24, b=10),
+                    xaxis=dict(title="Time (min)", showgrid=False),
+                    yaxis=dict(title="Attendees", gridcolor="#eef1f6",
+                               rangemode="tozero"),
+                    plot_bgcolor="white", paper_bgcolor="white",
+                    font=dict(family="Inter, system-ui, sans-serif",
+                              color="#5a6573", size=12))
+                st.plotly_chart(_fig, width="stretch",
+                                config={"displayModeBar": False})
+                if _pm is not None:
+                    st.caption(f"The dashed line at minute {_pm} is when the room "
+                               "began answering the poll — the first "
+                               "submission in the poll export, not a note of "
+                               "when it was circulated.")
+                else:
+                    # Say WHY there is no line. Silence here reads as a broken
+                    # chart, which is how "no curve" was reported in the first
+                    # place.
+                    st.caption("No poll marker: this session's poll export "
+                               "carries no submission times, or the first "
+                               "answer lands outside the measured window.")
                 st.download_button(
                     "Download retention data (CSV)",
                     _pd.DataFrame({"minute": range(len(_curve)),
                                    "attendees": _curve}).to_csv(index=False).encode(),
                     file_name=f"retention_{r['date']}_{r['batch']}.csv",
                     mime="text/csv", key="wr_dl_curve")
+            elif not any(x.get("retention") for x in _rows_w):
+                # NO session in the week has a curve. That is not 75 missing
+                # Zoom reports, it is a store built before the sweep existed --
+                # and saying "no report" here sent people looking for missing
+                # files four times. Name the real cause.
+                st.info("No session this week has a retention curve, which "
+                        f"means the store of {store['generated_at']} predates "
+                        "the code that measures it. The next pipeline run "
+                        "fills these in \u2014 the Zoom reports are already there.")
             else:
                 st.caption("No Zoom report for this session, so no retention "
                            "curve. Nothing is inferred from attendance \u2014 that "

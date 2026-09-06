@@ -221,6 +221,14 @@ def measure(text) -> dict:
         for b in buckets[:-1]:
             run += b
             curve.append(max(0, run))
+        # The last leave ALWAYS lands in the final bucket, so the sweep always
+        # ends on an empty minute -- measured 2026-09-07: 521 of 521 curves in
+        # the live store ended in a zero, exactly one of them. Keeping it made
+        # every stickiness figure divide a real tail by one minute more than
+        # existed: -5.4 points on the 10-minute number, -2.5 on the 30. It is
+        # a trailing artefact of the bucketing, not a minute anyone sat in.
+        while curve and curve[-1] == 0:
+            curve.pop()
 
     def _tail_mean(n):
         """Mean concurrency over the last n minutes, as a share of peak.
@@ -228,6 +236,9 @@ def measure(text) -> dict:
         This is 'stickiness': of the fullest the room ever was, how much of it
         was still there at the end. A mean rather than the final value, because
         one person leaving on the last minute should not move it.
+
+        Reads the TRIMMED curve, so the empty minute the bucketing leaves on
+        the end is not counted as a minute the room was deserted.
         """
         if not curve or not peak:
             return None
@@ -236,6 +247,10 @@ def measure(text) -> dict:
 
     return {"peak_computed": peak or None, "span_hrs": span, "timed_rows": rows,
             "curve": curve or None,
+            # t0 is minute zero of the curve — the first join, NOT the host's
+            # start. Callers need it to place anything else on the same axis,
+            # such as when the room began answering a poll.
+            "t0": first.isoformat() if first else None,
             "stick10": _tail_mean(10), "stick30": _tail_mean(30)}
 
 
