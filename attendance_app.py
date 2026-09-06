@@ -1031,6 +1031,27 @@ with tab_fcst:
 # ===================== SESSIONS - BROWSE (sub-tab) ===========================
 with sub_browse:
     _S = (store or {}).get("sessions") if store_mode else None
+    if _S:
+        # Backfill from DATA for any field the stored sessions section predates.
+        # The store is only as new as the last pipeline run, so a code change can
+        # land before the data does -- that is exactly how `rating_trainer` came
+        # to render as a column of dashes while the value sat in DATA all along.
+        # DATA is in the same file, keyed the same way, so healing it is free.
+        _byk = {}
+        for _b, _d in (store.get("DATA") or {}).items():
+            for _x in _d.get("sessions") or ():
+                if _x.get("mm"):
+                    _byk[(_b, _x["mm"], _x.get("pod") or "")] = _x
+        for _r in _S:
+            _src = _byk.get((_r["batch"], _r.get("mm"), _r.get("pod") or ""))
+            if not _src:
+                continue
+            for _f2 in ("rating", "rating_trainer", "rating_n", "rating_nps",
+                        "rating_dist", "l2_batch", "mentor", "topic"):
+                if _r.get(_f2) in (None, "") and _src.get(_f2) not in (None, ""):
+                    _r[_f2] = _src[_f2]
+            if _r.get("nps") is None and _src.get("rating_nps") is not None:
+                _r["nps"] = _src["rating_nps"]
     if not store_mode:
         st.info("The session browser reads the prebuilt data file.")
     elif not _S:
