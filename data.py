@@ -265,6 +265,11 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             "rating_trainer": rt.get("trainer"),
             "rating_recommend": rt.get("recommend"),
             "rating_n": rt.get("responses", 0),
+            # NPS and the 1-5 histograms come from the same poll payload. Both
+            # are aggregates - counts, never a respondent - so they are safe in
+            # the store and safe on the public static site.
+            "rating_nps": rt.get("nps"),
+            "rating_dist": rt.get("dist") or {},
             "present": present, "absent": max(0, denom - present), "total": denom,
             "pct": round(present / denom * 100, 1),
             "present_only": absent == 0,

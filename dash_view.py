@@ -16,6 +16,7 @@ import html
 import plotly.graph_objects as go
 
 import data as D
+import polls as _polls          # pure; the NPS rule must live in one place only
 
 # prototype colour bands
 _BAND = {
@@ -159,6 +160,12 @@ def pod_view(d: dict, pod: str | None) -> dict:
                                    if len(rated) == 1 else None),
                 "rating_recommend": (rated[0].get("rating_recommend")
                                      if len(rated) == 1 else None),
+                # NPS is a percentage, so pod rows are combined by SUMMING their
+                # 1-5 histograms and recomputing - averaging the percentages
+                # would weight a 13-response pod like a 316-response one.
+                "rating_dist": (merged := _polls.merge_dists(
+                    x.get("rating_dist") for x in same)),
+                "rating_nps": _polls.nps_from_dist(merged.get("recommend")),
                 "col": None, "mm": r["mm"], "date_lbl": r["date_lbl"],
                 "topic": (f"{n} POD sessions" if n > 1
                           else (same[0]["topic"] if same else "Session")),
@@ -229,6 +236,10 @@ def _rating(s: dict) -> str:
         tips.append(f"trainer {s['rating_trainer']:.2f}")
     if s.get("rating_recommend") is not None:
         tips.append(f"recommend {s['rating_recommend']:.2f}")
+    if s.get("rating_nps") is not None:
+        # Signed, because an NPS of -20 and one of 20 are opposite findings and
+        # a bare "20" hides which one you are looking at.
+        tips.append(f"NPS {s['rating_nps']:+d}")
     colour = "#1f8b4c" if v >= 4.5 else ("#b07d18" if v >= 4.0 else "#c0392b")
     return (f'<span title="{" · ".join(tips)} ({n} responses)" '
             f'style="color:{colour};font-weight:600">{v:.1f}</span>'
