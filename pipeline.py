@@ -56,6 +56,7 @@ import forecast                       # noqa: E402
 import archive                        # noqa: E402
 import recap                          # noqa: E402
 import trainers                       # noqa: E402
+import sessionmeta                    # noqa: E402
 import sheets as dsheets              # noqa: E402
 import live_data                      # noqa: E402
 
@@ -184,7 +185,8 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
                 stamps: dict, day1: dict | None = None,
                 bsiai_section: dict | None = None,
                 ratings: dict | None = None,
-                curric_tabs: dict | None = None) -> dict:
+                curric_tabs: dict | None = None,
+                session_meta: dict | None = None) -> dict:
     """Write attendance.duckdb next to nothing else — one self-contained file."""
     # dashboard DATA/summary (same code path the app used to run at startup)
     wb = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
@@ -215,6 +217,7 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
     # with the dashboard, and the app stays a pure reader of the store.
     # Neither may take the run down - a recap is a nice-to-have beside the
     # attendance numbers people actually depend on.
+    smeta = session_meta or {}
     recap_section = trainer_section = None
     sessions_section = []
     try:
@@ -232,6 +235,11 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         # Every session, flat and filterable — this is what the Sessions tab
         # reads. ~500 rows of aggregates, so it costs nothing in the store.
         sessions_section = trainers.annotate(rows, emails, mtypes)
+        for r in sessions_section:
+            m = smeta.get((r["batch"], r.get("mm"), r.get("pod") or "")) or {}
+            r["duration_hrs"] = m.get("span_hrs") or m.get("duration_hrs")
+            r["peak"] = m.get("peak_computed") or m.get("peak")
+            r["unique_viewers"] = m.get("unique_viewers")
     except Exception as e:
         trainer_section = {"trainers": [], "ambiguous": [], "merged": {},
                            "n_raw": 0, "n_people": 0, "type_conflicts": {},
@@ -440,6 +448,38 @@ def main() -> None:
     except Exception as e:
         print(f"   WARNING: poll ratings unavailable ({e}) - sessions show no rating.")
 
+    # [5a2] Duration and peak, from every attendee report's own summary header
+    # plus a sweep of its join/leave rows. Needs the FULL history, not just the
+    # unmarked sessions, so it is its own pass: ~1,284 files / 246 MB / ~2.7 min
+    # measured 2026-09-06. STREAMED - one file's bytes at a time, only the small
+    # per-session dict kept, because holding 246 MB is how the marking used to
+    # blow up on a small instance.
+    print("[5a2] Session duration & peak ...", flush=True)
+    session_meta = {}
+    try:
+        _mrows = []
+
+        def _take(name, blob):
+            txt = blob.decode("utf-8-sig", errors="replace")
+            h = sessionmeta.parse_header(txt)
+            if not h or not h.get("duration_min"):
+                return                      # a poll/overview export, not a report
+            key = sessionmeta.name_key(name)
+            h["_mm"] = key[1] if key else None
+            h.update(sessionmeta.measure(txt))
+            _mrows.append((name, h))
+
+        _mi = live_data.scan_all_attendees(svc, cfg["attendee_folder_id"], _take)
+        session_meta = sessionmeta.lookup_by_session(
+            sessionmeta.collect(_mrows), l2_bytes)
+        print(f"   {_mi['files']} file(s) scanned, {_mi['failed']} failed - "
+              f"{len(_mrows)} report(s) -> {len(session_meta)} session(s) "
+              "with duration/peak", flush=True)
+    except Exception as e:
+        # Never fatal: a missing duration should cost that column, not the run.
+        print(f"   WARNING: duration/peak scan failed ({e}) - those columns "
+              "will be blank.", flush=True)
+
     bsiai_section = None
     if cfg["bsiai_roster_id"]:
         print("[5b] BSIAI attendance …", flush=True)
@@ -497,6 +537,7 @@ def main() -> None:
                         l2_bytes, names, marked_xlsx_file_id,
                         {"roster": roster_stamp, "l2": l2_stamp, "mode": args.mode},
                         day1=day1, bsiai_section=bsiai_section, ratings=ratings,
+                        session_meta=session_meta,
                         curric_tabs=curric_tabs)
     size = os.path.getsize(store_path)
     print(f"   {stats['batches']} batches · {stats['students']:,} students · "
