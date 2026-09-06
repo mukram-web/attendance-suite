@@ -134,6 +134,10 @@ def collect_sessions(DATA: dict, today: date) -> list:
                 "mm": s["mm"],
                 "date_lbl": s.get("date_lbl"),
                 "topic": s.get("topic") or "",
+                # How L2 names it ("AI CAP B35, B36, B37 - Techies"). Without
+                # this the Sessions tab can only show the bare batch code, and a
+                # shared session looks like three unrelated ones.
+                "l2_batch": s.get("l2_batch") or "",
                 "pod": s.get("pod") or "",
                 "mentor": (s.get("mentor") or "").strip(),
                 "present": s.get("present") or 0,

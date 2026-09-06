@@ -77,6 +77,40 @@ class TestResolve(unittest.TestCase):
         r = trainers.resolve(["Ravi Kumar", "Ravi"], {"Ravi Kumar": "ravi@x.com"})
         self.assertEqual(len(set(r["canon"].values())), 1)
 
+    def test_a_shared_email_that_names_two_people_is_SPLIT(self):
+        """kaladipti0@gmail.com is typed against 'Dipti', 'Dipti Kala',
+        'Vansh Agrawal' AND 'Abhishek Raj Pramani' in the live L2. Trusting the
+        address outright credited two people's work to a third."""
+        em = {n: "kaladipti0@gmail.com"
+              for n in ("Dipti", "Dipti Kala", "Vansh Agrawal", "Abhishek Raj Pramani")}
+        r = trainers.resolve(list(em), em)
+        self.assertEqual(r["canon"]["Dipti"], r["canon"]["Dipti Kala"])
+        self.assertNotEqual(r["canon"]["Vansh Agrawal"], r["canon"]["Dipti Kala"])
+        self.assertNotEqual(r["canon"]["Abhishek Raj Pramani"], r["canon"]["Dipti Kala"])
+        self.assertIn("kaladipti0@gmail.com", r["shared_email"])
+
+    def test_a_shared_email_across_TYPOS_of_one_name_still_merges(self):
+        """The common case, and the one worth keeping: 56 addresses carry more
+        than one spelling and almost all are typos of a single person."""
+        for names in (["Isshita Debnath", "Ishita", "Isshita", "Ishita Debnath"],
+                      ["Varun", "varun sahdev", "Varun Sahdev", "Varrun Sahdev"],
+                      ["Abhisek Parmani", "Abhishek", "Abhishek Raj Parmani"]):
+            em = {n: "x@y.com" for n in names}
+            r = trainers.resolve(names, em)
+            self.assertEqual(len(set(r["canon"].values())), 1, names)
+            self.assertFalse(r["shared_email"], names)
+
+    def test_edit_distance_only_forgives_one_character_on_real_words(self):
+        self.assertTrue(trainers._edit_le1("isshita", "ishita"))
+        self.assertTrue(trainers._edit_le1("varrun", "varun"))
+        self.assertFalse(trainers._edit_le1("dipti", "vansh"))
+        # too short to risk it: 'ravi' and 'rani' are different people
+        self.assertFalse(trainers._edit_le1("ram", "raj"))
+
+    def test_a_lone_initial_does_not_win_the_display_name(self):
+        r = trainers.resolve(["Disha K", "Disha", "Disha Kharbanda"])
+        self.assertEqual(set(r["canon"].values()), {"Disha Kharbanda"})
+
     def test_merged_groups_are_reported(self):
         r = trainers.resolve(["Swapnil", "Swapnil Narayan"])
         self.assertEqual(r["merged"] if "merged" in r else r["groups"],
@@ -99,14 +133,14 @@ class TestBuild(unittest.TestCase):
 
     def test_attendance_is_pooled_by_headcount_not_averaged(self):
         # 100/200 and 900/1000 pools to 1000/1200 = 83.3%, not (50+90)/2 = 70%.
-        out = trainers.build([sess("A", present=100, total=200),
-                              sess("A", present=900, total=1000)])
+        out = trainers.build([sess("Ann Rao", present=100, total=200),
+                              sess("Ann Rao", present=900, total=1000)])
         self.assertEqual(out["trainers"][0]["pct"], 83.3)
 
     def test_nps_comes_from_summed_histograms(self):
         big = {"recommend": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 300}}
         small = {"recommend": {"1": 3, "2": 0, "3": 0, "4": 0, "5": 0}}
-        out = trainers.build([sess("A", dist=big), sess("A", dist=small)])
+        out = trainers.build([sess("Ann Rao", dist=big), sess("Ann Rao", dist=small)])
         self.assertEqual(out["trainers"][0]["nps"], 98)
 
     def test_a_trainer_with_no_index_still_appears_but_sorts_last(self):
@@ -116,6 +150,11 @@ class TestBuild(unittest.TestCase):
     def test_sessions_with_no_mentor_are_ignored_not_bucketed_as_blank(self):
         out = trainers.build([sess(""), sess(None), sess("A Kumar")])
         self.assertEqual(out["n_people"], 1)
+
+    def test_a_one_letter_mentor_cell_is_not_a_person(self):
+        # 'A' is an initial or a stray keystroke, never a trainer.
+        out = trainers.build([sess("A"), sess("K"), sess("Ann Rao")])
+        self.assertEqual([t["trainer"] for t in out["trainers"]], ["Ann Rao"])
 
     def test_empty_input(self):
         out = trainers.build([])

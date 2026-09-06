@@ -48,7 +48,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | File | Role |
 |---|---|
 | `pipeline.py` | the weekly job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--no-upload`, `--no-site`, `--allow-partial`, `--mode`. |
-| `attendance_app.py` | the Streamlit app (tabs: Dashboard, Roster, Day-1 analysis, Forecast, BSIAI). Reads the store; does not compute. |
+| `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), Roster, Day-1 analysis, Forecast, **Students**, BSIAI). Reads the store; does not compute. |
 | `attendance_core.py` | the marker engine: parses Zoom reports + L2, writes Present/Absent into the workbook. |
 | `dashboard_core.py` | `compute()` (per batch × session) and `roster_grid()` (per-student grid). |
 | `data.py` | pure data layer → the `DATA`/`summary` objects the dashboard renders. No I/O, unit-tested. |
@@ -59,6 +59,10 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
 | `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
+| `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. |
+| `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
+| `trainers.py` | per-trainer rollups + identity resolution (91 L2 spellings -> 63 people). Pure, unit-tested. See §4e. |
+| `students.py` | per-student records out of `grid_<batch>`. Pure, unit-tested. See §4e. |
 | `archive.py` | dated snapshots of the four source Sheets, the store, **and the marked workbook** into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
 | `site_build.py`, `site_templates/` | the static-website build. See §7 — it is **wired to deploy**, not inert. |
 
@@ -249,6 +253,52 @@ mistake it for today. Two things to know:
 - The selector only appears when `store_folder_id` is configured AND at least one
   snapshot exists, so a fresh install shows nothing rather than an empty control.
 
+### 4e. Sessions / Recap / Trainers / Students (added 2026-09-06)
+
+Four views built from data already in the store — **no new fetch**. All four are
+pure modules the pipeline calls, so the app stays a reader.
+
+**Rank on the RESIDUAL, never on raw attendance.** Attendance falls ~10% a week
+over a cohort's life, so a raw league table answers "which batch is youngest?".
+B38 averages 48.2% at two sessions old and B17 22.6% at thirty-eight, yet B17 was
+*ahead* at every comparable point (56.1% vs 52.1% at session one). `recap.py`
+scores each session against `forecast.py`'s curve x batch offset x pod
+multiplier, so 1.00 = exactly on curve. On the live store the weekly index sits
+at 0.95-1.05 while raw attendance "falls" 31% -> 21%. **Caveat, pinned by a
+test:** the curve is fitted including the session being scored, so an outlier
+partly raises its own expectation. Never quote the index as out-of-sample.
+
+**NPS is top-box on the 1-5 recommend question** — promoter 5, passive 4,
+detractor 1-3 — and the scale is NEVER inferred from the values. The obvious
+"if any answer > 5 it must be 0-10" rule inverts the worst sessions: a genuine
+0-10 poll where nobody scored above 5 is -100 but reads as +100. Measured over
+1,113 poll files, Be10x has never asked a 0-10 recommend question. Corpus NPS
++59.5 over 316,006 answers. Combining sessions **sums the histograms**; averaging
+per-session percentages weights a 13-response pod like a 316-response one.
+
+**Trainer identity: 91 L2 spellings are 63 people.** Email is used where L2 has
+it, but is NOT proof — `kaladipti0@gmail.com` is typed against 'Dipti',
+'Dipti Kala', 'Vansh Agrawal' AND 'Abhishek Raj Pramani', so names under one
+address are split into plausibly-same-person groups first. Otherwise a short name
+joins a longer one only as an unambiguous PREFIX; grouping on the first token
+would merge 'Ravi Kumar' with 'Ravi Sharma'. Single letters are initials, not
+tokens. Delivery notes are matched on a PREFIX (`simul*`) because they get
+misspelled — 'Simuliive', one doubled letter, split one trainer into three.
+**In-house/Freelance IS available** (L2 column 4), blank on 82% of rows, but the
+classification belongs to the PERSON: filling it per person lifts coverage from
+17.5% of rows to 405 of 484 sessions.
+
+**`students.py` has four traps, all of which shipped as bugs once:**
+1. Match session columns with `_mmdd`, not an ISO regex — older tabs carry
+   '9th May', and an anchored pattern dropped 59 real columns.
+2. Canonicalise the roster's pod cell with `pods.from_roster_cell`. The header
+   says `Techies`, the cell says `Techies - Ai Career Accelerator Program B35`;
+   comparing raw matched ZERO of 3,236 students and dropped every pod session.
+3. Pass `visible_keys(DATA[batch]["sessions"])` — the grid keeps columns
+   `REQUIRE_L2` hides, and counting them deflated attendance 13-22 points below
+   the Dashboard's own figure for the same batch.
+4. A student with no pod is whole-batch only, never a member of every pod.
+
 ## 5. Invariants — break these and the numbers go silently wrong
 
 1. **Locate roster columns by HEADER TEXT, never by fixed letter** (see §4).
@@ -258,11 +308,21 @@ mistake it for today. Two things to know:
 2. **Phones from openpyxl are floats** (`919704189186.0`). Strip the `.0` BEFORE
    removing non-digits, or every phone shifts a digit and phone matching dies
    silently. This bug made day-1 attendance read 53.9% instead of 58.0%.
-3. **Match attendees on email OR phone** — but the two matchers differ, so the
-   Dashboard and Day-1 tabs can legitimately disagree on the same session:
-   `attendance_core.py` in its default `exact` mode compares the **full** digit
-   string, while `day1_analysis.norm_phone` compares the **last 10** digits.
-   Email alone under-counts badly (B34 day 1: 1,594 vs 1,753).
+3. **Match attendees on email OR phone, comparing the LAST 10 DIGITS.**
+   `attendance_core._phone_hit` and `day1_analysis.norm_phone` now agree; they
+   did not until 2026-09-06, when `exact` mode compared the whole digit string.
+   That made the phone half of the rule dead in production: the roster is 99.4%
+   12-digit (91 prefix) and Zoom is 78.8% bare 10-digit, so it added 1-6 students
+   per session where last-10 adds 126-145. Fixing it raised every re-marked
+   session by ~8.4% (78,392 -> 85,007 present over B30-B39). Verified safe: of
+   61,862 roster numbers, ZERO share a last-10 with a different full number.
+   Email alone still under-counts badly (B34 day 1: 1,594 vs 1,753).
+   ⚠️ **B17-B28 still carry 2-20 frozen Present/Absent columns in the roster
+   Sheet**, which the marker skips, so those sessions keep their pre-fix values
+   while everything re-marked gains ~8.4%. `mark_all` is NOT plumbed through
+   `pipeline.py` (it only reaches the legacy Streamlit path), and it would have
+   to stay on permanently — the frozen columns live in the Sheet, which the
+   pipeline never writes back to.
 4. **Column I/J vocabulary drifts per batch** — `Full Paid`/`Full paid`/`Full`,
    `BDA Closing`/`Bda closing`/`BDA Closimg`, eight spellings of
    unidentified-refunded. Canonicalise on meaning. Beware: **three independent
@@ -374,25 +434,20 @@ Set it in **two** places, they are separate stores:
 
 ## 7b. Open threads — as of 2026-08-12 (delete each line once it is done)
 
-1. **The Zoom extractor emits inconsistent formats.** A separate tool (built in
-   another session, NOT this repo) writes to
-   `C:\Users\user\OneDrive\Desktop\Zoom extracts\output\<YYYY-MM-DD>\<folder>\`.
-   Measured:
-   | session | format | phone | parses to |
-   |---|---|---|---|
-   | B25 · 9 Aug (`95638821501`) | ✅ Attendee Report | 100% | 487 |
-   | B23 · 8 Aug (`99685353701`) | ✅ Attendee Report | 59.7% | 447 |
-   | B17+B19 · 9 Aug (`91695866411`) | ❌ flat 8-column list | none | **0** |
+1. ~~**The Zoom extractor emits inconsistent formats.**~~ **FIXED 2026-09-06**
+   (`065c0ab`). Both parsers now refuse a file that yields nobody, and
+   `pipeline.py` refuses to publish rather than marking a batch absent —
+   overridable with `--allow-partial`. The gate keys on the PARSE RESULT, not the
+   shape, so a tab-delimited or UTF-16 report is caught too. `is_attendee_report`
+   only chooses which cause to name. Re-measured the same day: all 628 cached
+   attendee reports parse and carry phone, and 0 flat lists remain.
+   ⚠️ **The gate makes an unsupported format expensive.** A format nobody has
+   taught the parser now fails the whole weekly run instead of losing one
+   session. The other Be10x app (`jvbhatt18-tech/weekly-sessions-analysis`)
+   parses a second shape from an internal RTK tool
+   (`Participant ID, Name, Joined at, Left at`); this repo does not, and 0 such
+   files are on the drives today. If one lands, expect a red run.
 
-   The flat format has `Name (original name), Email, Join time, Leave time,
-   Duration (minutes), Guest, …` — no `Attended`/`First Name`, so
-   `attendance_core.parse_attendees` returns **empty without raising**. If such a
-   file reaches the drive, that session marks everyone absent and the run still
-   goes green. Two sessions on the SAME day differ, so it is per-session (likely
-   webinars without registration), not a version change.
-   **Not yet fixed.** Options: fix the extractor to always pull the Attendee
-   Report; and/or teach both parsers to read either shape **plus** fail loudly
-   when a file parses to zero attendees.
 2. **Decide whether the app should stay publicly readable** (§7). It currently is.
 3. **Retire the old `attendance-marker` Streamlit app** — previous design, still
    deployed, causes confusion.
@@ -457,7 +512,7 @@ secrets, or the store could not be downloaded.
 **What is inside `attendance.duckdb`:** `meta(key, value)` holding JSON blobs
 (`DATA`, `summary`, `report`, `warnings`, `source`, `generated_at`,
 `generated_at_iso`, `batches`, `sheet_map`, `marked_xlsx_file_id`, `stamps`,
-`day1`, `forecast`), the `compute` table (per batch × session), and one `grid_<batch>` table per
+`day1`, `forecast`, `recap`, `trainers`, `sessions`), the `compute` table (per batch × session), and one `grid_<batch>` table per
 batch. The `grid_*` tables carry emails and phones — that is why the store is
 PII and lives in a private Shared Drive. The app caches it with a **30-minute TTL**,
 so Monday's rebuild reaches viewers on its own; 🔄 Refresh forces it immediately.

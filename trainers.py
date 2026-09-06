@@ -93,7 +93,14 @@ def norm_name(v) -> str:
     """A name reduced to comparable tokens: lowercase, no notes, no honorifics."""
     s = _PARENS.sub(" ", str(v or "")).lower()
     s = re.sub(r"[^a-z\s]", " ", s)
-    toks = [t for t in s.split() if t and t not in _HONORIFICS and not _is_noise(t)]
+    # Single letters are initials, not names. Keeping them made 'Disha K' a
+    # two-token name that neither matched nor was matched by 'Disha Kharbanda',
+    # leaving one person as three rows. Dropping them lets the initial form
+    # collapse into the full name, and where it is genuinely ambiguous ('Disha K'
+    # beside 'Disha Kharbanda' AND 'Disha Malhotra') the prefix rule still
+    # refuses to guess.
+    toks = [t for t in s.split()
+            if len(t) > 1 and t not in _HONORIFICS and not _is_noise(t)]
     return " ".join(toks)
 
 
@@ -104,11 +111,68 @@ def _display(members) -> str:
     SHORTEST raw string — otherwise 'Varun Sahdev live' beats 'Varun Sahdev'
     purely for carrying a note about how one session was delivered.
     """
-    return min(members, key=lambda m: (-len(norm_name(m).split()), len(m), m))
+    def real_tokens(m):
+        # A lone initial is not a name token. Counting it made 'Disha K' rank
+        # above 'Disha Kharbanda' as the canonical spelling.
+        return sum(1 for t in norm_name(m).split() if len(t) > 1)
+    return min(members, key=lambda m: (-real_tokens(m), len(m), m))
 
 
 def _is_prefix(short: list, long_: list) -> bool:
     return len(short) < len(long_) and long_[:len(short)] == short
+
+
+def _edit_le1(a: str, b: str) -> bool:
+    """True when `a` and `b` differ by at most one insertion/deletion/substitution.
+
+    Only used on tokens of 4+ characters, where a single-character difference is
+    far more likely to be a typo than a different name. It is what lets
+    'Isshita' meet 'Ishita' and 'Varrun' meet 'Varun'.
+    """
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1 or min(la, lb) < 4:
+        return False
+    if la == lb:
+        return sum(x != y for x, y in zip(a, b)) == 1
+    short, long_ = (a, b) if la < lb else (b, a)
+    for i in range(len(long_)):
+        if short == long_[:i] + long_[i + 1:]:
+            return True
+    return False
+
+
+def _same_person(a: str, b: str) -> bool:
+    """Could these two spellings plausibly be one human?
+
+    True when either name's tokens are a prefix of the other's, or any two
+    tokens match within one character. Deliberately generous — it exists to
+    survive typing, not to adjudicate identity.
+    """
+    ta, tb = norm_name(a).split(), norm_name(b).split()
+    if not ta or not tb:
+        return False
+    if ta == tb or _is_prefix(ta, tb) or _is_prefix(tb, ta):
+        return True
+    return any(_edit_le1(x, y) for x in ta for y in tb)
+
+
+def _components(members: list) -> list:
+    """Split names into connected groups under `_same_person`, largest first."""
+    groups: list = []
+    for m in members:
+        hit = [g for g in groups if any(_same_person(m, x) for x in g)]
+        if not hit:
+            groups.append([m])
+            continue
+        merged = [m]
+        for g in hit:
+            merged += g
+            groups.remove(g)
+        groups.append(merged)
+    groups.sort(key=lambda g: (-len(g), g[0]))
+    return groups
 
 
 def resolve(names, emails=None) -> dict:
@@ -135,18 +199,33 @@ def resolve(names, emails=None) -> dict:
     groups: dict = defaultdict(list)
     claimed = set()
     anchors: list = []           # (tokens, display)
+    shared_email = {}
     for _e, members in by_email.items():
-        display = _display(members)
-        for m in members:
-            canon[m] = display
-            groups[display].append(m)
-            claimed.add(m)
-        # An email-backed identity is also an anchor for the names that have no
-        # email of their own: 'Ravi' should attach to the known 'Ravi Kumar'
-        # rather than starting a second person because it was resolved earlier.
-        toks = norm_name(display).split()
-        if toks:
-            anchors.append((toks, display))
+        # An address is strong evidence but not proof: measured on the live L2,
+        # 56 addresses carry more than one spelling and almost all are typos of
+        # one person ('Ishita'/'Isshita', 'Varun'/'Varrun') -- exactly the merges
+        # worth having. One is not: kaladipti0@gmail.com is typed against
+        # 'Dipti', 'Dipti Kala', 'Vansh Agrawal' AND 'Abhishek Raj Pramani'.
+        # So the names under one address are split into plausibly-same-person
+        # groups; the biggest keeps the address and the rest fall through to
+        # name clustering. Trusting the address outright credited two people's
+        # work to a third.
+        comps = _components(members)
+        for i, comp in enumerate(comps):
+            if i:
+                shared_email.setdefault(_e, []).append(comp)
+                continue
+            display = _display(comp)
+            for m in comp:
+                canon[m] = display
+                groups[display].append(m)
+                claimed.add(m)
+            # An email-backed identity is also an anchor for the names that have
+            # no email of their own: 'Ravi' should attach to the known 'Ravi
+            # Kumar' rather than starting a second person.
+            toks = norm_name(display).split()
+            if toks:
+                anchors.append((toks, display))
 
     # 2. prefix clustering for the rest, longest names first so short forms
     #    attach to a full name rather than becoming their own anchor.
@@ -180,7 +259,10 @@ def resolve(names, emails=None) -> dict:
             if len([a for a in anchors if _is_prefix(toks, a[0])]) > 1:
                 ambiguous.append(n)
     return {"canon": canon, "ambiguous": sorted(ambiguous),
-            "groups": {k: sorted(v) for k, v in groups.items()}}
+            "groups": {k: sorted(v) for k, v in groups.items()},
+            # addresses that turned out to name more than one person
+            "shared_email": {e: [sorted(c) for c in cs]
+                             for e, cs in shared_email.items()}}
 
 
 _SIMULIVE = re.compile(r"\bsimulive\b", re.I)
