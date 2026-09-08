@@ -42,6 +42,7 @@ import re
 from collections import defaultdict
 
 import polls as _polls
+import recap as _recap        # what counts as ONE session, shared with the recap
 
 # Splits a mentor cell into people. Ampersands, plus signs, slashes and the word
 # 'and' all appear in real cells alongside commas.
@@ -343,6 +344,13 @@ def build(session_rows, emails=None, types=None) -> dict:
     Percentages are pooled by headcount, and the NPS by summed histogram — the
     same rules the weekly recap uses, so a trainer's number and the week's
     number are computed the same way and can be compared.
+
+    A webinar several batches sat in arrives as one row PER BATCH. It is one
+    session the trainer taught once, with one poll, so `sessions`, the rating
+    and the NPS are taken over `recap.group_sessions` — the room's whole poll,
+    counted once. Attendance stays over the batch rows, each against its own
+    roster. Before this, a trainer who taught B35/B36/B37's Finance POD was
+    credited three sessions and three copies of the same 220 opinions.
     """
     rows = [r for r in (session_rows or ()) if (r.get("mentor") or "").strip()]
     # every raw name that appears anywhere, so resolution sees the full field
@@ -354,14 +362,9 @@ def build(session_rows, emails=None, types=None) -> dict:
     by_display = _types_by_display(res["groups"], types)
 
     per: dict = defaultdict(list)
-    co: dict = defaultdict(int)
     for r in rows:
-        people = split_mentors(r["mentor"])
-        for p in people:
-            key = canon.get(p, p)
-            per[key].append(r)
-            if len(people) > 1:
-                co[key] += 1
+        for p in split_mentors(r["mentor"]):
+            per[canon.get(p, p)].append(r)
 
     out = []
     for name, rs in per.items():
@@ -369,21 +372,23 @@ def build(session_rows, emails=None, types=None) -> dict:
         invited = sum(x["total"] for x in rs)
         idx = [(x["index"], x["total"]) for x in rs if x["index"] is not None]
         wsum = sum(t for _i, t in idx)
-        rated = [x for x in rs if x["rating"] is not None]
-        rn = sum(x["rating_n"] for x in rated)
-        merged = _polls.merge_dists(x.get("dist") for x in rs)
+        grp = _recap.group_sessions(rs)
+        rated = [g for g in grp if g["rating"] is not None]
+        rn = sum(g["rating_n"] for g in rated)
+        merged = _polls.merge_dists(g.get("dist") for g in grp)
         out.append({
             "trainer": name,
             "type": by_display.get(name, ""),
-            "sessions": len(rs),
-            "co_taught": co.get(name, 0),
+            "sessions": len(grp),
+            "co_taught": sum(1 for g in grp
+                             if len(split_mentors(g.get("mentor"))) > 1),
             "batches": sorted({x["batch"] for x in rs}),
             "pods": sorted({x["pod"] for x in rs if x["pod"]}),
             "present": present,
             "invited": invited,
             "pct": round(present / invited * 100, 1) if invited else None,
             "index": (round(sum(i * t for i, t in idx) / wsum, 3) if wsum else None),
-            "rating": (round(sum(x["rating"] * x["rating_n"] for x in rated) / rn, 2)
+            "rating": (round(sum(g["rating"] * g["rating_n"] for g in rated) / rn, 2)
                        if rn else None),
             "rating_n": rn,
             "nps": _polls.nps_from_dist(merged.get("recommend")),

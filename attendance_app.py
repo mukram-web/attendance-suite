@@ -1050,7 +1050,8 @@ with sub_browse:
             if not _src:
                 continue
             for _f2 in ("rating", "rating_trainer", "rating_n", "rating_nps",
-                        "rating_dist", "l2_batch", "mentor", "topic"):
+                        "rating_dist", "l2_batch", "mentor", "topic",
+                        "shared_batches", "rating_shared"):
                 if _r.get(_f2) in (None, "") and _src.get(_f2) not in (None, ""):
                     _r[_f2] = _src[_f2]
             if _r.get("nps") is None and _src.get("rating_nps") is not None:
@@ -1106,25 +1107,32 @@ with sub_browse:
             _v = [s for s in _v if _fq in (s["topic"] or "").lower()]
 
         # ── headline numbers, over the FILTERED set ──────────────────────────
-        _rated = [s for s in _v if s.get("rating") is not None]
-        _rn = sum(s["rating_n"] for s in _rated)
-        _merged = _polls_mod.merge_dists(s.get("dist") for s in _v)
+        # Sessions and polls are counted over ROOMS (recap.group_sessions): a
+        # webinar three batches sat in is one session with one poll, not three.
+        # Attendance stays over the batch rows - each against its own roster.
+        _G = _recap_mod.group_sessions(_v)
+        _rated = [g for g in _G if g.get("rating") is not None]
+        _rn = sum(g["rating_n"] for g in _rated)
+        _merged = _polls_mod.merge_dists(g.get("dist") for g in _G)
         _pres = sum(s["present"] for s in _v)
         _inv = sum(s["total"] for s in _v)
         m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Sessions", f"{len(_v):,}")
+        m1.metric("Sessions", f"{len(_G):,}",
+                  help=f"{len(_v):,} batch rows. A room several batches sat in "
+                       "is one session here.")
         m2.metric("Attendance", f"{_pres / _inv * 100:.1f}%" if _inv else "—",
                   help=f"{_pres:,} present of {_inv:,} invited, pooled — not a "
                        "mean of per-session percentages.")
         m3.metric("Avg overall",
-                  f"{sum(s['rating'] * s['rating_n'] for s in _rated) / _rn:.2f}"
+                  f"{sum(g['rating'] * g['rating_n'] for g in _rated) / _rn:.2f}"
                   if _rn else "—",
                   help="Weighted by responses, so a 12-response session does not "
-                       "outweigh a 900-response one.")
-        _trd = [s for s in _v if s.get("rating_trainer") is not None]
-        _trn = sum(s["rating_n"] for s in _trd)
+                       "outweigh a 900-response one. A shared room's poll counts "
+                       "once, whole.")
+        _trd = [g for g in _G if g.get("rating_trainer") is not None]
+        _trn = sum(g["rating_n"] for g in _trd)
         m4.metric("Avg trainer",
-                  f"{sum(s['rating_trainer'] * s['rating_n'] for s in _trd) / _trn:.2f}"
+                  f"{sum(g['rating_trainer'] * g['rating_n'] for g in _trd) / _trn:.2f}"
                   if _trn else "—")
         _nps = _polls_mod.nps_from_dist(_merged.get("recommend"))
         m5.metric("NPS", f"{_nps:+d}" if _nps is not None else "—",
@@ -1136,16 +1144,21 @@ with sub_browse:
         # ONE SESSION, MANY BATCHES. A session several batches sit in produces
         # one row per batch, because attendance is measured against each batch's
         # own roster. Showing those as separate lines repeats the title, trainer,
-        # duration and rating 2-3 times over -- 140 of 522 rows were repeats.
-        # So the rows are kept (you need the per-batch attendance) and the shared
-        # columns are MERGED with rowspan, exactly as they would be in a
-        # spreadsheet. The group key is L2's own batch cell plus the date, pod
-        # and title, so it is L2 that decides what counts as one session.
+        # duration and peak 2-3 times over -- 140 of 522 rows were repeats.
+        # So the rows are kept and the room-level columns are MERGED with
+        # rowspan, exactly as they would be in a spreadsheet. What counts as one
+        # session is recap.session_key - the same rule the trainer and weekly
+        # rollups use - so this table and those numbers cannot disagree.
+        #
+        # RATINGS ARE PER BATCH since the poll split (pipeline [5a.1]): each
+        # batch's cells hold ITS students' answers, and the room's whole poll
+        # sits once in the merged "Joint" columns. When the poll could not be
+        # split (an export naming nobody) every batch shows the joint figure
+        # and the cell says so.
         _groups: dict = {}
         for s in _v:
-            k = (s["date"], s.get("l2_batch") or s["batch"],
-                 s.get("pod") or "", s.get("topic") or "")
-            _groups.setdefault(k, []).append(s)
+            _groups.setdefault(_recap_mod.session_key(s), []).append(s)
+        _gof = {g["key"]: g for g in _G}          # key -> the room's rollup
 
         def _f(v, fmt="{:.1f}", dash="—"):
             return fmt.format(v) if isinstance(v, (int, float)) else dash
@@ -1157,11 +1170,37 @@ with sub_browse:
                     f'{max(0, min(100, v / 5 * 100)):.0f}%"></div>'
                     f'<span>{v:.2f}</span></div>')
 
+        def _own_title(s, n):
+            """Why a batch's own cells read as they do, as a hover title."""
+            sh = s.get("rating_shared") or {}
+            if n == 1 or not sh:
+                return ""
+            if sh.get("split"):
+                j = sh.get("joint") or {}
+                return (f' title="{s["batch"]}\'s own students only. Whole room: '
+                        f'{j.get("responses") or 0} responses'
+                        + (f', {sh["unmatched"]} on no sharing roster'
+                           if sh.get("unmatched") else "") + '"')
+            return (' title="This poll was run anonymously (no emails in the '
+                    'export), so it cannot be divided between the batches. '
+                    'The room\'s figure is in the Joint columns."')
+
+        def _unsplit(s, n):
+            """True when a shared room's poll could NOT be divided per batch.
+
+            Those cells read '—', never a repeat of the room's number: the
+            whole point of the per-batch block is that it is per batch, and a
+            figure copied three times says nothing a reader can act on.
+            """
+            sh = s.get("rating_shared") or {}
+            return n > 1 and bool(sh) and not sh.get("split")
+
         _rows_html = []
-        for k in sorted(_groups, key=lambda x: (x[0], x[1]), reverse=True):
+        _gsort = lambda k: (_gof[k].get("date") or "", _gof[k].get("batch") or "")
+        for k in sorted(_groups, key=_gsort, reverse=True):
             grp = sorted(_groups[k], key=lambda s: dc.batch_key(s["batch"]))
             n = len(grp)
-            g0 = grp[0]
+            g0, G = grp[0], _gof[k]
             # merged cells: written once, spanning every batch row in the session
             merged = (
                 f'<td rowspan="{n}">{_html.escape(g0["date"])}</td>'
@@ -1169,18 +1208,29 @@ with sub_browse:
                 f'<td rowspan="{n}">{_html.escape(g0.get("trainer") or "—")}</td>'
                 f'<td rowspan="{n}">{_html.escape(g0.get("trainer_type") or "—")}</td>'
                 f'<td rowspan="{n}">{_html.escape(g0.get("pod") or "—")}</td>')
+            # the room: duration, peak and the WHOLE poll, once
             tail = (
-                f'<td rowspan="{n}" class="n">{_f(g0.get("duration_hrs"))}</td>'
-                f'<td rowspan="{n}" class="n">{_f(g0.get("peak"), "{:,.0f}")}</td>'
-                f'<td rowspan="{n}" class="n">{_f(g0.get("rating_trainer"), "{:.2f}")}</td>'
-                f'<td rowspan="{n}">{_bar(g0.get("rating"))}</td>'
-                f'<td rowspan="{n}" class="n">'
-                f'{_f(g0.get("nps"), "{:+.0f}")}</td>'
-                f'<td rowspan="{n}" class="n">{g0["rating_n"]:,}</td>')
+                f'<td rowspan="{n}" class="n">{_f(G.get("duration_hrs"))}</td>'
+                f'<td rowspan="{n}" class="n">{_f(G.get("peak"), "{:,.0f}")}</td>'
+                f'<td rowspan="{n}" class="n">{_f(G.get("rating_trainer"), "{:.2f}")}</td>'
+                f'<td rowspan="{n}">{_bar(G.get("rating"))}</td>'
+                f'<td rowspan="{n}" class="n">{_f(G.get("nps"), "{:+.0f}")}</td>'
+                f'<td rowspan="{n}" class="n">{G.get("rating_n") or 0:,}</td>')
             for i, s in enumerate(grp):
-                # per-batch: the whole reason the rows are not collapsed
+                # per-batch: attendance against its own roster, and its own
+                # students' answers to the poll
+                t = _own_title(s, n)
+                if _unsplit(s, n):
+                    own = (f'<td class="n"{t}>—</td><td{t}><span class="anon">'
+                           f'anonymous poll</span></td>'
+                           f'<td class="n"{t}>—</td><td class="n"{t}>—</td>')
+                else:
+                    own = (f'<td class="n"{t}>{_f(s.get("rating_trainer"), "{:.2f}")}</td>'
+                           f'<td{t}>{_bar(s.get("rating"))}</td>'
+                           f'<td class="n"{t}>{_f(s.get("nps"), "{:+.0f}")}</td>'
+                           f'<td class="n"{t}>{s.get("rating_n") or 0:,}</td>')
                 per = (f'<td>{_html.escape(s["batch"])}</td>'
-                       f'<td class="n">{_f(s.get("pct"))}%</td>')
+                       f'<td class="n">{_f(s.get("pct"))}%</td>' + own)
                 _rows_html.append("<tr>" + (merged if i == 0 else "") + per
                                   + (tail if i == 0 else "") + "</tr>")
 
@@ -1199,29 +1249,60 @@ with sub_browse:
             .bw{display:flex;align-items:center;gap:6px;min-width:96px}
             .bf{height:7px;background:#2f6df6;border-radius:4px}
             .bw span{font-variant-numeric:tabular-nums;color:#4a5568}
+            .anon{color:#9aa4b5;font-size:11px;font-style:italic;white-space:nowrap}
             </style>""", unsafe_allow_html=True)
         st.markdown(
             '<div class="sess-wrap"><table class="sess"><tr>'
             '<th>Date</th><th>Title</th><th>Trainer</th><th>Type</th><th>POD</th>'
             '<th>Batch</th><th>Att %</th>'
-            '<th>Dur (h)</th><th>Peak</th><th>Trainer ★</th><th>Overall</th>'
-            '<th>NPS</th><th>Resp</th></tr>'
+            '<th>Trainer ★</th><th>Overall</th><th>NPS</th><th>Resp</th>'
+            '<th>Dur (h)</th><th>Peak</th>'
+            '<th>Joint ★</th><th>Joint overall</th><th>Joint NPS</th><th>Joint resp</th>'
+            '</tr>'
             + "".join(_rows_html) + '</table></div>',
             unsafe_allow_html=True)
         st.caption(f"{len(_groups):,} sessions · {len(_v):,} batch rows. "
-                   "Title, trainer, duration, peak and the ratings are one "
-                   "session's facts, so they span its batches; attendance is "
-                   "per batch, because each is measured against its own roster.")
+                   "Title, trainer, duration and peak are one session's facts, so "
+                   "they span its batches. **Att %** and the first rating block "
+                   "are per batch — each batch's own roster, and its own "
+                   "students' poll answers. The **Joint** block is the whole "
+                   "room's poll, once; for a single-batch session it equals the "
+                   "batch's own. Hover a rating cell in a shared session for the "
+                   "split. *anonymous poll* means the hosts ran that feedback "
+                   "poll anonymously — no emails in the export, so it cannot be "
+                   "divided; only the Joint figure exists.")
+
+        def _sh(s, k, default=None):
+            return ((s.get("rating_shared") or {}).get("joint") or {}).get(k, default)
+
+        def _own(s, k):
+            """A batch's own poll value, or blank when there is no such thing.
+
+            Same rule as the table: a shared room whose poll could not be
+            divided has ONE figure, and repeating it in a per-batch column
+            would be the copied number this change exists to remove.
+            """
+            sh = s.get("rating_shared") or {}
+            return None if (sh and not sh.get("split")) else s.get(k)
 
         _tbl = _pd.DataFrame([{
             "Date": s["date"], "Title": s["topic"], "Trainer": s.get("trainer"),
             "Type": s.get("trainer_type"), "Batch": s["batch"],
             "L2 batch": s.get("l2_batch"), "POD": s["pod"],
+            "Shared with": ", ".join(b for b in (s.get("shared_batches") or [])
+                                     if b != s["batch"]),
             "Attendance %": s["pct"], "Present": s["present"],
             "Invited": s["total"], "vs curve": s.get("index"),
             "Duration (hrs)": s.get("duration_hrs"), "Peak": s.get("peak"),
-            "Trainer rating": s.get("rating_trainer"), "Overall": s.get("rating"),
-            "NPS": s.get("nps"), "Responses": s["rating_n"],
+            "Trainer rating": _own(s, "rating_trainer"), "Overall": _own(s, "rating"),
+            "NPS": _own(s, "nps"), "Responses": _own(s, "rating_n"),
+            "Joint trainer rating": _sh(s, "trainer"),
+            "Joint overall": _sh(s, "session"), "Joint NPS": _sh(s, "nps"),
+            "Joint responses": _sh(s, "responses"),
+            "Unmatched respondents": (s.get("rating_shared") or {}).get("unmatched"),
+            "Own rating unavailable": (
+                "anonymous poll" if ((s.get("rating_shared") or {}).get("reason")
+                                     == "no-emails") else ""),
             "Simulive": s.get("session_type") or "",
         } for s in _v])
         st.download_button("Download these sessions (CSV)",
@@ -1245,19 +1326,25 @@ with sub_browse:
         # gets its own picker. Options are SESSIONS, not batch rows, matching the
         # merge above.
         st.divider()
-        _opts = sorted(_groups, key=lambda x: (x[0], x[1]), reverse=True)
+        _opts = sorted(_groups, key=_gsort, reverse=True)
+
+        def _opt_label(i):
+            G = _gof[_opts[i]]
+            return (f"{G.get('date')} · {(G.get('topic') or 'Session')[:52]}"
+                    + (f" · {G['pod']}" if G.get("pod") else "")
+                    + f" · {G.get('l2_batch') or G.get('batch')}")
+
         _pick = st.selectbox(
             "Session breakdown",
             options=range(len(_opts)),
-            format_func=lambda i: (f"{_opts[i][0]} · {_opts[i][3][:52] or 'Session'}"
-                                   + (f" · {_opts[i][2]}" if _opts[i][2] else "")
-                                   + f" · {_opts[i][1]}"),
+            format_func=_opt_label,
             index=None, placeholder="Pick a session to see its breakdown",
             key="ss_pick")
         if _pick is not None:
             _grp = sorted(_groups[_opts[_pick]],
                           key=lambda s: dc.batch_key(s["batch"]))
             s = _grp[0]
+            _Gp = _gof[_opts[_pick]]
             st.subheader(s["topic"] or "Session")
             st.caption(f"{s.get('l2_batch') or s['batch']} · {s['date_lbl']} "
                        f"({s['date']})"
@@ -1278,10 +1365,31 @@ with sub_browse:
             d5.metric("Peak", f"{s['peak']:,}" if s.get("peak") else "—",
                       help="most people in the room at once")
             if len(_grp) > 1:
+                # Per batch: attendance against its own roster, and its own
+                # students' answers. The room's whole poll is the chart below.
+                _shp = s.get("rating_shared") or {}
+                _ok = _shp.get("split", not _shp)     # per-batch figures exist?
                 st.dataframe(_pd.DataFrame([{
                     "Batch": x["batch"], "Attendance %": x["pct"],
+                    "Own overall": x.get("rating") if _ok else None,
+                    "Own trainer ★": x.get("rating_trainer") if _ok else None,
+                    "Own NPS": x.get("nps") if _ok else None,
+                    "Own responses": (x.get("rating_n") or 0) if _ok else None,
                 } for x in _grp]), width='stretch', hide_index=True)
-            _dist = (s.get("dist") or {})
+                if _shp.get("split"):
+                    st.caption(
+                        f"Whole room: {_Gp.get('rating_n') or 0:,} responses"
+                        + (f" · {_shp['unmatched']} answered from an email on none "
+                           "of these batches' rosters (in the room's figure, in "
+                           "no batch's own)" if _shp.get("unmatched") else "")
+                        + (f" · {_shp['multi']} enrolled in more than one of them "
+                           "(counted in each)" if _shp.get("multi") else ""))
+                elif _shp:
+                    st.caption("This feedback poll was run anonymously — the "
+                               "export carries no emails — so it cannot be "
+                               "divided between the batches. Only the room's "
+                               "figure below exists.")
+            _dist = (_Gp.get("dist") or s.get("dist") or {})
             if any(_dist.values()):
                 st.markdown("**How the room rated it**")
                 _cols = st.columns(3)
@@ -1391,7 +1499,9 @@ with sub_trainer:
             "The Mentor cell is hand-typed, so one person arrives as 'Swapnil', "
             "'Swapnil Narayan' and 'Swapnil (Play Simulive)'. Where L2 carries an "
             "email it is trusted; otherwise a short name joins a longer one only "
-            "when it is an unambiguous prefix of it."
+            "when it is an unambiguous prefix of it. A room several batches sat "
+            "in (one POD webinar for B35, B36 and B37) is **one session**, "
+            "rated once by its whole poll — attendance still pools every batch."
         )
         _min = st.slider("Minimum sessions", 1, 25, 5, key="tr_min",
                          help="A trainer's index over one session is noise.")
@@ -1532,9 +1642,12 @@ with tab_weekend:
             # tagging all 75 of them "(no report)" says the Zoom reports are
             # missing when they are not. The tag only earns its place when it
             # distinguishes one session from another.
+            # One entry per ROOM, not per batch row: a webinar B35, B36 and B37
+            # sat in is one session with one poll, so the room's whole figures
+            # are shown and the per-batch split follows underneath.
             _anyc = any(x.get("retention") for x in _rows_w)
             _byk = {}
-            for _r0 in sorted(_rows_w,
+            for _r0 in sorted(_recap_mod.group_sessions(_rows_w),
                               key=lambda x: (not x.get("retention"), x["date"])):
                 _byk[f"{_r0['date']} \u00b7 {(_r0.get('topic') or 'Session')[:50]}"
                      + (f" \u00b7 {_r0['pod']}" if _r0.get("pod") else "")
@@ -1552,6 +1665,24 @@ with tab_weekend:
             c[4].metric("Duration", f"{r['duration_hrs']:.1f} h"
                         if r.get("duration_hrs") else "\u2014")
             c[5].metric("Peak", f"{r['peak']:,}" if r.get("peak") else "\u2014")
+            if len(r.get("rows") or ()) > 1:
+                _shw = next((x.get("rating_shared") for x in r["rows"]
+                             if x.get("rating_shared")), None) or {}
+                if _shw and not _shw.get("split"):
+                    st.caption(f"Shared by {r['batch']}. This feedback poll was run "
+                               "anonymously \u2014 no emails in the export \u2014 so it "
+                               "cannot be divided between the batches; the "
+                               "figures above are the whole room's.")
+                else:
+                    _own = " \u00b7 ".join(
+                        f"**{x['batch']}** "
+                        + (f"{x['rating']:.2f} ({x.get('rating_n') or 0})"
+                           if x.get("rating") is not None else "\u2014")
+                        for x in sorted(r["rows"], key=lambda x: dc.batch_key(x["batch"])))
+                    st.caption(
+                        f"Shared by {r['batch']}. Own students' overall rating: {_own}"
+                        + (f" \u00b7 {_shw['unmatched']} respondents matched no roster"
+                           if _shw.get("unmatched") else ""))
 
             s1, s2, s3 = st.columns(3)
             s1.metric("Stickiness (10 min)",
@@ -1610,7 +1741,7 @@ with tab_weekend:
                     "Download retention data (CSV)",
                     _pd.DataFrame({"minute": range(len(_curve)),
                                    "attendees": _curve}).to_csv(index=False).encode(),
-                    file_name=f"retention_{r['date']}_{r['batch']}.csv",
+                    file_name=f"retention_{r['date']}_{r['batch'].replace(', ', '_')}.csv",
                     mime="text/csv", key="wr_dl_curve")
             elif not any(x.get("retention") for x in _rows_w):
                 # NO session in the week has a curve. That is not 75 missing

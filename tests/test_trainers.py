@@ -118,9 +118,13 @@ class TestResolve(unittest.TestCase):
 
 
 class TestBuild(unittest.TestCase):
+    # A batch has one session per (date, pod), so two rows on the same date in
+    # the same batch ARE one session (recap.session_key). Fixtures that mean
+    # "several sessions" therefore vary the date.
     def test_spellings_collapse_into_one_row(self):
-        out = trainers.build([sess("Swapnil"), sess("Swapnil Narayan"),
-                              sess("Swapnil (Play Simulive)")])
+        out = trainers.build([sess("Swapnil", date="2026-09-01"),
+                              sess("Swapnil Narayan", date="2026-09-02"),
+                              sess("Swapnil (Play Simulive)", date="2026-09-03")])
         self.assertEqual(out["n_people"], 1)
         self.assertEqual(out["trainers"][0]["sessions"], 3)
 
@@ -134,14 +138,68 @@ class TestBuild(unittest.TestCase):
     def test_attendance_is_pooled_by_headcount_not_averaged(self):
         # 100/200 and 900/1000 pools to 1000/1200 = 83.3%, not (50+90)/2 = 70%.
         out = trainers.build([sess("Ann Rao", present=100, total=200),
-                              sess("Ann Rao", present=900, total=1000)])
+                              sess("Ann Rao", present=900, total=1000,
+                                   date="2026-09-06")])
         self.assertEqual(out["trainers"][0]["pct"], 83.3)
 
     def test_nps_comes_from_summed_histograms(self):
         big = {"recommend": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 300}}
         small = {"recommend": {"1": 3, "2": 0, "3": 0, "4": 0, "5": 0}}
-        out = trainers.build([sess("Ann Rao", dist=big), sess("Ann Rao", dist=small)])
+        out = trainers.build([sess("Ann Rao", dist=big),
+                              sess("Ann Rao", dist=small, date="2026-09-06")])
         self.assertEqual(out["trainers"][0]["nps"], 98)
+
+    def test_a_room_three_batches_sat_in_is_one_session_with_one_poll(self):
+        """The 3x bug. B35, B36 and B37 share one Finance webinar; the poll
+        arrives split per batch (own students) with the whole room in
+        `rating_shared.joint`. The trainer taught once and was rated once."""
+        joint = {"session": 4.3, "trainer": 4.3, "recommend": 4.27,
+                 "responses": 220, "nps": 27,
+                 "dist": {"recommend": {"1": 10, "2": 10, "3": 30, "4": 60, "5": 110}}}
+        rows = []
+        for b, own_r, own_n, present, total in (("B35", 4.6, 60, 117, 289),
+                                                ("B36", 4.1, 70, 115, 275),
+                                                ("B37", 4.2, 60, 129, 303)):
+            r = sess("Aryan Patel", batch=b, present=present, total=total,
+                     rating=own_r, n=own_n, pod="Finance")
+            r["shared_batches"] = ["B35", "B36", "B37"]
+            r["rating_shared"] = {"batches": ["B35", "B36", "B37"],
+                                  "joint": joint, "split": True,
+                                  "unmatched": 30, "multi": 0}
+            rows.append(r)
+        t = trainers.build(rows)["trainers"][0]
+        self.assertEqual(t["sessions"], 1)
+        self.assertEqual(t["rating"], 4.3)          # the room's, not 3 copies
+        self.assertEqual(t["rating_n"], 220)        # not 190 (own parts) or 660
+        self.assertEqual(t["nps"], 27)                 # (110 - 50) / 220
+        self.assertEqual(t["present"], 117 + 115 + 129)   # attendance IS per batch
+        self.assertEqual(t["invited"], 289 + 275 + 303)
+        self.assertEqual(t["batches"], ["B35", "B36", "B37"])
+        self.assertEqual(t["co_taught"], 0)
+
+    def test_verbatim_copies_from_an_older_store_still_count_once(self):
+        # A store built before the split holds three identical copies and no
+        # rating_shared. They must be taken once, never summed to 3x.
+        rows = []
+        for b in ("B17", "B21"):
+            r = sess("Ann Rao", batch=b, rating=4.5, n=757,
+                     dist={"recommend": {"1": 0, "2": 0, "3": 0, "4": 0, "5": 757}})
+            r["shared_batches"] = ["B17", "B21"]
+            rows.append(r)
+        t = trainers.build(rows)["trainers"][0]
+        self.assertEqual(t["sessions"], 1)
+        self.assertEqual(t["rating_n"], 757)
+        self.assertEqual(t["nps"], 100)
+
+    def test_co_taught_shared_room_is_one_co_taught_session(self):
+        rows = []
+        for b in ("B35", "B36"):
+            r = sess("A Kumar, B Singh", batch=b)
+            r["shared_batches"] = ["B35", "B36"]
+            rows.append(r)
+        for t in trainers.build(rows)["trainers"]:
+            self.assertEqual(t["sessions"], 1)
+            self.assertEqual(t["co_taught"], 1)
 
     def test_a_trainer_with_no_index_still_appears_but_sorts_last(self):
         out = trainers.build([sess("Good", index=1.4), sess("Unknown", index=None)])

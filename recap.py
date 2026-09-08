@@ -167,12 +167,117 @@ def collect_sessions(DATA: dict, today: date) -> list:
     return rows
 
 
+# ── one room, several batches ────────────────────────────────────────────────
+# From B35 a POD webinar is shared by every batch at that point in the
+# curriculum ('AI CAP B35 , B36 , B37 - Finance'), and older batches shared
+# whole-batch rooms too ('AI CAP B17 + B21 11AM'). Attendance is rightly one row
+# per batch — each is measured against its own roster — but the room, the
+# trainer and the poll are ONE fact, and summing the rows counted them 2-3
+# times: 46 such groups on the live store, 6.6% too many poll responses, and
+# 35 of 70 trainers with inflated session counts. These three helpers are the
+# single place that decides what "one session" is, for the weekly recap, the
+# trainer rollups and the app alike.
+
+def session_key(r: dict) -> tuple:
+    """What makes two batch rows the same session.
+
+    (date, pod, the batches L2 put in the room). A batch has at most one column
+    per (date, pod) — the marker unions same-day webinars into it — so the key
+    is unique by construction and needs no title. `shared_batches` comes from
+    L2 (data.py), so rows of a shared room agree on it whether or not a poll
+    ran; a row without it is its own session.
+    """
+    sb = r.get("shared_batches") or []
+    return (r.get("date") or r.get("mm"), r.get("pod") or "",
+            tuple(sb) if len(sb) > 1 else (r.get("batch"),))
+
+
+_RATING_KEYS = ("rating", "rating_trainer", "rating_recommend", "rating_n",
+                "nps", "dist")
+
+
+def joint_rating(rows: list) -> dict:
+    """The whole room's poll, from the batch rows of one session.
+
+    Each batch row of a split poll carries only ITS students' answers and the
+    joint figure in `rating_shared.joint`, so that is taken when present. Rows
+    that were never split (a single batch, an older store, a poll with no
+    emails) hold identical copies — take the fullest one, never a sum.
+    """
+    for r in rows:
+        j = (r.get("rating_shared") or {}).get("joint")
+        if j and j.get("responses"):
+            return {"rating": j.get("session"), "rating_trainer": j.get("trainer"),
+                    "rating_recommend": j.get("recommend"),
+                    "rating_n": j.get("responses") or 0, "nps": j.get("nps"),
+                    "dist": j.get("dist") or {}}
+    best = max(rows, key=lambda r: r.get("rating_n") or 0) if rows else {}
+    return {"rating": best.get("rating"),
+            "rating_trainer": best.get("rating_trainer"),
+            "rating_recommend": best.get("rating_recommend"),
+            "rating_n": best.get("rating_n") or 0,
+            "nps": best.get("nps", best.get("rating_nps")),
+            "dist": best.get("dist") or best.get("rating_dist") or {}}
+
+
+def group_sessions(rows: list) -> list:
+    """Batch rows -> one dict per session, in first-seen order.
+
+    Carries the same field names a batch row does, so `_agg`, `_awards` and
+    `trainers.build` read a group exactly as they read a row: attendance pooled
+    over the batches (the room was one room), the poll taken once from
+    `joint_rating`, and every per-room measurement (duration, peak, retention,
+    stickiness) from whichever row has it. `batch` reads 'B35, B36, B37' and
+    `rows` keeps the per-batch lines for anyone who needs the split.
+    """
+    groups: dict = {}
+    for r in rows or ():
+        groups.setdefault(session_key(r), []).append(r)
+    out = []
+    for key, rs in groups.items():
+        first = lambda k: next((x[k] for x in rs if x.get(k) is not None), None)
+        present = sum(x.get("present") or 0 for x in rs)
+        total = sum(x.get("total") or 0 for x in rs)
+        idx = [(x["index"], x.get("total") or 0) for x in rs
+               if x.get("index") is not None]
+        wsum = sum(t for _i, t in idx)
+        batches = sorted({x.get("batch") for x in rs if x.get("batch")},
+                         key=lambda b: (len(b), b))
+        g = {
+            **{k: first(k) for k in ("date", "date_lbl", "week", "mm", "topic",
+                                     "pod", "mentor", "trainer", "trainers",
+                                     "trainer_type", "session_type", "l2_batch",
+                                     "wk", "expected_pct", "duration_hrs", "peak",
+                                     "unique_viewers", "retention", "stick10",
+                                     "stick30", "poll_at_min", "rating_shared")},
+            "key": key,
+            "batch": ", ".join(batches),
+            "batches": batches,
+            "shared_batches": list(key[2]) if len(key[2]) > 1 else [],
+            "rows": rs,
+            "present": present,
+            "total": total,
+            "pct": round(present / total * 100, 1) if total else None,
+            "index": (round(sum(i * t for i, t in idx) / wsum, 3) if wsum else None),
+            **joint_rating(rs),
+        }
+        g["rating_dist"] = g["dist"]
+        g["rating_nps"] = g["nps"]
+        out.append(g)
+    return out
+
+
 def _agg(rows: list) -> dict:
     """Roll a set of session rows into one weekly line.
 
     Attendance is pooled (sum present / sum invited), never a mean of the
     per-session percentages: a whole-batch session of 3,000 and a pod session of
     59 are not two equal opinions about the week.
+
+    Everything that is a fact about a ROOM — how many sessions, the poll, the
+    stickiness — is taken over `group_sessions`, so a webinar three batches sat
+    in is one session with one poll. Attendance and the index stay over the
+    batch rows, because each batch is measured against its own roster.
     """
     present = sum(r["present"] for r in rows)
     total = sum(r["total"] for r in rows)
@@ -181,29 +286,30 @@ def _agg(rows: list) -> dict:
     wsum = sum(r["total"] for r in rows if r["index"] is not None)
     widx = (sum(r["index"] * r["total"] for r in rows if r["index"] is not None) / wsum
             if wsum else None)
-    merged = _polls.merge_dists(r["dist"] for r in rows)
-    rated = [r for r in rows if r["rating"] is not None]
-    rn = sum(r["rating_n"] for r in rated)
+    grp = group_sessions(rows)
+    merged = _polls.merge_dists(g["dist"] for g in grp)
+    rated = [g for g in grp if g["rating"] is not None]
+    rn = sum(g["rating_n"] for g in rated)
     # Stickiness is a plain mean over sessions, NOT weighted by headcount: it
     # already is a ratio of a session to itself, so a big room's 40% and a small
     # room's 40% are the same fact about how well each held its audience.
-    sticks = [r["stick30"] for r in rows if r.get("stick30") is not None]
-    trated = [r for r in rows if r.get("rating_trainer") is not None]
-    trn = sum(r["rating_n"] for r in trated)
+    sticks = [g["stick30"] for g in grp if g.get("stick30") is not None]
+    trated = [g for g in grp if g.get("rating_trainer") is not None]
+    trn = sum(g["rating_n"] for g in trated)
     return {
-        "sessions": len(rows),
+        "sessions": len(grp),
         "batches": sorted({r["batch"] for r in rows}),
         "present": present,
         "invited": total,
         "pct": round(present / total * 100, 1) if total else None,
         "index": round(widx, 3) if widx else None,
         "n_indexed": len(idx),
-        "rating": (round(sum(r["rating"] * r["rating_n"] for r in rated) / rn, 2)
+        "rating": (round(sum(g["rating"] * g["rating_n"] for g in rated) / rn, 2)
                    if rn else None),
         "rating_n": rn,
         "nps": _polls.nps_from_dist(merged.get("recommend")),
-        "rating_trainer": (round(sum(r["rating_trainer"] * r["rating_n"]
-                                     for r in trated) / trn, 2) if trn else None),
+        "rating_trainer": (round(sum(g["rating_trainer"] * g["rating_n"]
+                                     for g in trated) / trn, 2) if trn else None),
         "stickiness": round(sum(sticks) / len(sticks), 1) if sticks else None,
         "n_sticky": len(sticks),
         "dist": merged,
@@ -226,13 +332,20 @@ def _awards(rows: list) -> list:
 
     Every award states its own basis in `why`, because an award with an unstated
     rule is just an assertion.
+
+    Room awards — rating, retention, NPS, size — are judged over
+    `group_sessions`, so a webinar three batches sat in competes once, with its
+    whole poll and its whole room, and the card names every batch. "Beat the
+    curve" stays on the batch rows: the residual is a claim about one batch at
+    one age, and pooling it would blur exactly what it measures.
     """
     out = []
+    grp = group_sessions(rows)
     # Session of the week is judged on the RATING, not the residual. Ratings do
     # not decay with cohort age the way attendance does, so a raw comparison is
     # fair here in a way it never is for attendance -- which is why the
     # attendance award below stays on the residual.
-    scored = [r for r in rows
+    scored = [r for r in grp
               if r["rating"] is not None and r["rating_n"] >= MIN_POLL_N]
     if len(scored) >= MIN_CONTENDERS:
         w = max(scored, key=lambda r: r["rating"])
@@ -243,7 +356,7 @@ def _awards(rows: list) -> list:
             "value": f"{w['rating']:.2f}",
             "why": f"rated by {w['rating_n']} learners",
         })
-    sticky = [r for r in rows if r.get("stick30") is not None]
+    sticky = [r for r in grp if r.get("stick30") is not None]
     if len(sticky) >= MIN_CONTENDERS:
         w = max(sticky, key=lambda r: r["stick30"])
         out.append({
@@ -265,7 +378,7 @@ def _awards(rows: list) -> list:
             "why": (f"drew {w['pct']:.1f}% where a {w['batch']} session "
                     f"{w['wk']} weeks in normally draws {w['expected_pct']:.1f}%"),
         })
-    polled = [r for r in rows if r["nps"] is not None and r["rating_n"] >= MIN_POLL_N]
+    polled = [r for r in grp if r["nps"] is not None and r["rating_n"] >= MIN_POLL_N]
     if len(polled) >= MIN_CONTENDERS:
         w = max(polled, key=lambda r: r["nps"])
         out.append({
@@ -275,8 +388,8 @@ def _awards(rows: list) -> list:
             "value": f"NPS {w['nps']:+d}",
             "why": f"from {w['rating_n']} responses",
         })
-    if len(rows) >= MIN_CONTENDERS:
-        w = max(rows, key=lambda r: r["present"])
+    if len(grp) >= MIN_CONTENDERS:
+        w = max(grp, key=lambda r: r["present"])
         out.append({
             "award": "Biggest room",
             "batch": w["batch"], "topic": w["topic"], "pod": w["pod"],
@@ -338,7 +451,7 @@ def build(DATA: dict, today: date, weeks: int = 8, rows: list | None = None) -> 
     board = []
     for name, rs in per_mentor.items():
         a = _agg(rs)
-        board.append({"mentor": name, "sessions": len(rs), "present": a["present"],
+        board.append({"mentor": name, "sessions": a["sessions"], "present": a["present"],
                       "invited": a["invited"], "pct": a["pct"], "index": a["index"],
                       "nps": a["nps"], "rating": a["rating"], "rating_n": a["rating_n"]})
     # Unindexed trainers sort last rather than being dropped - a name with no

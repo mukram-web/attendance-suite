@@ -149,6 +149,85 @@ class TestAggregation(unittest.TestCase):
         self.assertEqual(recap._delta(5, 3), 2)
 
 
+def shared_rows(joint_n=220, split=True):
+    """B35/B36/B37 in one Finance webinar: one row per batch, own-student
+    ratings, the whole room in rating_shared.joint."""
+    joint = {"session": 4.3, "trainer": 4.3, "recommend": 4.27,
+             "responses": joint_n, "nps": 27,
+             "dist": {"recommend": {"1": 10, "2": 10, "3": 30, "4": 60, "5": 110}}}
+    rows = []
+    for b, own_r, own_n, present, total in (("B35", 4.6, 60, 117, 289),
+                                            ("B36", 4.1, 70, 115, 275),
+                                            ("B37", 4.2, 60, 129, 303)):
+        rows.append({
+            "batch": b, "date": "2026-09-06", "date_lbl": "6 Sep",
+            "week": "2026-08-31", "pod": "Finance", "topic": "Financial Analysis",
+            "mentor": "Aryan Patel", "present": present, "total": total,
+            "pct": round(present / total * 100, 1), "index": 1.0,
+            "wk": 4, "expected_pct": 40.0, "stick30": 50.0 + len(rows),
+            "rating": own_r if split else 4.3, "rating_trainer": 4.3,
+            "rating_n": own_n if split else joint_n, "nps": 27,
+            "dist": joint["dist"], "shared_batches": ["B35", "B36", "B37"],
+            "rating_shared": ({"batches": ["B35", "B36", "B37"], "joint": joint,
+                               "split": True, "unmatched": 30, "multi": 0}
+                              if split else None),
+        })
+    return rows
+
+
+class TestSharedRooms(unittest.TestCase):
+    """One webinar, three batches: one session, one poll, three attendances."""
+
+    def test_session_key_groups_by_the_room_not_the_batch(self):
+        rows = shared_rows()
+        self.assertEqual(len({recap.session_key(r) for r in rows}), 1)
+        solo = dict(rows[0], shared_batches=[])
+        self.assertNotEqual(recap.session_key(solo), recap.session_key(rows[1]))
+
+    def test_group_pools_attendance_and_takes_the_poll_once(self):
+        g = recap.group_sessions(shared_rows())
+        self.assertEqual(len(g), 1)
+        g = g[0]
+        self.assertEqual(g["batch"], "B35, B36, B37")
+        self.assertEqual(g["present"], 117 + 115 + 129)
+        self.assertEqual(g["total"], 289 + 275 + 303)
+        self.assertEqual(g["rating"], 4.3)
+        self.assertEqual(g["rating_n"], 220)     # the room, not 190 or 660
+        self.assertEqual(g["nps"], 27)
+        self.assertEqual(len(g["rows"]), 3)
+
+    def test_agg_counts_a_shared_room_once(self):
+        a = recap._agg(shared_rows())
+        self.assertEqual(a["sessions"], 1)
+        self.assertEqual(a["rating_n"], 220)
+        self.assertEqual(a["rating"], 4.3)
+        self.assertEqual(a["present"], 117 + 115 + 129)   # attendance stays per batch
+        self.assertEqual(a["batches"], ["B35", "B36", "B37"])
+        self.assertEqual(a["n_sticky"], 1)
+
+    def test_copies_without_a_split_are_taken_once_not_summed(self):
+        # An older store, or a poll that named nobody: three identical copies.
+        a = recap._agg(shared_rows(split=False))
+        self.assertEqual(a["sessions"], 1)
+        self.assertEqual(a["rating_n"], 220)
+
+    def test_awards_judge_the_room_and_name_every_batch(self):
+        rows = shared_rows()
+        # two other, lower-rated single-batch sessions make a real field
+        for i, b in enumerate(("B38", "B39")):
+            rows.append({**rows[0], "batch": b, "shared_batches": [],
+                         "rating_shared": None, "rating": 4.0 + i / 10,
+                         "rating_n": 100, "nps": 10, "present": 50, "total": 500,
+                         "pct": 10.0, "stick30": 20.0, "index": 0.9,
+                         "dist": {"recommend": {"1": 0, "2": 0, "3": 50, "4": 0, "5": 50}}})
+        aw = {a["award"]: a for a in recap._awards(rows)}
+        self.assertEqual(aw["Session of the week"]["batch"], "B35, B36, B37")
+        self.assertIn("220", aw["Session of the week"]["why"])
+        self.assertEqual(aw["Biggest room"]["value"], f"{117 + 115 + 129:,}")
+        # a single batch's slice must not win on its own small numbers
+        self.assertNotEqual(aw["Session of the week"]["batch"], "B35")
+
+
 class TestAwards(unittest.TestCase):
     def _rows(self, n=4):
         return [{"index": 1.0 + i / 10, "pct": 40.0, "expected_pct": 40.0,

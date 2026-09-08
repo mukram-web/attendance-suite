@@ -219,8 +219,14 @@ def _store_coverage(path: str) -> dict | None:
         raw = con.execute("SELECT value FROM meta WHERE key = 'sessions'").fetchone()
         con.close()
         rows = json.loads(raw[0]) if raw else []
+        # A batch's own slice of a shared poll can be empty (none of ITS
+        # students answered) while the poll itself is intact - that is a
+        # session WITH a rating, held in rating_shared.joint, not a lost one.
         return {"duration": sum(1 for r in rows if r.get("duration_hrs")),
-                "ratings": sum(1 for r in rows if r.get("rating") is not None)}
+                "ratings": sum(1 for r in rows
+                               if r.get("rating") is not None
+                               or ((r.get("rating_shared") or {}).get("joint") or {})
+                               .get("session") is not None)}
     except Exception:
         return None
 
@@ -575,6 +581,9 @@ def main() -> None:
     # run must have left Drive exactly as it found it.
     print(f"[4/8] Day-1 analysis (newest {DAY1_BATCHES} batches) …", flush=True)
     day1 = {"batches": [], "skipped": [], "errors": []}
+    # Bound OUTSIDE the try: [5a] below divides shared polls by these rosters,
+    # and a day-1 failure must cost the day-1 tab, not every rating.
+    roster_tabs = {}
     try:
         wb_r = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
         roster_tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
@@ -652,8 +661,41 @@ def main() -> None:
         _prows.sort(key=lambda r: _order.get(r[0], 1 << 30))
         ratings, ratings_by_wid = polls.lookup_by_session_rows(
             [(n, g) for _i, n, g in _prows], l2_bytes)
+
+        # [5a.1] A webinar SEVERAL batches sat in has one poll. Copying its
+        # aggregate onto each batch made B35, B36 and B37 show the same Finance
+        # rating and counted it three times in every rollup. So each such poll
+        # is re-read PER RESPONDENT and divided between the batches whose
+        # rosters hold them. Per-respondent rows are PII and roster-dependent,
+        # so they are never memoised: the file's bytes are fetched again here
+        # (`fetch_stream` serves them from its disk cache when it has them),
+        # and only the split's aggregates leave this block.
+        _win = {}                       # wid -> the copy dedupe_rows kept
+        for _fid, _n, _g in _prows:
+            _k = polls.name_key(_n)
+            # identity, not equality: dedupe_rows stored this very dict, so
+            # this recovers the winning copy without a second tie-break
+            if _k and ratings_by_wid.get(_k[0]) is _g:
+                _win.setdefault(_k[0], _fid)
+        _need = {rt.get("_wid") for rt in ratings.values()
+                 if len(rt.get("_batches") or ()) > 1}
+        _want = {_win[w] for w in _need if w in _win}
+        _texts = {}
+
+        def _poll_text(f, blob, _verified):
+            _k = polls.name_key(f["name"])
+            if _k:
+                _texts[_k[0]] = blob.decode("utf-8-sig", errors="replace")
+
+        _si = live_data.fetch_stream(svc, [f for f in _pl if f["id"] in _want],
+                                     _poll_text)
+        ratings, _sstat = polls.apply_roster_split(
+            ratings, _texts, ddata.roster_emails(roster_tabs))
+        del _texts
         cache_stats["polls"] = dict(
             _pstat, listed=len(_pl), failed=_pi["failed"],
+            shared=_sstat["shared"], shared_split=_sstat["split"],
+            shared_kept=_sstat["kept"],
             # every key seen on the drive this run, so [8c] can drop memo
             # entries for files that no longer exist
             keys={k for k in (derived_cache.key_for(f) for f in _pl) if k})
@@ -661,6 +703,11 @@ def main() -> None:
               f"({_pstat['hit']} cached, {_pstat['miss']} parsed) · "
               f"{len(ratings_by_wid)} webinar(s) rated · "
               f"{len(ratings)} session key(s)")
+        print(f"   {_sstat['shared']} shared session key(s) over {len(_need)} "
+              f"webinar(s): {_sstat['split']} split by roster, "
+              f"{sum(_sstat['kept'].values())} kept joint"
+              + (f" {_sstat['kept']}" if _sstat["kept"] else "")
+              + (f" · {_si['failed']} poll fetch(es) failed" if _si["failed"] else ""))
     except Exception as e:
         print(f"   WARNING: poll ratings unavailable ({e}) - sessions show no rating.")
 
