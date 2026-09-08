@@ -50,6 +50,7 @@ import attendance_core as ac          # noqa: E402
 import bsiai                          # noqa: E402
 import dashboard_core as dc           # noqa: E402
 import data as ddata                  # noqa: E402
+import derived_cache                  # noqa: E402
 import polls                          # noqa: E402
 import day1_analysis                  # noqa: E402
 import forecast                       # noqa: E402
@@ -149,6 +150,111 @@ def _looks_like_sa_key(path: str) -> bool:
         return False
 
 
+# How far session coverage may fall week on week before the run refuses to
+# publish. Sessions do not vanish from the past: the corpus only grows, so any
+# real drop is a bug upstream. 0.8 leaves room for a handful of Zoom exports
+# going missing or an L2 row being corrected, which do happen.
+COVERAGE_FLOOR = 0.8
+
+
+def _cache_meta(cache_stats: dict, cache_rules: dict) -> dict:
+    """The memo's counters, shaped for the store's meta blob.
+
+    The live key SETS are dropped here — they are working state for [8c]'s
+    hygiene pass, they are Drive file ids, and the store is archived forever.
+    What stays is counts plus the rule hash each namespace ran under, so a week
+    built on a rule later found to be wrong can be identified without keeping
+    anything identifying.
+    """
+    return {ns: {**{k: v for k, v in (cache_stats.get(ns) or {}).items()
+                    if k != "keys"},
+                 "rule": cache_rules.get(ns)}
+            for ns in derived_cache.NAMESPACES if cache_stats.get(ns)}
+
+
+def _write_cache(svc, cfg, cache, cache_rules, cache_stats, args) -> None:
+    """Upload the derived-facts memo. Loud on failure, but never fatal.
+
+    A memo that failed to save costs next week a slow run and nothing else, so
+    this must not take the publish down with it. A row of an unexpected SHAPE is
+    different — derived_cache.dumps raises on that, because it means what we are
+    about to write is not what we think it is — but even that is caught here and
+    reported rather than thrown, since by this point the store is already built
+    and (on a full run) about to be published from data the memo did not affect.
+
+    Skipped after --allow-partial: that flag exists to publish a knowingly
+    incomplete week, and a knowingly incomplete week must not leave a residue
+    that a later, complete run would treat as authoritative.
+    """
+    if not cache or not (cfg["store_folder_id"] or args.cache_file):
+        return
+    if args.allow_partial:
+        print("[8c] Derived-facts cache: not written (--allow-partial)", flush=True)
+        return
+    # Memo hygiene: drop entries for files no longer on the drive, so the file
+    # stays the size of the live corpus. This is NOT archive pruning (§4d) —
+    # every dropped row is recomputable from the file it came from.
+    dropped = sum(derived_cache.prune_to(cache, ns, cache_stats.get(ns, {}).get("keys", ()))
+                  for ns in derived_cache.NAMESPACES
+                  if cache_stats.get(ns, {}).get("keys"))
+    try:
+        n = (derived_cache.save_file(args.cache_file, cache, cache_rules)
+             if args.cache_file else
+             derived_cache.save(svc, cfg["store_folder_id"], cache, cache_rules))
+        print(f"[8c] Derived-facts cache: {sum(len(cache.get(ns) or {}) for ns in derived_cache.NAMESPACES):,}"
+              f" row(s), {n / 1e6:.2f} MB"
+              + (f", {dropped:,} stale dropped" if dropped else ""), flush=True)
+    except Exception as e:
+        # Counts and the exception TYPE only — a public repo's Actions logs are
+        # world-readable and this pipeline has never printed a Drive id into one.
+        print(f"   WARNING: derived-facts cache not written "
+              f"({type(e).__name__}) — next week rebuilds it from the exports.",
+              flush=True)
+
+
+def _store_coverage(path: str) -> dict | None:
+    """How many session rows in a store carry a duration and a rating."""
+    try:
+        con = duckdb.connect(path, read_only=True)
+        raw = con.execute("SELECT value FROM meta WHERE key = 'sessions'").fetchone()
+        con.close()
+        rows = json.loads(raw[0]) if raw else []
+        return {"duration": sum(1 for r in rows if r.get("duration_hrs")),
+                "ratings": sum(1 for r in rows if r.get("rating") is not None)}
+    except Exception:
+        return None
+
+
+def _previous_coverage(svc, store_folder_id: str) -> dict | None:
+    """How many sessions last week's store had duration and ratings for.
+
+    None when there is nothing to compare against — no store folder, no previous
+    store, or a store we cannot read. A missing yardstick must never fail a run;
+    it just means this week has no claim to check.
+    """
+    if not store_folder_id:
+        return None
+    tmp = None
+    try:
+        meta = live_data.find_in_folder(svc, store_folder_id, STORE_NAME)
+        if not meta:
+            return None
+        blob = live_data.fetch_store_snapshot(meta["id"])
+        tmp = os.path.join(HERE, ".cache", "_prev_store.duckdb")
+        os.makedirs(os.path.dirname(tmp), exist_ok=True)
+        with open(tmp, "wb") as fh:
+            fh.write(blob)
+        return _store_coverage(tmp)
+    except Exception:
+        return None
+    finally:
+        if tmp and os.path.exists(tmp):
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+
 # ───────────────────────────── build the store ───────────────────────────────
 def _prepend_intro_sessions(DATA: dict) -> None:
     """Same rule as the app: first session of every batch = the intro call,
@@ -186,7 +292,8 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
                 bsiai_section: dict | None = None,
                 ratings: dict | None = None,
                 curric_tabs: dict | None = None,
-                session_meta: dict | None = None) -> dict:
+                session_meta: dict | None = None,
+                cache_stats: dict | None = None) -> dict:
     """Write attendance.duckdb next to nothing else — one self-contained file."""
     # dashboard DATA/summary (same code path the app used to run at startup)
     wb = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
@@ -270,8 +377,17 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
                            "warnings": [f"trainer build failed: {e}"]}
         sessions_section = []
 
-    df = dc.compute(marked_bytes)
-    smap = dc.batch_sheet_map(marked_bytes)
+    # `tabs` is the whole marked workbook, already materialised above to build
+    # DATA. Handing it to these two readers instead of the raw bytes stops them
+    # re-streaming the same 80k rows out of the zip: measured on the real 7.9 MB
+    # workbook, 43.7s + 46.8s of a 446s run, for rows already in memory. Same
+    # numbers either way — pinned by tests/test_dashboard_core_tabs.py.
+    df = dc.compute(marked_bytes, tabs=tabs)
+    smap = dc.batch_sheet_map(marked_bytes)   # sheetnames only, 0.1s — left alone
+    for _sh, _rows in tabs.items():
+        _w = dc._wide_tab_warning(_sh, max((len(r) for r in _rows), default=0))
+        if _w:
+            warnings = list(warnings) + [_w]
     # only real batch tabs — helper tabs like 'l2 cx data' or 'Auto pay' pass
     # dashboard_core's loose sheet filter but are not batches
     batches = sorted((b for b in df["Batch"].unique()
@@ -305,6 +421,10 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         "sheet_map": smap,
         "marked_xlsx_file_id": marked_xlsx_file_id,
         "stamps": stamps,
+        # What the derived-facts memo did this run, and the rule hash each
+        # namespace ran under. Provenance, so a week built on a suspect rule
+        # can be identified later at zero storage cost. Counts only.
+        "cache": cache_stats or {},
         "day1": day1 or {"batches": [], "skipped": []},
         # None = no CURRICULUM_ID configured. A section present but with empty
         # `sessions` means it was configured and produced nothing — the app says
@@ -346,17 +466,54 @@ def main() -> None:
                     help="publish even if some attendee files/folders failed "
                          "(default: refuse, so a complete store is never "
                          "overwritten by a partial one)")
+    ap.add_argument("--no-cache", action="store_true",
+                    help="ignore the derived-facts memo and re-parse every Zoom "
+                         "export (a fresh memo is still written afterwards)")
+    ap.add_argument("--cache-file", default="",
+                    help="read/write the derived-facts memo at this local path "
+                         "instead of the Drive store folder — this is how the "
+                         "cold-vs-warm store diff is run offline")
     args = ap.parse_args()
 
     cfg = load_config()
     live_data.set_service_account(cfg["sa_info"], scopes=RW_SCOPES)
     svc = live_data._drive_service()
 
+    today_iso = datetime.now(IST).date().isoformat()
+    cache, cache_stats = {}, {}
+    # A hash of each producing module's own SOURCE. Discards the memo whenever
+    # the rule that made it changes, without anyone remembering to bump a
+    # constant — forgetting is the documented failure mode here, see
+    # derived_cache.py and CLAUDE.md §4f.
+    cache_rules = {"sessionmeta": derived_cache.rule_version(sessionmeta),
+                   "polls": derived_cache.rule_version(polls)}
+
     print("[1/8] Fetching roster + L2 …", flush=True)
     roster_bytes, roster_stamp = live_data.fetch_sheet_cached(svc, cfg["roster_id"])
     l2_bytes, l2_stamp = (live_data.fetch_sheet_cached(svc, cfg["l2_id"])
                           if cfg["l2_id"] else (None, ""))
     print(f"   roster {len(roster_bytes):,} bytes (modified {roster_stamp})")
+
+    # [1b] The derived-facts memo: last week's per-file parse results, so this
+    # run only parses what is genuinely new. Any problem at all yields an empty
+    # memo and a full, correct, slower run — it is never a source of truth.
+    # Counts only in the log: a public repo's Actions logs are world-readable
+    # and this pipeline has never printed a Drive file id into them.
+    _cut = (datetime.now(IST).date()
+            - timedelta(days=derived_cache.CACHE_MAX_AGE_DAYS)).isoformat()
+    if args.no_cache:
+        print("[1b] Derived-facts cache: ignored (--no-cache)", flush=True)
+    else:
+        cache, _cstat = (
+            derived_cache.load_file(args.cache_file, cache_rules, _cut)
+            if args.cache_file else
+            derived_cache.load(svc, cfg["store_folder_id"], cache_rules, _cut))
+        print(f"   [1b] cache: {_cstat.get('loaded', 0):,} row(s) loaded"
+              + (f", {_cstat['discarded']:,} discarded (rule changed)"
+                 if _cstat.get("discarded") else "")
+              + (f", {_cstat['expired']:,} expired" if _cstat.get("expired") else "")
+              + (f", {_cstat['invalid']:,} invalid" if _cstat.get("invalid") else "")
+              + (f" — {_cstat['note']}" if _cstat.get("note") else ""), flush=True)
 
     print("[2/8] Fetching attendee reports (new sessions only) …", flush=True)
     attendee_files, info = live_data.fetch_new_attendees(
@@ -463,10 +620,45 @@ def main() -> None:
     # rating, not the run.
     print("[5a] Session feedback polls …", flush=True)
     ratings, ratings_by_wid = {}, {}
+    # The LISTING runs outside the try: it is the change detector, and a failure
+    # to enumerate must not degrade quietly to "no polls this week".
+    _pl = live_data.list_polls(svc, cfg["attendee_folder_id"])
     try:
-        poll_files, pinfo = live_data.fetch_polls(svc, cfg["attendee_folder_id"])
-        ratings, ratings_by_wid = polls.lookup_by_session(poll_files, l2_bytes)
-        print(f"   {pinfo['files']}/{pinfo['found']} poll file(s) · "
+        _prows, _pstat = [], {"hit": 0, "miss": 0}
+        _pneed = []
+        for _f in _pl:
+            _k = derived_cache.key_for(_f)
+            _got = derived_cache.get(cache, "polls", _k)
+            if _got is None:
+                _pneed.append(_f)
+            else:
+                _pstat["hit"] += 1
+                _prows.append((_f["id"], _f["name"], _got))
+
+        def _poll_take(f, blob, verified):
+            got = polls.parse_one(blob)
+            if got is None:
+                return
+            derived_cache.stage(cache, "polls", derived_cache.key_for(f), got,
+                                verified=verified, today=today_iso)
+            _pstat["miss"] += 1
+            _prows.append((f["id"], f["name"], got))
+
+        _pi = live_data.fetch_stream(svc, _pneed, _poll_take)
+        # Back into LISTING order before the dedupe: its tie-break keeps the
+        # copy seen first, so hits and misses must not be segregated or a tie
+        # would resolve differently from one week to the next.
+        _order = {f["id"]: i for i, f in enumerate(_pl)}
+        _prows.sort(key=lambda r: _order.get(r[0], 1 << 30))
+        ratings, ratings_by_wid = polls.lookup_by_session_rows(
+            [(n, g) for _i, n, g in _prows], l2_bytes)
+        cache_stats["polls"] = dict(
+            _pstat, listed=len(_pl), failed=_pi["failed"],
+            # every key seen on the drive this run, so [8c] can drop memo
+            # entries for files that no longer exist
+            keys={k for k in (derived_cache.key_for(f) for f in _pl) if k})
+        print(f"   {len(_prows)}/{len(_pl)} poll file(s) "
+              f"({_pstat['hit']} cached, {_pstat['miss']} parsed) · "
               f"{len(ratings_by_wid)} webinar(s) rated · "
               f"{len(ratings)} session key(s)")
     except Exception as e:
@@ -480,29 +672,69 @@ def main() -> None:
     # blow up on a small instance.
     print("[5a2] Session duration & peak ...", flush=True)
     session_meta = {}
+    _al = live_data.list_attendees(svc, cfg["attendee_folder_id"])
     try:
-        _mrows = []
+        _mrows, _mstat = [], {"hit": 0, "miss": 0}
+        _mneed = []
 
-        def _take(name, blob):
+        def _row(f, h):
+            """Attach the name-derived key FRESH, every run, on hit and miss alike.
+
+            `_mm` is parsed out of the filename, so it is never memoised (the
+            memo refuses it outright). Recomputing it here is what lets a
+            mis-dated export renamed on Drive move to its corrected date even
+            though its bytes are unchanged — and it is what stops a cache hit
+            arriving without an `_mm` that lookup_by_session would drop, which
+            would blank duration, peak, retention and stickiness on every
+            session while the run stayed green.
+            """
+            k = sessionmeta.name_key(f["name"])
+            out = dict(h)
+            out["_mm"] = k[1] if k else None
+            _mrows.append((f["id"], f["name"], out))
+
+        for _f in _al:
+            _k = derived_cache.key_for(_f)
+            _got = derived_cache.get(cache, "sessionmeta", _k)
+            if _got is None:
+                _mneed.append(_f)
+            else:
+                _mstat["hit"] += 1
+                _row(_f, _got)
+
+        def _take(f, blob, verified):
             txt = blob.decode("utf-8-sig", errors="replace")
             h = sessionmeta.parse_header(txt)
             if not h or not h.get("duration_min"):
                 return                      # a poll/overview export, not a report
-            key = sessionmeta.name_key(name)
-            h["_mm"] = key[1] if key else None
             h.update(sessionmeta.measure(txt))
-            _mrows.append((name, h))
+            derived_cache.stage(cache, "sessionmeta", derived_cache.key_for(f), h,
+                                verified=verified, today=today_iso)
+            _mstat["miss"] += 1
+            _row(f, h)
 
-        _mi = live_data.scan_all_attendees(svc, cfg["attendee_folder_id"], _take)
+        _mi = live_data.fetch_stream(svc, _mneed, _take)
+        # Listing order, for the same reason as the polls above: collect()'s
+        # tie-break keeps the incumbent, and 119 of 320 duplicated webinars in
+        # the corpus TIE on unique_viewers.
+        _order = {f["id"]: i for i, f in enumerate(_al)}
+        _mrows.sort(key=lambda r: _order.get(r[0], 1 << 30))
         session_meta = sessionmeta.lookup_by_session(
-            sessionmeta.collect(_mrows), l2_bytes)
-        print(f"   {_mi['files']} file(s) scanned, {_mi['failed']} failed - "
+            sessionmeta.collect([(n, h) for _i, n, h in _mrows]), l2_bytes)
+        cache_stats["sessionmeta"] = dict(
+            _mstat, listed=len(_al), failed=_mi["failed"],
+            keys={k for k in (derived_cache.key_for(f) for f in _al) if k})
+        print(f"   {len(_al)} file(s) listed, {_mi['failed']} failed "
+              f"({_mstat['hit']} cached, {_mstat['miss']} parsed) - "
               f"{len(_mrows)} report(s) -> {len(session_meta)} session(s) "
               "with duration/peak", flush=True)
     except Exception as e:
         # Never fatal: a missing duration should cost that column, not the run.
         print(f"   WARNING: duration/peak scan failed ({e}) - those columns "
               "will be blank.", flush=True)
+
+    # The coverage gate for these two steps lives after the store is built, so
+    # it can compare like with like against last week's store — see GATE 5.
 
     bsiai_section = None
     if cfg["bsiai_roster_id"]:
@@ -562,10 +794,43 @@ def main() -> None:
                         {"roster": roster_stamp, "l2": l2_stamp, "mode": args.mode},
                         day1=day1, bsiai_section=bsiai_section, ratings=ratings,
                         session_meta=session_meta,
-                        curric_tabs=curric_tabs)
+                        curric_tabs=curric_tabs,
+                        cache_stats=_cache_meta(cache_stats, cache_rules))
     size = os.path.getsize(store_path)
     print(f"   {stats['batches']} batches · {stats['students']:,} students · "
           f"{stats['sessions']} sessions · {size / 1e6:.1f} MB")
+
+    # GATE 5 — coverage must not collapse. [5a] and [5a2] are the only steps in
+    # this pipeline with no gate above them and a blanket `except` inside them,
+    # so a failure there used to cost one column and still go green. That was
+    # tolerable while those columns were recomputed from the exports every week.
+    # It is not tolerable now a memoised fact can reach a published number: a
+    # memo defect must be RED on the Monday it happens, not found a quarter
+    # later in an immutable archive nobody can prune.
+    #
+    # The yardstick is last week's own store. Sessions do not disappear from the
+    # past — the corpus only grows — so a real drop is a bug upstream, never a
+    # fact about the week. No previous store (a first run) means no claim to
+    # check and therefore no gate.
+    _prev_cov = _previous_coverage(svc, cfg["store_folder_id"])
+    _now_cov = _store_coverage(store_path)
+    if _prev_cov and _now_cov and not args.allow_partial:
+        _drop = [f"{k}: {_prev_cov[k]:,} last week → {_now_cov[k]:,} now"
+                 for k in _now_cov
+                 if _prev_cov.get(k, 0) >= 20
+                 and _now_cov[k] < _prev_cov[k] * COVERAGE_FLOOR]
+        if _drop:
+            raise SystemExit(
+                "Refusing to publish: session coverage collapsed — the previous "
+                "store is left in place:\n  - " + "\n  - ".join(_drop)
+                + "\nSessions do not vanish from the past, so this is a bug in the "
+                  "fetch or in the derived-facts memo, not a fact about the week. "
+                  "Re-run with --no-cache to rebuild straight from the Zoom "
+                  "exports; pass --allow-partial to publish anyway.")
+    if _prev_cov and _now_cov:
+        print(f"   coverage: duration {_prev_cov['duration']}→{_now_cov['duration']}, "
+              f"ratings {_prev_cov['ratings']}→{_now_cov['ratings']} (vs last week)",
+              flush=True)
 
     # The static website the team actually opens. Built from the store that was
     # just written, so the site can never disagree with the app.
@@ -573,6 +838,13 @@ def main() -> None:
         print("[7/8] Rendering the static site …", flush=True)
         import site_build
         site_build.build_site(store_path, os.path.join(HERE, "site"))
+
+    # [8c] The derived-facts memo, written BEFORE the --no-upload return on
+    # purpose. It is content-keyed and idempotent, so writing it on a dry run is
+    # harmless — and it is the only way the warm path is ever exercised outside
+    # a production publish. A memo that only ever gets written by the Monday job
+    # is a code path whose first execution is also its first publish.
+    _write_cache(svc, cfg, cache, cache_rules, cache_stats, args)
 
     if args.no_upload:
         print(f"[8/8] Skipped upload (--no-upload). Store at: {store_path}")
