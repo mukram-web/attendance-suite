@@ -60,7 +60,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
 | `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
-| `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. |
+| `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. `parse_responses` + `split_by_roster` divide a shared webinar's poll between its batches (§4e). |
 | `sessionmeta.py` | duration, peak, the per-minute retention curve and stickiness, swept from the attendee report's own join/leave times. Pure, unit-tested. See §4e. |
 | `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
 | `trainers.py` | per-trainer rollups + identity resolution (91 L2 spellings -> 63 people). Pure, unit-tested. See §4e. |
@@ -309,6 +309,41 @@ JOIN, not the host's start** — using Zoom's `Actual Start Time` would slide th
 marker several minutes. A marker that lands outside the curve is dropped rather
 than clamped: an early bird answering a poll left open from the previous session
 produces a negative minute, and minute 0 is a different claim from "no marker".
+
+**One room, several batches: the poll is split per batch and the session is
+counted once (added 2026-09-09).** From B35 a POD webinar is shared by every
+batch at that point in the curriculum — L2 says `AI CAP B35 , B36 , B37 -
+Finance` — and older batches shared whole rooms too (`AI CAP B17 + B21 11AM`).
+Attendance is rightly one row per batch, but the poll used to be COPIED onto
+each: B35, B36 and B37 all showed Finance 4.30 / 220 responses, and every rollup
+counted it three times (46 such groups on the live store, `rating_n` 6.6% high,
+35 of 70 trainers with inflated session counts). Two rules now, in two places:
+
+1. **A batch row carries ITS students' answers.** `pipeline.py` step `[5a.1]`
+   re-reads each shared poll per respondent (`polls.parse_responses`) and
+   divides it between the sharing batches by roster email
+   (`polls.split_by_roster`, `data.roster_emails`; the same `_cell_email` rule
+   the marker uses). The row's `rating*` fields become that slice; the whole
+   room lives once in `rating_shared.joint`, with `unmatched` (an email on no
+   sharing roster — in the room's figure, in no batch's) and `multi` (enrolled
+   twice — counted in each). Measured 30 Aug: ~85-90% of respondents match a
+   roster. Polls carry email only, never phone. A long-form export names nobody,
+   and **an anonymous Zoom poll exports `anonymous` in every email cell** (the
+   6 Sep 2026 Finance poll: 220 answers, not one identity) — both keep the joint
+   figure on every batch with `split: False, reason: 'no-emails'`. Ask the hosts
+   to run the feedback poll non-anonymously, or the per-batch view cannot exist.
+   Per-respondent rows are PII and roster-dependent — they are **never
+   memoised** (§4f refuses them) and the bytes are re-fetched each run through
+   `fetch_stream`'s disk cache.
+2. **`recap.session_key` / `group_sessions` decide what one session is** —
+   `(date, pod, shared_batches)`, where `shared_batches` comes from the SAME L2
+   cell as `l2_batch` (data.py), so it holds whether or not a poll ran.
+   `recap._agg`, `_awards` (except Beat the curve, a per-batch claim),
+   `trainers.build`, the Sessions→Browse headline and the Weekend Recap
+   breakdown all count rooms and take the poll from `joint_rating` — the joint
+   figure when present, else the fullest identical copy, never a sum. Attendance
+   stays over the batch rows. Fixtures that mean "several sessions" must vary
+   the date: two rows on one (date, pod) in one batch ARE one session.
 
 **A per-student view was built and REMOVED (owner's call, 2026-09-06).**
 `students.py` and its tests are gone; recover them from git if it is ever wanted.
@@ -609,7 +644,7 @@ python pipeline.py --no-upload --no-site
 # tests — stdlib unittest; pytest is NOT in requirements.txt
 python -m unittest tests.test_data
 
-# all of them (333 as of 2026-09-08). `discover` does not work: tests/ has no
+# all of them (345 as of 2026-09-09). `discover` does not work: tests/ has no
 # __init__.py, so the start directory is "not importable" — name them instead.
 # test_dashboard_core_tabs takes ~2 min: it proves the bytes and tabs= paths
 # agree by running the SLOW path too, which is the point of it.

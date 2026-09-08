@@ -194,6 +194,56 @@ class TestBuildBatch(unittest.TestCase):
         self.assertEqual({x["mm"]: x["topic"] for x in b["sessions"]},
                          {"04_04": "Shared A", "04_05": "Shared B"})
 
+    def test_shared_batches_come_from_the_l2_label(self):
+        rows = make_tab(
+            ten_students(["Present"] * 6 + ["Absent"] * 4,
+                         ["Present"] * 6 + ["Absent"] * 4),
+            session_dates=["2026_04_04", "2026_04_05"],
+            session_topics=["2026_04_04", "2026_04_05"],
+        )
+        l2 = {("B17", "04_04"): "A", ("B17", "04_05"): "B"}
+        labels = {("B17", "04_04"): "AI CAP B17 + B21 11AM",
+                  ("B17", "04_05"): "AI CAP B17 7PM"}
+        b = data.build_batch(rows, "B17", l2, l2_labels=labels)
+        s = {x["mm"]: x for x in b["sessions"]}
+        self.assertEqual(s["04_04"]["shared_batches"], ["B17", "B21"])
+        self.assertEqual(s["04_05"]["shared_batches"], [])
+        self.assertEqual(data.shared_batches("AI CAP B35 , B36 , B37 - Finance"),
+                         ["B35", "B36", "B37"])
+        self.assertEqual(data.shared_batches("AICAPB35, B36-Techies"), ["B35", "B36"])
+        self.assertEqual(data.shared_batches(""), [])
+
+    def test_rating_shared_rides_the_ratings_payload(self):
+        rows = make_tab(
+            ten_students(["Present"] * 6 + ["Absent"] * 4,
+                         ["Present"] * 6 + ["Absent"] * 4),
+            session_dates=["2026_04_04", "2026_04_05"],
+            session_topics=["2026_04_04", "2026_04_05"],
+        )
+        l2 = {("B17", "04_04"): "A", ("B17", "04_05"): "B"}
+        shared = {"batches": ["B17", "B21"], "split": True, "unmatched": 3,
+                  "multi": 0, "joint": {"session": 4.5, "responses": 100}}
+        ratings = {("B17", "04_04", ""): {"session": 4.7, "trainer": 4.8,
+                                         "responses": 40, "shared": shared},
+                   ("B17", "04_05", ""): {"session": 4.1, "responses": 9}}
+        b = data.build_batch(rows, "B17", l2, ratings=ratings)
+        s = {x["mm"]: x for x in b["sessions"]}
+        self.assertEqual(s["04_04"]["rating"], 4.7)          # this batch's own
+        self.assertEqual(s["04_04"]["rating_n"], 40)
+        self.assertEqual(s["04_04"]["rating_shared"], shared)
+        self.assertIsNone(s["04_05"]["rating_shared"])
+
+    def test_roster_emails_per_batch_tab(self):
+        rows = make_tab(ten_students(["Present"] * 10, ["Present"] * 10),
+                        session_dates=["2026_04_04", "2026_04_05"],
+                        session_topics=["2026_04_04", "2026_04_05"])
+        rows[2][2] = " S0@X.COM "                           # first student: whitespace + case
+        got = data.roster_emails({"AI CAP B17": rows, "B17 Att": rows,
+                                  "Pivot Table 2": []})
+        self.assertEqual(set(got), {"B17"})
+        self.assertIn("s0@x.com", got["B17"])
+        self.assertEqual(len(got["B17"]), 10)
+
     def test_closing_breakdown(self):
         closings = ["BDA Closing"] * 4 + ["BDA Closimg"] + ["System"] * 3 + ["BDA Collection"] * 2
         # session A: System buyers all present, others mixed -> System att highest

@@ -28,6 +28,8 @@ from collections import defaultdict
 import pods
 from attendance_core import _col_pod   # session column header -> its POD
 from attendance_core import _mmdd  # proven date parser: "4th April", "31st may", "2026_05_31", datetimes
+from attendance_core import _cell_email, extract_batches
+import polls as _polls
 
 # ── business-rule constants (the only hardcoded things, per spec) ─────────────
 # Payment values that mean NOT active (covers the real misspellings in the data).
@@ -135,6 +137,47 @@ def _find_header_row(rows) -> int:
         if any(k in joined for k in keys):
             return i
     return 0
+
+
+def shared_batches(raw_label) -> list:
+    """The batches L2's 'Batch Name' cell puts in ONE webinar, or [] for one.
+
+    'AI CAP B35 , B36 , B37 - Finance' -> ['B35', 'B36', 'B37']
+    'AI CAP B17 + B21 11AM'            -> ['B17', 'B21']
+    'AI CAP B35 - Techies'             -> []
+
+    This — not the poll — is what says a session was shared: the room was one
+    room whether or not anyone answered a poll in it, and every rollup that
+    counts sessions must count it once. Same spelling and order as the keys
+    `polls.lookup_by_session_rows` writes, so the two can never disagree.
+    """
+    keys = extract_batches(str(raw_label or ""))
+    labels = [_polls.batch_label(t, n) for t, n in sorted(keys)]
+    return labels if len(labels) > 1 else []
+
+
+def roster_emails(tabs: dict) -> dict:
+    """{batch: frozenset(emails)} from the roster workbook's tabs.
+
+    The one place a roster's mail column is read for identity outside
+    `build_batch`, and it uses the same header rule ('registered' + 'mail') so a
+    renamed column breaks both together and loudly rather than one silently.
+    Emails are normalised with `attendance_core._cell_email`, exactly as the
+    marker does when it matches Zoom attendees — so a poll respondent found here
+    is the same person the attendance marker would have found.
+    """
+    out = {}
+    for tab, rows in (tabs or {}).items():
+        code = batch_label(tab)
+        if not code or not rows:
+            continue
+        hr = _find_header_row(rows)
+        mail_col = _find_col(rows[hr], "registered", "mail")
+        if mail_col is None:
+            continue
+        out[code] = frozenset(e for r in rows[hr + 1:]
+                              if (e := _cell_email(_cell(r, mail_col))))
+    return out
 
 
 def clean_l2_label(raw) -> str:
@@ -246,8 +289,8 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         # The same topic runs across many batches, so the label is what tells two
         # otherwise identical session names apart. Batch-specific match only —
         # the date-only fallback would borrow another batch's label.
-        l2_batch = clean_l2_label(l2_labels.get((batch, mm, pod))
-                                  or l2_labels.get((batch, mm)))
+        raw_label = l2_labels.get((batch, mm, pod)) or l2_labels.get((batch, mm))
+        l2_batch = clean_l2_label(raw_label)
         # Who taught it, from L2's Mentor column. Batch-specific only, matching
         # l2_batch: a date-only fallback would credit the wrong person.
         mentor = str(mentors.get((batch, mm, pod))
@@ -258,10 +301,18 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             "date_lbl": date_label(mm) or (str(hraw).strip() if hraw else "—"),
             "topic": topic,
             "l2_batch": l2_batch,
+            # Every batch that sat in this webinar ([] when only this one did).
+            # Read from the SAME L2 cell as l2_batch, so the two cannot drift.
+            # This is what lets trainer and weekly rollups count a room once.
+            "shared_batches": shared_batches(raw_label),
             "pod": pod,
             "mentor": mentor,
             # The session's own feedback poll, joined on Webinar ID like the topic.
+            # For a shared webinar these are THIS batch's students' answers only
+            # (pipeline [5a] splits the poll by roster); `rating_shared` then
+            # carries the whole room's figures and how the split went.
             "rating": (rt := ratings.get((batch, mm, pod)) or {}).get("session"),
+            "rating_shared": rt.get("shared"),
             "rating_trainer": rt.get("trainer"),
             "rating_recommend": rt.get("recommend"),
             "rating_n": rt.get("responses", 0),

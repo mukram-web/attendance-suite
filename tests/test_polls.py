@@ -171,6 +171,180 @@ class TestParseCarriesThem(unittest.TestCase):
         self.assertIn("dist", by_wid["91695866411"])
 
 
+def wide_people(people, q_overall="What was your overall session feedback?",
+                q_trainer="How would you rate the trainer?"):
+    """Wide export with a chosen email per respondent: [(email, overall, trainer)]."""
+    out = ["Poll Report", "",
+           f"#,User Name,Email Address,Submitted Date and Time,{q_overall},{q_trainer}"]
+    for i, (email, a, b) in enumerate(people, 1):
+        out.append(f"{i},Person {i},{email},08/30/2026 20:11:04,{a},{b}")
+    return "\n".join(out)
+
+
+class TestPerRespondent(unittest.TestCase):
+    """Reading a poll per PERSON, so a shared webinar's poll can be divided
+    between the batches that sat in it."""
+
+    def test_wide_export_yields_one_row_per_respondent_with_email(self):
+        got = polls.parse_responses(wide_people([("A@X.com ", 5, 4), ("b@x.com", 3, 3)]))
+        self.assertEqual([r["email"] for r in got], ["a@x.com", "b@x.com"])
+        self.assertEqual(got[0]["scores"]["session"], [5.0])
+        self.assertEqual(got[0]["scores"]["trainer"], [4.0])
+
+    def test_indexed_long_export_groups_answers_by_person(self):
+        text = "\n".join([
+            "Poll Report", "",
+            "#,User Name,User Email,Submitted Date and Time,Question,Answer",
+            "1,A,a@x.com,08/30/2026 20:11:04,How would you rate the trainer?,5",
+            "1,A,a@x.com,08/30/2026 20:11:04,How likely would you recommend it to your friends?,4",
+            "2,B,b@x.com,08/30/2026 20:11:09,How would you rate the trainer?,2",
+        ])
+        got = polls.parse_responses(text)
+        self.assertEqual(len(got), 2)
+        a = next(r for r in got if r["email"] == "a@x.com")
+        self.assertEqual(a["scores"]["trainer"], [5.0])
+        self.assertEqual(a["scores"]["recommend"], [4.0])
+
+    def test_long_form_names_nobody(self):
+        self.assertEqual(polls.parse_responses(
+            "Question,Answer\nHow would you rate the trainer?,5"), [])
+
+    def test_aggregating_the_respondents_equals_the_plain_parse(self):
+        # One rule for the whole poll and for any slice of it.
+        for text in (wide([5, 5, 4, 1]),
+                     wide_people([("a@x.com", 5, 4), ("b@x.com", 3, 3), ("", 2, 5)])):
+            whole = polls.parse(text)
+            again = polls.aggregate_responses(polls.parse_responses(text))
+            self.assertEqual(again, whole)
+
+    def test_a_respondent_who_gave_no_valid_rating_is_not_a_respondent(self):
+        got = polls.parse_responses(wide_people([("a@x.com", "", ""), ("b@x.com", 4, 4)]))
+        self.assertEqual([r["email"] for r in got], ["b@x.com"])
+
+    def test_split_by_roster_accounts_for_everyone(self):
+        resp = polls.parse_responses(wide_people([
+            ("a@x.com", 5, 5), ("b@x.com", 4, 4),      # B35
+            ("c@x.com", 3, 3),                         # B36
+            ("d@x.com", 1, 1),                         # on BOTH rosters
+            ("", 5, 5), ("z@x.com", 2, 2),             # nobody's
+        ]))
+        parts = polls.split_by_roster(resp, {
+            "B35": {"a@x.com", "b@x.com", "d@x.com"},
+            "B36": {"c@x.com", "d@x.com"},
+            "B37": {"q@x.com"},
+        })
+        self.assertEqual(parts["B35"]["responses"], 3)
+        self.assertEqual(parts["B35"]["session"], 3.33)         # (5+4+1)/3
+        self.assertEqual(parts["B36"]["responses"], 2)
+        self.assertEqual(parts["B36"]["session"], 2.0)
+        self.assertEqual(parts["B37"]["responses"], 0)          # a real, empty slice
+        self.assertIsNone(parts["B37"]["session"])
+        self.assertEqual(parts["_unmatched"], 2)
+        self.assertEqual(parts["_multi"], 1)
+        n = sum(parts[b]["responses"] for b in ("B35", "B36", "B37"))
+        self.assertEqual(n + parts["_unmatched"] - parts["_multi"], len(resp))
+
+    def _shared(self, text):
+        rt = polls.parse_one(text.encode())
+        rt = dict(rt, _wid="9", _batches=["B35", "B36", "B37"])
+        return {("B35", "09_06", "Finance"): dict(rt),
+                ("B36", "09_06", "Finance"): dict(rt),
+                ("B37", "09_06", "Finance"): dict(rt),
+                ("B38", "09_06", ""): dict(polls.parse_one(wide([5]).encode()),
+                                          _wid="7", _batches=["B38"])}
+
+    def test_apply_roster_split_gives_each_batch_its_own_students(self):
+        text = wide_people([("a@x.com", 5, 5), ("b@x.com", 4, 4),
+                            ("c@x.com", 3, 3), ("", 1, 1)])
+        ratings = self._shared(text)
+        rosters = {"B35": {"a@x.com", "b@x.com"}, "B36": {"c@x.com"}, "B37": set()}
+        out, stats = polls.apply_roster_split(ratings, {"9": text}, rosters)
+        b35, b36, b37 = (out[(b, "09_06", "Finance")] for b in ("B35", "B36", "B37"))
+        self.assertEqual((b35["session"], b35["responses"]), (4.5, 2))
+        self.assertEqual((b36["session"], b36["responses"]), (3.0, 1))
+        self.assertEqual((b37["session"], b37["responses"]), (None, 0))
+        for part in (b35, b36, b37):
+            self.assertTrue(part["shared"]["split"])
+            self.assertEqual(part["shared"]["joint"]["responses"], 4)
+            self.assertEqual(part["shared"]["joint"]["session"], 3.25)
+            self.assertEqual(part["shared"]["unmatched"], 1)
+            self.assertEqual(part["shared"]["batches"], ["B35", "B36", "B37"])
+            self.assertEqual(part["submitted_first"], "2026-08-30T20:11:04")
+        # the single-batch entry is untouched
+        self.assertNotIn("shared", out[("B38", "09_06", "")])
+        self.assertEqual(stats["shared"], 3)
+        self.assertEqual(stats["split"], 3)
+
+    def test_apply_roster_split_keeps_the_joint_figure_when_it_cannot_split(self):
+        text = wide_people([("a@x.com", 5, 5)])
+        ratings = self._shared(text)
+        rosters = {"B35": {"a@x.com"}, "B36": set()}       # B37 has no roster tab
+        # no bytes at all
+        out, stats = polls.apply_roster_split(ratings, {}, rosters)
+        b35 = out[("B35", "09_06", "Finance")]
+        self.assertEqual(b35["session"], 5.0)
+        self.assertFalse(b35["shared"]["split"])
+        self.assertEqual(b35["shared"]["reason"], "no-bytes")
+        self.assertEqual(stats["kept"], {"no-bytes": 3})
+        # bytes present, but one batch has no roster
+        out, stats = polls.apply_roster_split(ratings, {"9": text}, rosters)
+        self.assertTrue(out[("B35", "09_06", "Finance")]["shared"]["split"])
+        self.assertEqual(out[("B37", "09_06", "Finance")]["shared"]["reason"], "no-roster")
+        # a long-form export names nobody
+        long = "Question,Answer\nHow would you rate the trainer?,5"
+        out, stats = polls.apply_roster_split(ratings, {"9": long}, rosters)
+        self.assertEqual(out[("B35", "09_06", "Finance")]["shared"]["reason"], "no-emails")
+
+    def test_an_anonymous_poll_keeps_the_joint_figure_for_every_batch(self):
+        """The real case: B35/B36/B37's Finance poll of 6 Sep 2026 was run as an
+        anonymous Zoom poll - 220 answers, 'anonymous' in every email cell.
+        Splitting it would show every batch a blank and call all 220 unmatched.
+        """
+        text = "\n".join([
+            "Poll Report", "",
+            "#,User Name,User Email,Submitted Time (America/Los_Angeles),Question,Answer",
+            "1,anonymous,anonymous,09/06/2026 01:50:08 PM,How would you rate the trainer?,5",
+            "2,anonymous,anonymous,09/06/2026 01:50:08 PM,How would you rate the trainer?,4",
+        ])
+        ratings = self._shared(text)
+        rosters = {"B35": {"a@x.com"}, "B36": {"b@x.com"}, "B37": set()}
+        out, stats = polls.apply_roster_split(ratings, {"9": text}, rosters)
+        for b in ("B35", "B36", "B37"):
+            e = out[(b, "09_06", "Finance")]
+            self.assertFalse(e["shared"]["split"])
+            self.assertEqual(e["shared"]["reason"], "no-emails")
+            self.assertEqual(e["trainer"], 4.5)         # the room's figure, kept
+        self.assertEqual(stats["split"], 0)
+        # the wide shape with blank email cells is the same fact
+        blank = wide_people([("", 5, 5), ("", 4, 4)])
+        out, _ = polls.apply_roster_split(self._shared(blank), {"9": blank}, rosters)
+        self.assertEqual(out[("B35", "09_06", "Finance")]["shared"]["reason"], "no-emails")
+
+    def test_lookup_by_session_rows_stamps_every_batch_in_the_room(self):
+        import io as _io
+        from openpyxl import Workbook
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Date", "Batch Name", "Webinar ID", "Topic Name"])
+        ws.append(["06-09-2026", "AI CAP B35 , B36 , B37 - Finance", 9, "Financial Analysis"])
+        ws.append(["06-09-2026", "AI CAP B38", 7, "Prompting"])
+        buf = _io.BytesIO()
+        wb.save(buf)
+        rows = [("poll_9_2026_09_06.csv", polls.parse_one(wide([5, 4]).encode())),
+                ("poll_7_2026_09_06.csv", polls.parse_one(wide([3]).encode()))]
+        out, by_wid = polls.lookup_by_session_rows(rows, buf.getvalue())
+        if ("B35", "09_06", "Finance") not in out:
+            self.fail("L2 fixture not joined: %r" % sorted(out))
+        for b in ("B35", "B36", "B37"):
+            e = out[(b, "09_06", "Finance")]
+            self.assertEqual(e["_batches"], ["B35", "B36", "B37"])
+            self.assertEqual(e["_wid"], "9")
+        self.assertEqual(out[("B38", "09_06", "")]["_batches"], ["B38"])
+        # each key holds its OWN dict, and by_wid (BSIAI's input) is untouched
+        self.assertIsNot(out[("B35", "09_06", "Finance")], out[("B36", "09_06", "Finance")])
+        self.assertNotIn("_batches", by_wid["9"])
+
+
 class TestSubmissionTimes(unittest.TestCase):
     """The poll marker's input: when the room actually started answering.
 

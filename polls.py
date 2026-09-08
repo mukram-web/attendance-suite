@@ -194,19 +194,29 @@ def _distribution(scores) -> dict:
     return out
 
 
-def parse(text: str) -> dict:
-    """Poll CSV -> {'session': avg|None, 'trainer': …, 'recommend': …,
-    'responses': int, 'dist': {kind: {'1'…'5': n}}, 'nps': int|None}.
+def _email(v) -> str:
+    """A respondent's email as the roster side spells it, or ''.
 
-    Averages are rounded to 1dp; `responses` is the number of people who gave at
-    least one rating. `dist` is the full 1-5 histogram per kind — the mean alone
-    cannot tell a room that was uniformly lukewarm from one that was half
-    delighted and half furious, and those need different responses.
+    The same rule as `attendance_core._cell_email` — whitespace stripped,
+    lower-cased, must contain '@' — so a poll respondent and a roster row that
+    are the same person compare equal without either side being special-cased.
     """
-    rows = list(csv.reader(io.StringIO(text)))
-    buckets: dict[str, list] = {k: [] for k in _KINDS}
-    respondents = 0
+    s = str(v or "")
+    return re.sub(r"\s", "", s).lower() if "@" in s else ""
 
+
+def _respondent_rows(rows) -> list | None:
+    """The per-PERSON readers: [(email, {kind: [scores]})], one per respondent.
+
+    Returns None when neither shape's header is present, so `parse` can fall
+    through to the long `Question, Answer` form (which names nobody and cannot
+    be read per person). Returns [] when a header was found but no valid rating
+    followed it — the caller treats that the same way.
+
+    Both readers keep every answer, not one per person: a respondent who
+    answered the same question twice in the indexed export contributes both
+    values to the histogram, exactly as the aggregate always has.
+    """
     # ── indexed long form: '#, User Name, User Email, Submitted, Question, Answer'
     # one ROW per answer. Zoom's "Poll Report" export (as opposed to "Overview")
     # uses this, and it defeats both other readers: the header looks wide, but
@@ -218,52 +228,54 @@ def parse(text: str) -> dict:
     if hdr_i is not None:
         hdr = [c.strip().lower() for c in rows[hdr_i]]
         qi, ai = hdr.index("question"), hdr.index("answer")
-        people = set()
         ui = next((i for i, c in enumerate(hdr) if "email" in c), None)
+        people: dict = {}
         for r in rows[hdr_i + 1:]:
             if len(r) <= max(qi, ai) or not r[0].strip().isdigit():
                 continue
             kind = _classify(r[qi])
             if kind and (v := _score(r[ai])) is not None:
-                buckets[kind].append(v)
-                people.add(r[ui].strip().lower() if ui is not None and ui < len(r)
-                           else r[0])
-        respondents = len(people)
+                # identity: the email column when the export has one, else the
+                # row's own '#', which the indexed form repeats per person
+                who = (r[ui].strip().lower() if ui is not None and ui < len(r)
+                       else r[0])
+                p = people.setdefault(who, {k: [] for k in _KINDS})
+                p[kind].append(v)
+        if people:
+            return [(_email(who), sc) for who, sc in people.items()]
 
     # ── wide form ────────────────────────────────────────────────────────────
-    if not any(buckets.values()):
-        hdr_i = next((i for i, r in enumerate(rows)
-                      if r and r[0].strip() == "#" and any("user name" in c.strip().lower()
-                                                           for c in r)), None)
-    else:
-        hdr_i = None
-    if hdr_i is not None:
-        hdr = rows[hdr_i]
-        cols = {i: k for i, c in enumerate(hdr)
-                if (k := _classify(c)) and i >= 3}
-        for r in rows[hdr_i + 1:]:
-            if not r or not r[0].strip().isdigit():
-                continue
-            got = False
-            for i, kind in cols.items():
-                if i < len(r) and (v := _score(r[i])) is not None:
-                    buckets[kind].append(v)
-                    got = True
-            respondents += bool(got)
+    hdr_i = next((i for i, r in enumerate(rows)
+                  if r and r[0].strip() == "#" and any("user name" in c.strip().lower()
+                                                       for c in r)), None)
+    if hdr_i is None:
+        return None
+    hdr = rows[hdr_i]
+    cols = {i: k for i, c in enumerate(hdr)
+            if (k := _classify(c)) and i >= 3}
+    ei = next((i for i, c in enumerate(hdr) if "email" in str(c).lower()), None)
+    out = []
+    for r in rows[hdr_i + 1:]:
+        if not r or not r[0].strip().isdigit():
+            continue
+        sc: dict = {k: [] for k in _KINDS}
+        got = False
+        for i, kind in cols.items():
+            if i < len(r) and (v := _score(r[i])) is not None:
+                sc[kind].append(v)
+                got = True
+        if got:
+            out.append((_email(r[ei]) if ei is not None and ei < len(r) else "", sc))
+    return out
 
-    # ── long form: Question, Answer ──────────────────────────────────────────
-    if not any(buckets.values()):
-        qi = next((i for i, r in enumerate(rows)
-                   if len(r) >= 2 and r[0].strip().lower() == "question"), None)
-        if qi is not None:
-            for r in rows[qi + 1:]:
-                if len(r) < 2:
-                    continue
-                kind = _classify(r[0])
-                if kind and (v := _score(r[1])) is not None:
-                    buckets[kind].append(v)
-                    respondents += 1
 
+def _aggregate(buckets: dict, respondents: int) -> dict:
+    """{kind: [scores]} + a headcount -> the ratings dict every caller reads.
+
+    One function for the whole poll AND for any subset of its respondents, so a
+    batch's own slice of a shared poll is rounded, binned and NPS-scored by
+    exactly the rule the joint figure was.
+    """
     out = {k: (round(sum(v) / len(v), 2) if v else None) for k, v in buckets.items()}
     out["responses"] = respondents
     # The raw scores are in hand at this point whichever export shape was read,
@@ -272,6 +284,102 @@ def parse(text: str) -> dict:
     # store, so no new plumbing is needed downstream.
     out["dist"] = {k: _distribution(v) for k, v in buckets.items()}
     out["nps"] = nps(buckets["recommend"])
+    return out
+
+
+def _buckets_of(responses) -> dict:
+    buckets: dict[str, list] = {k: [] for k in _KINDS}
+    for _who, sc in responses or ():
+        for k in _KINDS:
+            buckets[k].extend(sc.get(k) or ())
+    return buckets
+
+
+def parse(text: str) -> dict:
+    """Poll CSV -> {'session': avg|None, 'trainer': …, 'recommend': …,
+    'responses': int, 'dist': {kind: {'1'…'5': n}}, 'nps': int|None}.
+
+    Averages are rounded to 1dp; `responses` is the number of people who gave at
+    least one rating. `dist` is the full 1-5 histogram per kind — the mean alone
+    cannot tell a room that was uniformly lukewarm from one that was half
+    delighted and half furious, and those need different responses.
+    """
+    rows = list(csv.reader(io.StringIO(text)))
+    resp = _respondent_rows(rows)
+    if resp:
+        return _aggregate(_buckets_of(resp), len(resp))
+
+    # ── long form: Question, Answer ──────────────────────────────────────────
+    buckets: dict[str, list] = {k: [] for k in _KINDS}
+    respondents = 0
+    qi = next((i for i, r in enumerate(rows)
+               if len(r) >= 2 and r[0].strip().lower() == "question"), None)
+    if qi is not None:
+        for r in rows[qi + 1:]:
+            if len(r) < 2:
+                continue
+            kind = _classify(r[0])
+            if kind and (v := _score(r[1])) is not None:
+                buckets[kind].append(v)
+                respondents += 1
+    return _aggregate(buckets, respondents)
+
+
+def parse_responses(text: str) -> list:
+    """Poll CSV -> [{'email': str, 'scores': {kind: [1-5, …]}}], one per person.
+
+    Only the two export shapes that name their respondents can be read this
+    way; the long `Question, Answer` form yields []. `email` is '' when the
+    export has no email column or the cell is blank. This is what lets a poll
+    for a webinar SEVERAL batches sat in be split back into each batch's own
+    students (see `split_by_roster`) — the aggregate alone cannot be.
+
+    Never memoised (derived_cache refuses it, rightly): it is PII, and the
+    split depends on the roster, which is not a fact about this file.
+    """
+    resp = _respondent_rows(list(csv.reader(io.StringIO(text or ""))))
+    return [{"email": e, "scores": sc} for e, sc in (resp or ())]
+
+
+def aggregate_responses(responses) -> dict:
+    """The output of `parse_responses` (or any subset of it) -> a ratings dict.
+
+    Identity: `aggregate_responses(parse_responses(t))` equals `parse(t)` for
+    the wide and indexed shapes, key for key.
+    """
+    pairs = [(r.get("email", ""), r.get("scores") or {}) for r in (responses or ())]
+    return _aggregate(_buckets_of(pairs), len(pairs))
+
+
+def split_by_roster(responses, rosters: dict) -> dict:
+    """Divide one poll's respondents between the batches whose rosters hold them.
+
+    `rosters` is {batch_label: set-of-emails}. Returns one ratings dict per
+    batch (aggregated over ITS students only — an empty slice is a real result:
+    responses 0, every average None) plus two counts that account for everyone
+    who did not land in exactly one batch:
+
+        _unmatched  respondents with no email, or an email on none of the rosters
+        _multi      respondents on MORE than one roster — counted in each, because
+                    a student enrolled twice did attend for both
+
+    So `sum(part responses) + _unmatched - _multi == len(responses)`, which is
+    the check the tests pin: nobody is dropped silently and nobody is invented.
+    """
+    parts = {b: [] for b in (rosters or {})}
+    unmatched = multi = 0
+    for r in responses or ():
+        e = (r.get("email") or "").strip().lower()
+        hits = [b for b, s in (rosters or {}).items() if e and e in s]
+        if not hits:
+            unmatched += 1
+        elif len(hits) > 1:
+            multi += 1
+        for b in hits:
+            parts[b].append(r)
+    out = {b: aggregate_responses(v) for b, v in parts.items()}
+    out["_unmatched"] = unmatched
+    out["_multi"] = multi
     return out
 
 
@@ -396,10 +504,103 @@ def lookup_by_session_rows(rows, l2_bytes) -> tuple[dict, dict]:
         raw = (wid_labels.get(wid) or "").strip()
         pod = _pods.from_l2_label(raw) if raw else None
         pod = "" if pod in (None, _pods.WHOLE_BATCH) else pod
-        for track, num in keys:
-            label = f"B{num}" if track == "CAP" else f"{track} B{num}"
+        # Every batch L2 says sat in this webinar, in one fixed order. Each
+        # batch's entry is its OWN dict carrying `_wid` and `_batches`, so
+        # `apply_roster_split` can later find the poll's bytes and know which
+        # rosters to divide it between. The shared object used to be stored
+        # under every key, which is how one poll became three identical ratings.
+        labels = [batch_label(t, n) for t, n in sorted(keys)]
+        for label in labels:
             prev = out.get((label, mm, pod))
             if prev and prev["responses"] >= rating["responses"]:
                 continue
-            out[(label, mm, pod)] = rating
+            out[(label, mm, pod)] = dict(rating, _wid=wid, _batches=labels)
     return out, by_wid
+
+
+def batch_label(track, num) -> str:
+    """An L2 (track, number) key as the dashboard names the batch: 'B35',
+    'BSIAI B3'. One spelling, shared with data.py's `shared_batches`."""
+    return f"B{num}" if track == "CAP" else f"{track} B{num}"
+
+
+# The fields that describe the poll as a whole and survive onto a batch row's
+# `rating_shared.joint`. Aggregates only — never a respondent.
+_JOINT_KEYS = ("session", "trainer", "recommend", "responses", "dist", "nps")
+
+
+def apply_roster_split(ratings: dict, texts_by_wid: dict, rosters: dict) -> tuple:
+    """Give each batch in a SHARED webinar its own students' rating.
+
+    `ratings` is `lookup_by_session_rows`' first result; `texts_by_wid` maps a
+    webinar id to its poll export's text; `rosters` is {batch_label: emails}.
+    Returns (new ratings dict, stats). Pure and never raises for one bad entry:
+    a poll this cannot split keeps the joint figure, labelled as such.
+
+    An entry whose `_batches` names one batch is untouched. For every other
+    entry the batch's values are REPLACED by the aggregate over the respondents
+    found on its roster, and a `shared` block is attached:
+
+        batches    every batch L2 puts in the webinar
+        joint      the whole poll's figures (what the trainer is judged on)
+        split      True when the division happened
+        unmatched  respondents on none of the sharing rosters (excluded from
+                   every batch's own figure; still inside `joint`)
+        multi      respondents on more than one roster (counted in each)
+        reason     when split is False: 'no-bytes' (poll not fetched),
+                   'no-emails' (a long-form export, or an ANONYMOUS poll -
+                   nobody in it carries an email), 'no-roster' (this batch has
+                   no roster tab), 'error'
+
+    The split is computed once per webinar and reused for each of its batches,
+    so three batches cost one parse.
+    """
+    stats = {"shared": 0, "split": 0, "kept": {}}
+    out: dict = {}
+    per_wid: dict = {}
+    for key, rt in (ratings or {}).items():
+        batches = list(rt.get("_batches") or ())
+        if len(batches) < 2:
+            out[key] = rt
+            continue
+        stats["shared"] += 1
+        label = key[0]
+        shared = {"batches": batches,
+                  "joint": {k: rt.get(k) for k in _JOINT_KEYS},
+                  "split": False}
+        reason = "error"
+        try:
+            wid = rt.get("_wid")
+            text = (texts_by_wid or {}).get(wid)
+            if text is None:
+                reason = "no-bytes"
+            elif label not in (rosters or {}):
+                reason = "no-roster"
+            else:
+                if wid not in per_wid:
+                    resp = parse_responses(text)
+                    # A poll run ANONYMOUSLY exports 'anonymous' (or nothing) in
+                    # every email cell - B35/B36/B37's Finance poll of 6 Sep, 220
+                    # answers, not one identity. Splitting it would hand every
+                    # batch a blank and call all 220 "unmatched"; the truthful
+                    # result is the joint figure, labelled as such.
+                    per_wid[wid] = (split_by_roster(
+                        resp, {b: rosters[b] for b in batches if b in rosters})
+                        if any(r.get("email") for r in resp) else None)
+                parts = per_wid[wid]
+                if parts is None:
+                    reason = "no-emails"
+                else:
+                    new = dict(rt)
+                    new.update(parts[label])
+                    new["shared"] = dict(shared, split=True,
+                                         unmatched=parts["_unmatched"],
+                                         multi=parts["_multi"])
+                    out[key] = new
+                    stats["split"] += 1
+                    continue
+        except Exception:
+            reason = "error"
+        out[key] = dict(rt, shared=dict(shared, reason=reason))
+        stats["kept"][reason] = stats["kept"].get(reason, 0) + 1
+    return out, stats
