@@ -39,17 +39,65 @@ def batch_key(name: str) -> int:
     return int(m) if m else 0
 
 
-def _find_header_row(ws):
+# How wide these readers look. Kept as named constants because they are a real
+# limit, not a tuning knob: a session column beyond _MAX_SCAN_COL is invisible to
+# compute() and roster_grid(), so it silently stops being counted. The widest
+# roster tab measured 2026-09-08 was 43 columns (AI CAP B17), but pod-era batches
+# gain one column per pod per week, so the headroom is finite — _wide_tab_warning
+# below says so before it bites rather than after.
+_MAX_SCAN_COL = 80
+_MAX_HEADER_COL = 20
+
+
+class _Tab:
+    """One sheet, read the same way whether it came from a workbook or from rows
+    already in memory.
+
+    build_store already materialises the whole marked workbook into `tabs` to
+    build DATA, and then used to hand the raw bytes to compute() and
+    roster_grid(), each of which re-streamed the same 80k rows. Measured on the
+    real 7.9 MB marked workbook: 46.7s to materialise, then 43.7s + 46.8s to do
+    it twice more. This class lets both readers take the rows that are already
+    in hand.
+
+    The slicing mirrors openpyxl's max_col arguments EXACTLY. That matters: the
+    bytes path pads short rows out to max_col with None, the rows path does not,
+    and the session-column loop runs to len(row1). Padding-only differences are
+    invisible (the loop skips empty labels) but the widths must not diverge in
+    the other direction.
+    """
+
+    __slots__ = ("_ws", "_rows")
+
+    def __init__(self, ws=None, rows=None):
+        self._ws, self._rows = ws, rows
+
+    def head(self, n: int, width: int) -> list:
+        """First `n` rows, `width` columns wide."""
+        if self._rows is not None:
+            return [tuple(r[:width]) for r in self._rows[:n]]
+        return list(self._ws.iter_rows(min_row=1, max_row=n, max_col=width,
+                                       values_only=True))
+
+    def body(self, first_row: int, width: int) -> list:
+        """Every row from `first_row` (1-based) down, `width` columns wide."""
+        if self._rows is not None:
+            return [tuple(r[:width]) for r in self._rows[first_row - 1:]]
+        return list(self._ws.iter_rows(min_row=first_row, max_col=width,
+                                       values_only=True))
+
+
+def _find_header_row(tab):
     """Return (row_number, lowercased_values) for the row that holds field names.
 
     An EMPTY sheet yields no rows at all — people add scratch/pivot tabs to the
     roster (e.g. "Pivot Table 2"), and an unguarded next() raises StopIteration
     that kills the whole build. Missing rows just mean "not a roster sheet"."""
+    top = tab.head(3, _MAX_HEADER_COL)
     for r in range(1, 4):
-        row = next(ws.iter_rows(min_row=r, max_row=r, max_col=20), None)
-        if row is None:
+        if r > len(top):
             break
-        vals = [str(c.value).strip().lower() if c.value is not None else "" for c in row]
+        vals = [str(v).strip().lower() if v is not None else "" for v in top[r - 1]]
         if "registered number" in vals or "payment" in vals:
             return r, vals
     return 1, []
@@ -69,20 +117,41 @@ def _looks_like_roster(sheet_name: str) -> bool:
     return True
 
 
-def compute(roster_bytes: bytes) -> pd.DataFrame:
-    wb = openpyxl.load_workbook(io.BytesIO(roster_bytes), read_only=True, data_only=True)
+def _wide_tab_warning(sheet: str, width: int) -> str | None:
+    """A tab approaching _MAX_SCAN_COL is about to lose columns silently."""
+    if width >= _MAX_SCAN_COL - 8:
+        return (f"{sheet}: {width} columns, at or near the {_MAX_SCAN_COL}-column "
+                "read limit — session columns beyond it stop being counted")
+    return None
+
+
+def compute(roster_bytes: bytes, tabs: dict | None = None) -> pd.DataFrame:
+    """Per batch × session attendance.
+
+    `tabs` is {sheet name: [row tuples]} as build_store already materialises it.
+    Pass it to skip re-streaming the workbook — the numbers are identical either
+    way (pinned by tests/test_dashboard_core_tabs.py); it is the same rows read
+    from memory instead of from the zip a second time.
+    """
+    wb = None
+    if tabs is None:
+        wb = openpyxl.load_workbook(io.BytesIO(roster_bytes), read_only=True,
+                                    data_only=True)
+        names = wb.sheetnames
+    else:
+        names = list(tabs)
     records = []
 
-    for sh in wb.sheetnames:
+    for sh in names:
         if not _looks_like_roster(sh):
             continue
-        ws = wb[sh]
+        tab = _Tab(rows=tabs[sh]) if tabs is not None else _Tab(ws=wb[sh])
 
-        top = list(ws.iter_rows(min_row=1, max_row=2, max_col=80, values_only=True))
+        top = tab.head(2, _MAX_SCAN_COL)
         row1 = top[0] if len(top) > 0 else ()
         row2 = top[1] if len(top) > 1 else ()
 
-        H, hvals = _find_header_row(ws)
+        H, hvals = _find_header_row(tab)
         pay_i = _col_idx(hvals, "payment")
         close_i = _col_idx(hvals, "closing type")
         if close_i is None:
@@ -104,7 +173,7 @@ def compute(roster_bytes: bytes) -> pd.DataFrame:
             continue
 
         last_col = max([c for c, _, _ in sess_cols] + [pay_i or 0, close_i]) + 1
-        data = list(ws.iter_rows(min_row=H + 1, max_col=last_col, values_only=True))
+        data = tab.body(H + 1, last_col)
 
         active = 0
         total = 0
@@ -144,6 +213,8 @@ def compute(roster_bytes: bytes) -> pd.DataFrame:
                 )
             )
 
+    if wb is not None:
+        wb.close()
     df = pd.DataFrame.from_records(records)
     if not df.empty:
         df = df.sort_values(by=["Batch", "SessionIdx"], key=lambda s: s.map(batch_key) if s.name == "Batch" else s)
@@ -166,20 +237,28 @@ def batch_sheet_map(roster_bytes: bytes) -> dict:
     return out
 
 
-def roster_grid(roster_bytes: bytes, sheet_name: str) -> pd.DataFrame:
+def roster_grid(roster_bytes: bytes, sheet_name: str,
+                tabs: dict | None = None) -> pd.DataFrame:
     """Per-student attendance grid for ONE batch sheet — the spreadsheet view.
 
     Columns: Email, Phone, Active, Present (count), then one column per session
     labelled by its date, holding 'Present' / 'Absent' / '' exactly as marked.
     Contact columns are raw here; the UI masks them for privacy.
-    """
-    wb = openpyxl.load_workbook(io.BytesIO(roster_bytes), read_only=True, data_only=True)
-    ws = wb[sheet_name]
 
-    top = list(ws.iter_rows(min_row=1, max_row=2, max_col=80, values_only=True))
+    `tabs` works exactly as it does in compute() — see there.
+    """
+    wb = None
+    if tabs is None:
+        wb = openpyxl.load_workbook(io.BytesIO(roster_bytes), read_only=True,
+                                    data_only=True)
+        tab = _Tab(ws=wb[sheet_name])
+    else:
+        tab = _Tab(rows=tabs[sheet_name])
+
+    top = tab.head(2, _MAX_SCAN_COL)
     row1 = top[0] if len(top) > 0 else ()
 
-    H, hvals = _find_header_row(ws)
+    H, hvals = _find_header_row(tab)
     pay_i = _col_idx(hvals, "payment")
     close_i = _col_idx(hvals, "closing type")
     if close_i is None:
@@ -195,8 +274,9 @@ def roster_grid(roster_bytes: bytes, sheet_name: str) -> pd.DataFrame:
         sess_cols.append((c, str(label).strip()))
 
     last_col = max([c for c, _ in sess_cols] + [pay_i or 0, close_i, mail_i or 0, num_i or 0]) + 1
-    data = list(ws.iter_rows(min_row=H + 1, max_col=last_col, values_only=True))
-    wb.close()
+    data = tab.body(H + 1, last_col)
+    if wb is not None:
+        wb.close()
 
     records = []
     for row in data:

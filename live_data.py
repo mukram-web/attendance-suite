@@ -29,6 +29,7 @@ Only the `google-*` packages in requirements.txt are needed for this; they are
 imported lazily so upload-only use never has to install them locally.
 """
 from __future__ import annotations
+import hashlib
 import io
 import os
 import re
@@ -36,8 +37,14 @@ import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
-# Attendee files on the Drive never change once uploaded, so their bytes are
-# cached on disk by file id — restarts skip re-downloading hundreds of CSVs.
+# Zoom export bytes are cached on disk so restarts skip re-downloading hundreds
+# of CSVs. This used to say "attendee files never change once uploaded" and key
+# purely on the file id — a claim, not a check, and false: Drive's "Manage
+# versions → Upload new version" keeps the id, and that is the documented remedy
+# for a bad Zoom export (CLAUDE.md §7b.1). The listing paths now key on
+# (id, md5-or-modifiedTime) via _sig_path, so a replaced file misses the cache.
+# download_cached() below still keys on the bare id; its caller (day1) re-lists
+# every run, so a stale hit there costs one analysis, not a persisted fact.
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "attendee")
 _SHEET_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "sheets")
 
@@ -640,31 +647,33 @@ def fetch_track_attendees(svc, folder_id, track: str, max_workers: int = 8):
     return out, info
 
 
-def scan_all_attendees(svc, folder_id, consume, max_workers: int = 8):
-    """Download EVERY attendee report and hand each to `consume(name, bytes)`.
+# Fields every whole-drive listing asks for. md5Checksum and modifiedTime are
+# what let a cross-run cache tell a REPLACED file from an unchanged one — Drive's
+# "Manage versions → Upload new version" keeps the id, and that is the documented
+# remedy for a bad Zoom export. They are free: the listing already runs, and
+# these are two more fields on a response we already page through.
+_LIST_FIELDS = "nextPageToken, files(id, name, md5Checksum, modifiedTime)"
 
-    Unlike `fetch_new_attendees`, this covers the whole history — the duration
-    and peak columns need the report for every session, not just the unmarked
-    ones. Measured 2026-09-06: 1,284 files, 246 MB, and the pipeline already
-    downloads at ~7.9 files/sec, so about 2.7 minutes on top of a 7.5-minute
-    run. Well inside the workflow's 30-minute timeout.
+_ATTENDEE_Q = "name contains 'attendee_' and trashed = false"
+# both conventions — see polls.name_key
+_POLL_Q = ("(name contains 'poll_' or name contains 'Poll Report') "
+           "and trashed = false")
 
-    **Nothing is accumulated.** `consume` is called with each file's bytes and
-    the bytes are dropped immediately, because holding 246 MB is exactly how the
-    marking used to blow up on a small instance. Callers keep the small
-    aggregate, never the corpus.
 
-    Failures are counted, never raised: a missing report should cost that
-    session its duration, not the whole refresh.
+def _list_by_query(svc, folder_id, q) -> list[dict]:
+    """Every matching file across every configured drive.
+
+    THIS IS THE CHANGE DETECTOR. It is deliberately separate from fetching and
+    is never skipped or cached: a file added, deleted, moved or replaced has to
+    be seen even when nothing needs downloading. Only the download and the parse
+    are ever avoided downstream.
     """
     files, seen = [], set()
     for did in _folder_ids(folder_id):
         token = None
         while True:
-            kw = dict(q="name contains 'attendee_' and trashed = false",
-                      fields="nextPageToken, files(id, name)", pageSize=1000,
-                      pageToken=token, includeItemsFromAllDrives=True,
-                      supportsAllDrives=True)
+            kw = dict(q=q, fields=_LIST_FIELDS, pageSize=1000, pageToken=token,
+                      includeItemsFromAllDrives=True, supportsAllDrives=True)
             if str(did).startswith("0A"):
                 kw.update(corpora="drive", driveId=did)
             resp = svc.files().list(**kw).execute()
@@ -675,8 +684,51 @@ def scan_all_attendees(svc, folder_id, consume, max_workers: int = 8):
             token = resp.get("nextPageToken")
             if not token:
                 break
+    return files
 
-    failed = 0
+
+def list_attendees(svc, folder_id) -> list[dict]:
+    """Every attendee report on every configured drive (listing only)."""
+    return _list_by_query(svc, folder_id, _ATTENDEE_Q)
+
+
+def list_polls(svc, folder_id) -> list[dict]:
+    """Every poll export on every configured drive (listing only)."""
+    return _list_by_query(svc, folder_id, _POLL_Q)
+
+
+def _sig_path(f: dict) -> tuple[str, bool]:
+    """(disk cache path, verified) for one listing row.
+
+    SIGNATURE-ADDRESSED. The byte cache used to key on the bare file id, on the
+    strength of a comment saying attendee files never change once uploaded —
+    a claim, not a check, and falsified by upload_to_folder in this very module,
+    which does files().update(fileId=…) every Monday. A file replaced in place
+    therefore kept serving its OLD bytes from disk forever, and no md5 was ever
+    compared. Including the signature in the path means a replaced file misses
+    the disk cache exactly as it should.
+
+    `verified` is False when Drive reports neither md5 nor modifiedTime: the
+    bytes may be current but nothing proves it, so they must not be memoised.
+    """
+    sig = (f.get("md5Checksum") or f.get("modifiedTime") or "").strip()
+    if not sig:
+        return os.path.join(_CACHE_DIR, f["id"]), False
+    short = hashlib.sha1(sig.encode("utf-8", "replace")).hexdigest()[:10]
+    return os.path.join(_CACHE_DIR, f"{f['id']}.{short}"), True
+
+
+def fetch_stream(svc, files, consume, max_workers: int = 8) -> dict:
+    """Download each listed file and hand `consume(f, bytes, verified)` its bytes.
+
+    **Nothing is accumulated.** The bytes are dropped straight after `consume`
+    returns, because holding 246 MB is exactly how the marking used to blow up
+    on a small instance. Callers keep the small aggregate, never the corpus.
+
+    Failures are counted, never raised: a missing report should cost that
+    session its duration, not the whole refresh.
+    """
+    done = failed = 0
     if not files:
         return {"files": 0, "failed": 0}
     try:
@@ -685,10 +737,10 @@ def scan_all_attendees(svc, folder_id, consume, max_workers: int = 8):
         pass
 
     def _dl(f):
-        cpath = os.path.join(_CACHE_DIR, f["id"])
+        cpath, verified = _sig_path(f)
         try:
             with open(cpath, "rb") as fh:
-                return f["name"], fh.read(), None
+                return f, fh.read(), verified, None
         except OSError:
             pass
         try:
@@ -700,18 +752,17 @@ def scan_all_attendees(svc, folder_id, consume, max_workers: int = 8):
                 os.replace(tmp, cpath)
             except OSError:
                 pass
-            return f["name"], data, None
+            return f, data, verified, None
         except Exception as e:
-            return f["name"], None, str(e)
+            return f, None, verified, str(e)
 
-    done = 0
     with ThreadPoolExecutor(max_workers=min(max_workers, len(files))) as ex:
-        for name, data, err in ex.map(_dl, files):
+        for f, data, verified, err in ex.map(_dl, files):
             if data is None:
                 failed += 1
                 continue
             try:
-                consume(name, data)
+                consume(f, data, verified)
             except Exception:
                 failed += 1
             finally:
@@ -720,69 +771,32 @@ def scan_all_attendees(svc, folder_id, consume, max_workers: int = 8):
     return {"files": done, "failed": failed}
 
 
+def scan_all_attendees(svc, folder_id, consume, max_workers: int = 8):
+    """Download EVERY attendee report and hand each to `consume(name, bytes)`.
+
+    Kept for callers that want the whole corpus with no cache in the way. The
+    pipeline uses list_attendees + fetch_stream directly so it can consult the
+    derived-facts memo per file; this wrapper is the un-memoised equivalent.
+    """
+    files = list_attendees(svc, folder_id)
+    return fetch_stream(svc, files,
+                        lambda f, data, _v: consume(f["name"], data),
+                        max_workers=max_workers)
+
+
 def fetch_polls(svc, folder_id, max_workers: int = 8):
     """Every `poll_<webinarid>_<date>.csv` across the configured drives.
 
-    One name query per drive rather than a walk - there are 1,100+ of them - and
-    the same disk cache the attendee reports use, so a re-run costs nothing.
-    Failures are counted, never raised: a missing poll should cost that session
-    its rating, not the whole refresh.
+    Returns ([(name, bytes)], info). As with scan_all_attendees, the pipeline
+    now lists and fetches separately; this stays for the un-memoised path.
     """
-    files, seen = [], set()
-    for did in _folder_ids(folder_id):
-        token = None
-        while True:
-            # both conventions - see polls.name_key
-            kw = dict(q=("(name contains 'poll_' or name contains 'Poll Report') "
-                         "and trashed = false"),
-                      fields="nextPageToken, files(id, name)", pageSize=1000,
-                      pageToken=token, includeItemsFromAllDrives=True,
-                      supportsAllDrives=True)
-            if str(did).startswith("0A"):
-                kw.update(corpora="drive", driveId=did)
-            resp = svc.files().list(**kw).execute()
-            for f in resp.get("files", []):
-                if f["id"] not in seen:
-                    seen.add(f["id"])
-                    files.append(f)
-            token = resp.get("nextPageToken")
-            if not token:
-                break
-
-    out, failed = [], 0
-    if files:
-        try:
-            os.makedirs(_CACHE_DIR, exist_ok=True)
-        except OSError:
-            pass
-
-        def _dl(f):
-            cpath = os.path.join(_CACHE_DIR, f["id"])
-            try:
-                with open(cpath, "rb") as fh:
-                    return f["name"], fh.read(), None
-            except OSError:
-                pass
-            try:
-                data = _download_any(_thread_drive(), f["id"])
-                try:
-                    tmp = cpath + ".tmp"
-                    with open(tmp, "wb") as fh:
-                        fh.write(data)
-                    os.replace(tmp, cpath)
-                except OSError:
-                    pass
-                return f["name"], data, None
-            except Exception as e:
-                return f["name"], None, str(e)
-
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(files))) as ex:
-            for name, data, err in ex.map(_dl, files):
-                if data is None:
-                    failed += 1
-                    continue
-                out.append((name, data))
-    return out, {"found": len(files), "files": len(out), "failed": failed}
+    files = list_polls(svc, folder_id)
+    out = []
+    info = fetch_stream(svc, files,
+                        lambda f, data, _v: out.append((f["name"], data)),
+                        max_workers=max_workers)
+    return out, {"found": len(files), "files": len(out),
+                 "failed": info["failed"]}
 
 
 def load_live():

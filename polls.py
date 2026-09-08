@@ -292,34 +292,51 @@ def name_key(name) -> tuple[str, str] | None:
     return m.group(1), f"{int(m.group(3)):02d}_{int(m.group(4)):02d}"
 
 
-def parse_files(poll_files) -> dict:
-    """[(name, bytes), …] -> {webinar_id: ratings}.
+def parse_one(blob) -> dict | None:
+    """ONE poll export's bytes -> its ratings dict, or None if it has none.
+
+    Pure in this file's bytes: no roster, no L2, no other file. That is what
+    makes it safe to memoise (see derived_cache.py) — and note it deliberately
+    returns nothing name-derived, because the webinar id and date come from the
+    FILENAME and must be re-read from the live listing every run.
+    """
+    text = (blob.decode("utf-8-sig", errors="replace")
+            if isinstance(blob, bytes) else blob)
+    try:
+        got = parse(text)
+    except Exception:
+        return None
+    if not any(got[k] is not None for k in _KINDS):
+        return None
+    # When the room started answering. Rides the same payload as the
+    # ratings, so it reaches a session without any new plumbing.
+    try:
+        ts = submission_times(text)
+        got["submitted_first"] = ts[0].isoformat() if ts else None
+    except Exception:
+        got["submitted_first"] = None
+    return got
+
+
+def dedupe_rows(rows) -> dict:
+    """[(name, ratings), …] -> {webinar_id: ratings}.
 
     Duplicated exports of one webinar are collapsed by keeping the copy with the
     most responses - the same rule the attendee reports use, and for the same
     reason: the drives hold overlapping copies that differ by a row or two.
+
+    The tie-break is `>=` on the INCUMBENT, so an exact tie keeps the copy seen
+    first and the result depends on the order `rows` arrives in. Callers must
+    therefore pass rows in listing order whether each one was freshly parsed or
+    served from a memo — mixing the two orders would silently pick a different
+    copy from one week to the next.
     """
     best: dict[str, dict] = {}
-    for name, blob in poll_files or ():
+    for name, got in rows or ():
         key = name_key(name)
-        if not key:
+        if not key or not got:
             continue
         wid = key[0]
-        text = (blob.decode("utf-8-sig", errors="replace")
-                if isinstance(blob, bytes) else blob)
-        try:
-            got = parse(text)
-        except Exception:
-            continue
-        if not any(got[k] is not None for k in _KINDS):
-            continue
-        # When the room started answering. Rides the same payload as the
-        # ratings, so it reaches a session without any new plumbing.
-        try:
-            ts = submission_times(text)
-            got["submitted_first"] = ts[0].isoformat() if ts else None
-        except Exception:
-            got["submitted_first"] = None
         prev = best.get(wid)
         if prev and prev["responses"] >= got["responses"]:
             continue
@@ -327,24 +344,45 @@ def parse_files(poll_files) -> dict:
     return best
 
 
+def parse_files(poll_files) -> dict:
+    """[(name, bytes), …] -> {webinar_id: ratings}."""
+    return dedupe_rows([(name, parse_one(blob))
+                        for name, blob in (poll_files or ())])
+
+
 def lookup_by_session(poll_files, l2_bytes) -> tuple[dict, dict]:
+    """[(name, bytes)] -> ({(batch, mm_dd, pod): ratings}, {webinar_id: ratings})."""
+    return lookup_by_session_rows(
+        [(name, parse_one(blob)) for name, blob in (poll_files or ())], l2_bytes)
+
+
+def lookup_by_session_rows(rows, l2_bytes) -> tuple[dict, dict]:
     """-> ({(batch, mm_dd, pod): ratings}, {webinar_id: ratings}).
+
+    Takes rows that are ALREADY parsed — [(name, ratings)] — so a caller can mix
+    freshly parsed files with memoised facts (derived_cache.py) and get exactly
+    the same answer, as long as it keeps them in listing order.
 
     Keyed exactly like the topic lookup, so a dashboard session finds its own
     poll, and by webinar id too for callers that already work that way (BSIAI).
     The join is Webinar ID - the same key the marker and the topic lookup use -
     so a rating can never drift onto the wrong session.
+
+    Note the (wid, mm_dd) pair is read from the NAME on every call, never from
+    the ratings dict. That is deliberate: a mis-dated export renamed on Drive
+    must move to its corrected date immediately, even though its bytes — and so
+    any memoised fact about them — are unchanged.
     """
     import attendance_core as ac
     import pods as _pods
 
-    by_wid = parse_files(poll_files)
+    by_wid = dedupe_rows(rows)
     if not by_wid or not l2_bytes:
         return {}, by_wid
 
     # webinar -> mm_dd, in one pass over the filenames
     mm_of: dict[str, str] = {}
-    for name, _ in poll_files or ():
+    for name, _ in rows or ():
         if (k := name_key(name)):
             mm_of.setdefault(k[0], k[1])
 

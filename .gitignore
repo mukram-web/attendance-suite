@@ -18,6 +18,13 @@ credentials*.json
 # ── Local speed cache (attendee bytes + marked-roster pickles) ─
 .cache/
 
+# ── Derived-facts memo (aggregates only, but it belongs on the Drive) ─
+# It lives in the private store folder, never here. These lines exist so a
+# stray local copy cannot be committed: *.json already covers the uncompressed
+# form, nothing covered *.gz.
+*.gz
+derived_facts*
+
 # ── Generated website: /roster holds student contact details, never commit ─
 site/
 .vercel/

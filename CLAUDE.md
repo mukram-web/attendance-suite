@@ -47,7 +47,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 
 | File | Role |
 |---|---|
-| `pipeline.py` | the weekly job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--no-upload`, `--no-site`, `--allow-partial`, `--mode`. |
+| `pipeline.py` | the weekly job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--no-upload`, `--no-site`, `--allow-partial`, `--mode`, `--no-cache`, `--cache-file` (§4f). |
 | `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), Roster, Day-1 analysis, Forecast, BSIAI). Reads the store; does not compute. |
 | `attendance_core.py` | the marker engine: parses Zoom reports + L2, writes Present/Absent into the workbook. |
 | `dashboard_core.py` | `compute()` (per batch × session) and `roster_grid()` (per-student grid). |
@@ -56,6 +56,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `day1_analysis.py` | day-one / latest-session cut of payment and close type for the newest `DAY1_BATCHES` (4) batches. |
 | `forecast.py` | predicted attendance for sessions that have not run yet: decay curve x batch offset x pod multiplier. Pure, no I/O, unit-tested. See §4c. |
 | `day1_template.html` | **used by the live app** to render the Day-1 tab (and by the static site). Not dormant — do not delete. |
+| `derived_cache.py` | the per-file parse memo that makes the weekly run incremental. Pure, unit-tested. See §4f. |
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
 | `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
@@ -323,6 +324,90 @@ are worth keeping in mind:
    figure for the same batch.
 4. A student with no pod is whole-batch only, never a member of every pod.
 
+### 4f. The derived-facts memo (added 2026-09-08)
+
+**The weekly run used to re-parse the entire Zoom corpus every Monday** — 1,290
+attendee reports and 1,235 poll exports, ~246 MB — to recompute facts that had
+not changed since the week they were first computed. `.cache/` is deliberately
+not restored in CI (§6), so the runner started cold every time.
+
+Two changes fixed it. Neither touches a gate, and neither caches anything that
+depends on the roster, L2, or another file.
+
+**(A) `derived_cache.py` memoises the PER-FILE parse**, in one
+`derived_facts.json.gz` (~0.6 MB) in the store folder root on the private Shared
+Drive. Only the output of functions pure in one file's bytes:
+`sessionmeta.parse_header + measure` and `polls.parse_one`. Measured with a warm
+disk, the PARSE alone — never mind the download — is `measure` 215.4s,
+`parse_header` 16.1s, `submission_times` 22.1s, `parse` 12.9s, against 1.4s of
+disk read. So caching the *bytes* would have missed the point; the cost is the
+parse, which is why the memo holds the derived fact instead.
+
+**(B) `dashboard_core.compute` and `roster_grid` take `tabs=`.** `build_store`
+already materialises the whole marked workbook to build DATA, then handed the
+raw bytes to both, each of which re-streamed the same 80k rows out of the zip.
+Measured on the real 7.9 MB workbook: **43.6s → 0.8s and 47.3s → 1.7s, both
+`.equals()`-identical**, pinned by `tests/test_dashboard_core_tabs.py`. Not a
+cache at all — pure de-duplication.
+
+**Five things that would each break this silently, and what stops them:**
+
+1. **The file id is NOT a sufficient key.** Drive's "Manage versions → Upload
+   new version" keeps the id, and that is the documented remedy for a bad Zoom
+   export (§7b.1). `live_data`'s byte cache keyed on the bare id on the strength
+   of a *comment* — a claim, not a check, and falsified by `upload_to_folder` in
+   the same module. The memo keys on `id:md5-or-modifiedTime:name`, and the byte
+   cache is now signature-addressed too, so a replaced file misses both.
+2. **Never memoise anything derived from the file NAME.** `sessionmeta` reaches
+   a session through `_mm` and polls through `(wid, mm)`, both parsed out of the
+   filename. `derived_cache` REFUSES a row containing them (never strips it —
+   stripping would store cleanly and then have every hit dropped by
+   `lookup_by_session`, blanking duration, peak, retention and stickiness on
+   every session while the run stayed green). The pipeline re-derives `_mm` from
+   the live listing on hit and miss alike.
+3. **The rule that produced a fact is part of the fact.** Each namespace stores
+   `sha256` of its producing module's whole SOURCE and is discarded entire when
+   that changes — the whole module, never one function, because `measure`
+   depends on `_ts`, `_TIME_FMTS` and `MAX_MINUTES`. Two changes last month
+   would each have poisoned a naive cache: the phone fix (+8.4% on every
+   re-marked session) and the curve trim (−5.4 points on stick10 corpus-wide).
+   It fails CLOSED — an unreadable source yields a value that cannot match.
+4. **Values are validated, not just key names.** A name allow-list would happily
+   pass `{"topic": "<every attendee's email>"}`. `_validate` checks shapes and
+   ranges on the way in AND on the way out, and treats a bad row as a miss
+   rather than trusting it — the memo is a *mutable* input to published numbers.
+5. **Ordering.** Both dedupe tie-breaks keep the incumbent, and **119 of 320
+   duplicated webinars TIE** on `unique_viewers`. Cached and freshly-parsed rows
+   are therefore sorted back into listing order before `collect()`/`dedupe_rows`
+   run, or a tie would resolve differently week to week.
+
+**GATE 5 (`_previous_coverage`) is the new safety net.** `[5a]` and `[5a2]` are
+the only steps with no gate above them and a blanket `except` inside them, so a
+failure there used to cost one column and still go green. That was fine while
+those columns were recomputed from the exports weekly; it is not fine now a
+memoised fact can reach a published number. The run now refuses to publish if
+sessions-with-duration or sessions-with-a-rating fall below `COVERAGE_FLOOR`
+(0.8) of last week's store. **Sessions do not vanish from the past** — the
+corpus only grows — so a real drop is a bug upstream, never a fact about the
+week.
+
+**What is NOT cached, and must never be.** The whole-drive listing (it is the
+change detector — a cache hit skips a download, never the question of what
+exists). The marking, all 429 columns. Every denominator. `REQUIRE_L2`. Both L2
+joins. `forecast.fit_curve` and its backtest. `recap`. `trainers`. Day-1. BSIAI.
+**Measured total cost of that entire model layer: 0.18 seconds.** There is
+nothing to save there and everything to lose — recomputing it weekly is exactly
+what let the phone fix reach three months of past sessions.
+
+Escape hatches, all reaching a correct ~6-minute cold run: delete the file,
+`--no-cache`, the `no_cache` workflow input, a schema bump, a rule-hash
+mismatch, or any read error at all. `--cache-file <path>` runs the whole memo
+offline, which is how the cold-vs-warm store diff is tested — otherwise the warm
+path's first execution would also be its first publish. `--allow-partial` skips
+the write, so a knowingly incomplete week leaves no residue. Entries carry
+`first_seen` and expire after 90 days, so ~8% of the corpus is re-derived from
+scratch every week with nobody remembering to do anything.
+
 ## 5. Invariants — break these and the numbers go silently wrong
 
 1. **Locate roster columns by HEADER TEXT, never by fixed letter** (see §4).
@@ -386,6 +471,15 @@ are worth keeping in mind:
    last week's store intact. `--allow-partial` overrides it; the workflow
    deliberately never passes that flag. Keep it this way — a green run that
    silently drops a weekend's session is worse than a red one.
+11. **Cache PRE-join per-file facts only, and never the file's NAME.** Anything
+   that touches the roster, L2, a denominator or another file is recomputed every
+   run — measured at 0.18s for the whole model layer, so there is nothing to save
+   and everything to lose (§4f). The line is exactly at `lookup_by_session`: the
+   memo holds what one file's bytes say, and the joins, the tie-breaks and every
+   fit run over the full set weekly. This is what lets a fix reach the past —
+   the phone fix (§5.3) repaired three months of sessions precisely because they
+   were being re-marked, and the 133 frozen B17–B28 columns are the standing
+   counter-example of what a cache that is really a freeze does to your numbers.
 
 ## 6. Security — THIS REPOSITORY IS PUBLIC
 
@@ -515,11 +609,24 @@ python pipeline.py --no-upload --no-site
 # tests — stdlib unittest; pytest is NOT in requirements.txt
 python -m unittest tests.test_data
 
-# all of them (281 as of 2026-09-07). `discover` does not work: tests/ has no
+# all of them (333 as of 2026-09-08). `discover` does not work: tests/ has no
 # __init__.py, so the start directory is "not importable" — name them instead.
+# test_dashboard_core_tabs takes ~2 min: it proves the bytes and tabs= paths
+# agree by running the SLOW path too, which is the point of it.
 python -m unittest tests.test_data tests.test_polls tests.test_recap \
   tests.test_trainers tests.test_forecast tests.test_pods tests.test_bsiai \
-  tests.test_archive tests.test_attendee_format tests.test_sessionmeta
+  tests.test_archive tests.test_attendee_format tests.test_sessionmeta \
+  tests.test_derived_cache tests.test_pipeline_cache_gate \
+  tests.test_dashboard_core_tabs
+```
+
+The cold-vs-warm proof for the derived-facts memo (§4f) is not part of the
+suite — it needs Drive and takes ~13 minutes. Run it after touching anything the
+memo feeds; the two stores must agree on every memoised field:
+
+```bash
+python pipeline.py --no-upload --no-site --no-cache --cache-file .cache/memo.json.gz
+python pipeline.py --no-upload --no-site            --cache-file .cache/memo.json.gz
 ```
 
 Use `--no-site` locally unless you mean to rebuild the site: `site_build` starts by
@@ -542,7 +649,7 @@ secrets, or the store could not be downloaded.
 **What is inside `attendance.duckdb`:** `meta(key, value)` holding JSON blobs
 (`DATA`, `summary`, `report`, `warnings`, `source`, `generated_at`,
 `generated_at_iso`, `batches`, `sheet_map`, `marked_xlsx_file_id`, `stamps`,
-`day1`, `forecast`, `recap`, `trainers`, `sessions`), the `compute` table (per batch × session), and one `grid_<batch>` table per
+`day1`, `forecast`, `recap`, `trainers`, `sessions`, `cache`), the `compute` table (per batch × session), and one `grid_<batch>` table per
 batch. The `grid_*` tables carry emails and phones — that is why the store is
 PII and lives in a private Shared Drive. The app caches it with a **30-minute TTL**,
 so Monday's rebuild reaches viewers on its own; 🔄 Refresh forces it immediately.

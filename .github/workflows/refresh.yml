@@ -10,7 +10,11 @@
 #   L2_ID                        L2 schedule sheet id
 #   ATTENDEE_FOLDER_ID           Weekly Sessions shared-drive id
 #   STORE_FOLDER_ID              private Drive folder the store is uploaded to
-#                                (shared with the service account as Editor)
+#                                (shared with the service account as Editor).
+#                                Also holds derived_facts.json.gz, the per-file
+#                                parse memo that keeps this run incremental
+#                                (CLAUDE.md 4f) - delete it to force a full
+#                                re-parse, or tick no_cache below.
 # Optional:
 #   BSIAI_ROSTER_ID              BSIAI roster sheet id (its own programme tab)
 #   CURRICULUM_ID                Master Curriculum Schedule sheet id (drives the
@@ -31,6 +35,10 @@ on:
     inputs:
       skip_upload:
         description: "Dry run — build everything but don't upload (use before the Drive folder exists)"
+        type: boolean
+        default: false
+      no_cache:
+        description: "Ignore the derived-facts memo and re-parse every Zoom export (slow, ~7 min)"
         type: boolean
         default: false
 
@@ -66,6 +74,16 @@ jobs:
       # directory would publish 46k students' emails and phone numbers. A cold
       # download every Monday costs a couple of minutes of free runner time; that
       # is the right trade. Do not add a cache step for .cache/.
+      #
+      # The pipeline DOES keep a cross-run cache — derived_facts.json.gz, the
+      # memoised per-file parse results — but it lives in the private store
+      # folder on the Shared Drive, never here. Its payload is aggregates only
+      # (durations, peaks, retention curves, poll histograms; no name, email or
+      # phone — derived_cache._validate enforces that on the way in AND out), so
+      # it would not leak PII even from an Actions cache. It still must not move
+      # here: the rule above is BLANKET on purpose, because a blanket rule is
+      # what survives the next person who adds one more path to a cache step
+      # that already exists. Never create the precedent.
 
       - name: Run pipeline
         env:
@@ -87,11 +105,16 @@ jobs:
           # /roster login gate has been verified on a real deploy (SETUP_PIPELINE.md).
           PUBLISH_ROSTER: ${{ secrets.PUBLISH_ROSTER }}
         run: |
+          FLAGS=""
+          if [ "${{ inputs.no_cache }}" = "true" ]; then
+            echo "::notice::Ignoring the derived-facts memo — full re-parse."
+            FLAGS="--no-cache"
+          fi
           if [ "${{ inputs.skip_upload }}" = "true" ]; then
             echo "::notice::Dry run — building without uploading."
-            python pipeline.py --no-upload --no-site
+            python pipeline.py --no-upload --no-site $FLAGS
           else
-            python pipeline.py
+            python pipeline.py $FLAGS
           fi
 
       # Publish site/ to Vercel. Skipped automatically until VERCEL_TOKEN exists,
