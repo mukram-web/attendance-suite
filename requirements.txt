@@ -12,3 +12,7 @@ gspread>=6.0
 plotly>=5.18
 # Prebuilt dashboard store (written by pipeline.py, read by the app):
 duckdb>=1.0
+# The dashboard's "Add data" page: puts the week's Zoom exports on Drive and
+# asks GitHub Actions to run the pipeline. Streamlit already pulls requests
+# in, but this page depends on it directly, so it is declared.
+requests>=2.31

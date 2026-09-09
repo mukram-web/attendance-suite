@@ -1,8 +1,14 @@
-# Weekly dashboard rebuild — runs on GitHub's servers, never on Streamlit.
+# Dashboard rebuild — runs on GitHub's servers, never on Streamlit.
 #
-# Every Monday 06:00 IST (00:30 UTC) it fetches the roster + new Zoom attendee
-# reports, marks attendance, builds attendance.duckdb, and uploads it (plus the
-# marked .xlsx) to the private Drive folder the app reads from.
+# It fetches the roster + L2, marks the Zoom attendee reports that are not
+# marked yet, builds attendance.duckdb, and uploads it (plus the marked .xlsx)
+# to the private Drive folder the app reads from.
+#
+# THERE IS NO SCHEDULE. The owner decided (2026-09-10) that nothing is ever
+# rebuilt automatically: they upload each week's Zoom exports themselves and the
+# dashboard's "Add data" page dispatches this workflow. So every run is
+# deliberate, and `incremental` (default true) means past sessions are left
+# exactly as they were marked — see CLAUDE.md §4g for what that costs.
 #
 # Required repository secrets (Settings → Secrets and variables → Actions):
 #   GDRIVE_SERVICE_ACCOUNT_JSON  the service-account key JSON (whole file)
@@ -25,14 +31,14 @@
 name: Refresh dashboard data
 
 on:
-  schedule:
-    # Monday 06:00 IST (00:30 UTC). GitHub disables scheduled workflows after
-    # ~60 days with no repository activity — if the "Data as of" date in the app
-    # stops advancing, re-enable it in the Actions tab (any commit or a manual
-    # "Run workflow" also resets that clock).
-    - cron: "30 0 * * 1"
+  # Dispatch only — no cron. Triggered by the dashboard's "Add data" page, or by
+  # hand from the Actions tab.
   workflow_dispatch:
     inputs:
+      incremental:
+        description: "Only mark sessions that are not marked yet (fast). Untick for a full rebuild of every session."
+        type: boolean
+        default: true
       skip_upload:
         description: "Dry run — build everything but don't upload (use before the Drive folder exists)"
         type: boolean
@@ -109,6 +115,12 @@ jobs:
           if [ "${{ inputs.no_cache }}" = "true" ]; then
             echo "::notice::Ignoring the derived-facts memo — full re-parse."
             FLAGS="--no-cache"
+          fi
+          if [ "${{ inputs.incremental }}" = "true" ]; then
+            echo "::notice::Incremental — carrying last week's marks forward; only unmarked sessions are processed."
+            FLAGS="$FLAGS --incremental"
+          else
+            echo "::notice::FULL rebuild — every session re-marked from the pristine roster."
           fi
           if [ "${{ inputs.skip_upload }}" = "true" ]; then
             echo "::notice::Dry run — building without uploading."
