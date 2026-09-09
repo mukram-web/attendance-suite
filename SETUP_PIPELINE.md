@@ -156,7 +156,30 @@ WARNING and the store has no "Intro call" rows.
 - **Roster size limit:** Google won't export a Sheet as .xlsx past **10 MB** and
   the roster is already ~8 MB. When it crosses that line the pipeline fails with a
   clear message and old batches need archiving into a separate sheet.
-- `pipeline.py` also runs on a laptop: `python pipeline.py` (uses
+- ### Adding a week's data (the normal path since 2026-09-10)
+
+1. Open the dashboard, go to **➕ Add data**, enter the data-entry password.
+2. Drop in the week's Zoom exports — the attendee report for each session and its
+   poll export, or a `.zip` of them. Names must be Zoom's own
+   (`attendee_<webinar>_<YYYY>_<MM>_<DD>.csv`, `poll_...csv`).
+3. Read the table. Every row must say **In L2: yes** — a session the L2 schedule
+   does not list is HIDDEN by the dashboard even after a perfect run, so the page
+   refuses to upload it and names the webinar id to add to L2.
+4. Press **Upload and refresh the dashboard**. The files go to the Zoom extracts
+   Shared Drive, GitHub runs the pipeline, and the page shows each step. Two to
+   three minutes.
+5. When it says done, every tab is showing the new data. Anyone else sees it on
+   their next refresh.
+
+If it fails, **nothing is published** — the pipeline refuses to overwrite a good
+dashboard with a partial one, so the numbers on screen are still the previous
+ones. The files are already on Drive, so re-running costs nothing.
+
+Sessions already marked are never re-marked (§4g in CLAUDE.md). To re-mark
+everything — after fixing a counting rule, say — run the workflow from GitHub's
+Actions tab with **incremental** unticked.
+
+`pipeline.py` also runs on a laptop: `python pipeline.py` (uses
   `.streamlit/secrets.toml` + the local key file; `--no-upload` builds without
   uploading). Don't run it while the local app is open — the app holds the store
   file; if a build is interrupted, delete `.cache/attendance.duckdb` and rebuild.

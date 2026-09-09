@@ -29,6 +29,7 @@ Only the `google-*` packages in requirements.txt are needed for this; they are
 imported lazily so upload-only use never has to install them locally.
 """
 from __future__ import annotations
+import datetime
 import hashlib
 import io
 import os
@@ -36,6 +37,8 @@ import re
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
+
+import pods as _pods            # pure, no third-party deps: safe at import time
 
 # Zoom export bytes are cached on disk so restarts skip re-downloading hundreds
 # of CSVs. This used to say "attendee files never change once uploaded" and key
@@ -387,8 +390,13 @@ def fetch_store_snapshot(file_id: str) -> bytes:
 
 
 def _existing_sessions(roster_bytes: bytes) -> dict:
-    """{batch_key -> set(mm_dd)} of session columns already present in the roster,
-    so we can skip re-fetching sessions that are already marked.
+    """{batch_key -> set of `attendance_core.session_key`} already marked here.
+
+    One key per column, from the same definition the marker keys its own `dmap`
+    on, so "already marked" and "would be re-marked" can never disagree. **The
+    POD is part of it**: from B35 one date carries up to eleven sessions, and
+    keying on the date alone meant marking any one POD suppressed the download
+    of the other ten — a whole day missing from a green run.
 
     Uses openpyxl read-only mode and reads only the top rows of each sheet — far
     lighter on memory than a full load (matters on Streamlit's small instances).
@@ -415,9 +423,9 @@ def _existing_sessions(roster_bytes: bytes) -> dict:
         for c in range(10, width):              # 0-based: session columns start at K (index 10)
             v1 = row1[c] if c < len(row1) else None
             v2 = row2[c] if (hr == 2 and c < len(row2)) else None
-            d = ac._mmdd(v1) or (ac._mmdd(v2) if hr == 2 else None)
-            if d:
-                dates.add(d)
+            sk = ac.session_key(v1, v2, hr)
+            if sk:
+                dates.add(sk)
         out[k] = dates
     wb.close()
     return out
@@ -429,9 +437,14 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
 
     The Shared Drive holds the full history (hundreds of dated session folders),
     but the roster already carries every past weekend's marks. So we list the
-    top-level dated folders, keep only those whose (batch, date) is missing from
-    the roster, and download just those — in parallel. `mark_all=True` ignores the
-    skip logic and pulls everything (a full rebuild). Returns (attendee_files, info).
+    top-level dated folders, keep only those whose (batch, date, POD) is missing
+    from the roster, and download just those — in parallel. `mark_all=True`
+    ignores the skip logic and pulls everything (a full rebuild). Returns
+    (attendee_files, info).
+
+    A session is identified by `attendance_core.session_key` — (date, POD) —
+    because from B35 one date carries up to eleven sessions and keying on the
+    date alone meant marking any one POD suppressed the other ten.
     """
     import io as _io
     import zipfile
@@ -457,12 +470,16 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
         if f["mimeType"] != _FOLDER_MIME:
             continue
         name = f["name"]
-        mm = ac._mmdd(name)
         covered = [k for k in ac._folder_batches(name) if k in sheet_keys]
         if not covered:
             skipped_nosheet += 1
             continue
-        if mark_all or mm is None or any(mm not in existing[k] for k in covered):
+        # A session is identified by its date AND its POD - '2026-08-23 - AI CAP
+        # B35 - Techies - ...' is not the same session as the Finance one beside
+        # it. Either date form counts as a match, so a legacy column carrying no
+        # year still suppresses its own re-download.
+        cand = ac.folder_keys(name)
+        if mark_all or not cand or any(not (cand & existing[k]) for k in covered):
             to_fetch.append((name, f["id"]))
         else:
             skipped_done += 1

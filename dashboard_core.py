@@ -41,11 +41,17 @@ def batch_key(name: str) -> int:
 
 # How wide these readers look. Kept as named constants because they are a real
 # limit, not a tuning knob: a session column beyond _MAX_SCAN_COL is invisible to
-# compute() and roster_grid(), so it silently stops being counted. The widest
-# roster tab measured 2026-09-08 was 43 columns (AI CAP B17), but pod-era batches
-# gain one column per pod per week, so the headroom is finite — _wide_tab_warning
-# below says so before it bites rather than after.
-_MAX_SCAN_COL = 80
+# compute() and roster_grid(), so it silently stops being counted — while
+# data.py, which has no such limit, keeps counting it. The two then disagree
+# about the same batch, which is worse than either failing.
+#
+# Raised from 80 on 2026-09-10. Measured that day: B35 already carried 46 session
+# columns (~57 wide) and gained 11 in the preceding week, so 80 would have
+# started dropping columns around the first week of October. Nothing here is
+# cheaper for being narrow - openpyxl reads the window it is asked for - and
+# since sessions are now FROZEN, a column lost to this limit would never be
+# rebuilt. Two years of pod-era growth fits inside 200.
+_MAX_SCAN_COL = 200
 _MAX_HEADER_COL = 20
 
 
@@ -119,7 +125,7 @@ def _looks_like_roster(sheet_name: str) -> bool:
 
 def _wide_tab_warning(sheet: str, width: int) -> str | None:
     """A tab approaching _MAX_SCAN_COL is about to lose columns silently."""
-    if width >= _MAX_SCAN_COL - 8:
+    if width >= _MAX_SCAN_COL - 20:
         return (f"{sheet}: {width} columns, at or near the {_MAX_SCAN_COL}-column "
                 "read limit — session columns beyond it stop being counted")
     return None

@@ -146,4 +146,18 @@ def from_folder(folder_name) -> str | None:
         got = canon(p)
         if got and got != WHOLE_BATCH:
             return got
+        # The POD is often welded to the batch with an UNSPACED hyphen, which the
+        # spaced split above leaves inside one segment: 'AI CAP B37 8PM-Techis',
+        # 'AICAPB35, B36-Generalist'. Read the tail after the last hyphen, the
+        # same way from_l2_label does. Measured 2026-09-10: without this, 53 of
+        # 609 already-marked sessions were re-downloaded and re-marked on every
+        # incremental run, so their columns were not frozen at all.
+        #
+        # A false positive here (a topic ending in a domain word) costs one
+        # redundant download; a false negative costs the freeze. The asymmetry
+        # is why the looser rule is the right one.
+        if "-" in p or "–" in p:
+            got = canon(re.split(r"[-–]", p)[-1])
+            if got and got != WHOLE_BATCH:
+                return got
     return None

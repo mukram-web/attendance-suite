@@ -240,7 +240,10 @@ def _store_folder_id() -> str:
 # The store is re-checked this often, so the Monday 06:00 IST rebuild reaches
 # viewers on its own. Without a TTL, one cached load would pin the whole server
 # to that week's data until somebody happened to press Refresh.
-_STORE_TTL_SECONDS = 30 * 60
+# Short on purpose. The owner now adds a week's data themselves and the
+# dashboard is expected to show it straight away; 30 minutes meant a
+# colleague could be looking at pre-upload numbers with no way to tell.
+_STORE_TTL_SECONDS = 5 * 60
 
 
 @st.cache_data(show_spinner="Loading the latest dashboard…", ttl=_STORE_TTL_SECONDS)
@@ -723,10 +726,10 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
 (tab_dash, tab_sessions, tab_weekend, tab_roster, tab_day1, tab_fcst,
- tab_bsiai) = st.tabs(
+ tab_bsiai, tab_add) = st.tabs(
     ["📊 Dashboard", "📚 Sessions", "🎬 Weekend Recap",
      "📋 Roster (marked attendance)", "🎯 Day-1 analysis", "🔮 Forecast",
-     "🧩 BSIAI"]
+     "🧩 BSIAI", "➕ Add data"]
 )
 
 # Browse / This week / Trainers are three views of the SAME thing — the session
@@ -1818,3 +1821,256 @@ with tab_bsiai:
             with st.expander(f"Skipped / warnings ({len(_w)})"):
                 for _line in _w:
                     st.text("- " + str(_line))
+
+
+# ======================== TAB 8 - ADD THIS WEEK'S DATA =======================
+# The owner supplies each week's Zoom exports by hand (2026-09-10) and needs
+# them live on THIS dashboard, not on a laptop. So this page does the light work
+# - read the names, check them against L2, put them on Drive - and then asks
+# GitHub Actions to run the pipeline. Marking stays on the runner: in-process
+# marking is what made this app take three minutes and die on a 1 GB instance
+# (CLAUDE.md section 2), and no upload button is worth bringing that back.
+with tab_add:
+    st.caption(
+        "Add a week's Zoom exports and the shared dashboard updates for "
+        "everyone. Marking runs on GitHub, so this page stays responsive and "
+        "the app never holds the roster in memory."
+    )
+
+    try:
+        _gh = dict(st.secrets.get("github", {}) or {})
+    except Exception:
+        _gh = {}
+    _gh_token = str(_gh.get("token") or "")
+    _gh_repo = str(_gh.get("repo") or "")
+    try:
+        _up_pw = str(st.secrets.get("upload_password", "") or "")
+    except Exception:
+        _up_pw = ""
+
+    if not st.session_state.get("_upload_authed"):
+        # A second gate on purpose. The app password is shared with everyone who
+        # reads the dashboard; WRITING data is a different privilege, and the
+        # blast radius of a wrong upload is now permanent (nothing is rebuilt).
+        if not _up_pw:
+            st.info(
+                "Adding data is switched off. Set `upload_password` in the app's "
+                "secrets (Streamlit Cloud: Manage app -> Settings -> Secrets) to "
+                "enable this page. It is deliberately separate from the password "
+                "used to view the dashboard."
+            )
+            st.stop()
+
+        def _upload_submit():
+            if hmac.compare_digest(st.session_state.get("_upw", ""), _up_pw):
+                st.session_state["_upload_authed"] = True
+            else:
+                st.session_state["_upload_authed"] = False
+            st.session_state.pop("_upw", None)
+
+        st.text_input("Data-entry password", type="password", key="_upw",
+                      on_change=_upload_submit,
+                      placeholder="Enter the password and press Enter")
+        if st.session_state.get("_upload_authed") is False:
+            st.error("Incorrect password.")
+        st.stop()
+
+    if not (_gh_token and _gh_repo):
+        st.error(
+            "**Not configured yet.** This page needs a GitHub token so it can "
+            "start the rebuild. Add to the app's secrets:\n\n"
+            '```toml\n[github]\nrepo = "owner/repo"\ntoken = "github_pat_..."\n'
+            '# optional: ref = "main", workflow = "refresh.yml"\n```\n\n'
+            "Use a fine-grained token limited to this repository with only "
+            "**Actions: read and write** - it can start the pipeline and nothing "
+            "else. Never commit it; the repository is public."
+        )
+        st.stop()
+    if not live_data.config_present():
+        st.error("Google credentials are not configured in this app's secrets, "
+                 "so the files cannot be put on Drive.")
+        st.stop()
+
+    import time
+    import zipfile
+    import pandas as _pd
+
+    import ingest as _ingest
+
+    _l2_id = _att_id = ""
+    try:
+        _drive_cfg = dict(st.secrets.get("drive", {}) or {})
+        _l2_id = str(_drive_cfg.get("l2_id") or "")
+        _att_id = str(_drive_cfg.get("attendee_folder_id") or "")
+    except Exception:
+        pass
+    if not _att_id:
+        st.error("`drive.attendee_folder_id` is not configured, so there is "
+                 "nowhere to put the files.")
+        st.stop()
+
+    st.markdown("**1 - Choose this week's files**")
+    _files = st.file_uploader(
+        "Zoom exports", accept_multiple_files=True, key="add_files",
+        type=["csv", "zip"],
+        help="The attendee report for each session, plus its poll export if "
+             "there is one. A .zip of them is fine. Names must be Zoom's own: "
+             "attendee_<webinar>_<YYYY>_<MM>_<DD>.csv / poll_...csv")
+
+    if not _files:
+        st.info("Nothing selected yet.")
+        st.stop()
+
+    # Flatten: a zip contributes its members, everything else itself.
+    _blobs = {}
+    _bad_zip = []
+    for _f in _files:
+        if _f.name.lower().endswith(".zip"):
+            try:
+                with zipfile.ZipFile(io.BytesIO(_f.getvalue())) as _z:
+                    for _m in _z.namelist():
+                        if not _m.endswith("/"):
+                            _blobs[_m] = _z.read(_m)
+            except Exception as _e:
+                _bad_zip.append(f"{_f.name}: {_e}")
+        else:
+            _blobs[_f.name] = _f.getvalue()
+    for _line in _bad_zip:
+        st.error(f"Unreadable zip - {_line}")
+
+    _sessions, _rejected = _ingest.classify(list(_blobs))
+    _l2_bytes = None
+    if _l2_id:
+        try:
+            _l2_bytes, _ = live_data.fetch_sheet_cached(
+                live_data._drive_service(), _l2_id)
+        except Exception as _e:
+            st.warning(f"Could not read the L2 schedule ({_e}) - every session "
+                       "will look unscheduled until it is readable.")
+    _l2_map, _l2_labels = (ac.parse_l2(_l2_bytes, with_labels=True)
+                           if _l2_bytes else ({}, {}))
+    _rows = _ingest.preflight(_sessions, _l2_map, _l2_labels)
+
+    st.markdown("**2 - Check what will be added**")
+    if _rows:
+        st.dataframe(_pd.DataFrame([{
+            "Date": _r0["date"], "Webinar": _r0["wid"],
+            "In L2": "yes" if _r0["in_l2"] else "NO",
+            "Batches": ", ".join(_r0["batches"]) or "-",
+            "POD": _r0["pod"] or "whole batch",
+            "Title": _r0["topic"] or "-",
+            "Attendee files": _r0["n_attendee"], "Poll files": _r0["n_poll"],
+        } for _r0 in _rows]), width="stretch", hide_index=True)
+
+    _blocks = _ingest.blockers(_rows, _rejected) + _bad_zip
+    if _blocks:
+        for _b in _blocks:
+            st.error(_b)
+        st.caption("Nothing has been uploaded. Fix the above and choose the "
+                   "files again - it is safer to stop here than to publish a "
+                   "week that quietly misses a session.")
+        st.stop()
+
+    _n_files = sum(len(_r0["files"]) for _r0 in _rows)
+    st.success(f"{len(_rows)} session(s), {_n_files} file(s), all scheduled in L2.")
+
+    st.markdown("**3 - Add them**")
+    st.caption(
+        "The files go to the Zoom extracts Shared Drive, then the pipeline runs "
+        "on GitHub and marks **only** these sessions - everything already marked "
+        "is left exactly as it is."
+    )
+    if st.button("Upload and refresh the dashboard", type="primary", key="add_go"):
+        _svc = live_data._drive_service()
+        _drive = _ingest.target_drive(_att_id)
+        with st.status("Adding this week's data...", expanded=True) as _status:
+            try:
+                st.write(f"Uploading {_n_files} file(s) to Drive...")
+                for _r0 in _rows:
+                    _got = _ingest.upload_session(_svc, _drive, _r0, _blobs)
+                    st.write(f"- {_r0['date']} - "
+                             f"{(_r0['topic'] or _r0['wid'])[:40]} "
+                             f"({len(_got['uploaded'])} file(s))")
+                _since = _dt.datetime.now(_dt.timezone.utc).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ")
+                st.write("Starting the rebuild on GitHub...")
+                _ingest.dispatch(
+                    _gh_token, _gh_repo,
+                    workflow=str(_gh.get("workflow") or "refresh.yml"),
+                    ref=str(_gh.get("ref") or "main"),
+                    inputs={"incremental": True})
+            except Exception as _e:
+                _status.update(label="Could not start the rebuild", state="error")
+                st.error(str(_e))
+                st.stop()
+
+            # GitHub answers a dispatch with 204 and no run id, so the run is
+            # found by time. Poll rather than guess: telling the owner it is done
+            # while it is still queued is how a stale dashboard gets mistaken for
+            # a working one.
+            _run = None
+            for _ in range(20):
+                try:
+                    _run = _ingest.latest_run(
+                        _gh_token, _gh_repo,
+                        str(_gh.get("workflow") or "refresh.yml"), _since)
+                except Exception:
+                    _run = None
+                if _run:
+                    break
+                time.sleep(3)
+            if not _run:
+                _status.update(label="Started, but the run is not visible yet",
+                               state="error")
+                st.warning("GitHub accepted the request but has not listed the "
+                           "run yet. Check the Actions tab in a minute - the "
+                           "files are already uploaded, so it is safe to start "
+                           "it again from there.")
+                st.stop()
+
+            st.write(f"[Run on GitHub]({_run['url']})")
+            _state = {"status": _run.get("status"), "step": "",
+                      "url": _run.get("url"), "conclusion": None}
+            _seen = ""
+            for _ in range(120):                      # ~10 minutes
+                try:
+                    _state = _ingest.run_state(_gh_token, _gh_repo, _run["id"])
+                except Exception:
+                    pass
+                if _state.get("step") and _state["step"] != _seen:
+                    _seen = _state["step"]
+                    st.write(f"- {_seen}")
+                if _state.get("status") == "completed":
+                    break
+                time.sleep(5)
+
+            if _state.get("conclusion") == "success":
+                _status.update(label="Done - the dashboard is up to date",
+                               state="complete")
+                # Clearing the cache is not enough on its own - the tabs above
+                # were rendered from the OLD store earlier in this same script
+                # run, so they need one more pass to pick up the new one.
+                st.cache_data.clear()
+                st.session_state["_upload_done"] = True
+                st.success("Added. Anyone else looking at the dashboard sees it "
+                           "on their next refresh.")
+            elif _state.get("status") == "completed":
+                _status.update(label="The rebuild failed", state="error")
+                st.error(
+                    f"GitHub finished with '{_state.get('conclusion')}'. **Nothing "
+                    "was published** - the pipeline refuses to overwrite a good "
+                    "dashboard with a partial one, so the numbers you see are "
+                    f"still the previous ones. Open [the run]({_state.get('url')}) "
+                    "for the reason; the files are already on Drive, so a re-run "
+                    "costs nothing.")
+            else:
+                _status.update(label="Still running", state="error")
+                st.warning(
+                    "Taking longer than expected. It is still going - follow "
+                    f"[the run]({_state.get('url')}) and refresh this page when "
+                    "it finishes.")
+
+    # Any button click reruns the script, and the cache was cleared above, so
+    # this is what actually repaints the other tabs from the new store.
+    if st.session_state.get("_upload_done"):
+        st.button("Show the new numbers", key="add_reload")

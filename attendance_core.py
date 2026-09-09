@@ -58,6 +58,38 @@ def _col_header(ymd, pod):
     return f"{ymd}{POD_SEP}{pod}" if pod else ymd
 
 
+def _ymd(v):
+    """'2026_08_23' from a header that carries a year, else None."""
+    if v is None: return None
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        return f'{v.year}_{v.month:02d}_{v.day:02d}'
+    m = re.search(r'(20\d\d)[_\-/](\d{1,2})[_\-/](\d{1,2})', str(v))
+    return f'{m.group(1)}_{int(m.group(2)):02d}_{int(m.group(3)):02d}' if m else None
+
+
+def session_key(v1, v2=None, hr=1):
+    """A session column's identity: (date, POD), or None if it is not one.
+
+    ONE date form per column, never both. The marker always writes the full date
+    (`_col_header`), so a year-blind key means "a legacy B17-B28 column typed by
+    hand" — and only those are allowed to match across years. Keying everything
+    year-blind made two columns on the same day in different years collide, and
+    with `setdefault` the second one was silently dropped: on a freeze, where
+    nothing is ever rebuilt, that is a session gone for good.
+
+    This is THE definition, shared by the marker's `dmap`, the carry-forward and
+    the "already marked, do not download again" check. Three copies of it drifted
+    apart once already.
+    """
+    d = _ymd(v1) or _mmdd(v1)
+    pod = _col_pod(v1)
+    if d is None and hr == 2:
+        d = _ymd(v2) or _mmdd(v2)
+        if d is not None:
+            pod = _col_pod(v2)
+    return (d, pod) if d else None
+
+
 def _parse_filename(fname):
     m = re.match(r'attendee_(\d+)_((20\d\d)_(\d{2})_(\d{2}))', fname)
     return (m.group(1), m.group(2)) if m else None
@@ -98,6 +130,20 @@ def _sheet_key(name):
     m = re.search(r'B?(\d{1,2})\b', name.split('-')[0])
     if not m: return None
     return (_track(name), int(m.group(1)))
+
+def folder_keys(name):
+    """Every `session_key` a Drive session folder could correspond to.
+
+    Both date forms, because the column it should match may be a legacy one
+    typed without a year. The POD comes from the folder name, which is why
+    `pods.from_folder` has to read the unspaced 'B37 8PM-Techis' form: a POD it
+    cannot spell yields the whole-batch key, no match, and the session is
+    downloaded and re-marked every run instead of staying frozen.
+    """
+    import pods
+    pod = pods.from_folder(name) or ''
+    return {(d, pod) for d in (_ymd(name), _mmdd(name)) if d}
+
 
 def _folder_batches(member_path):
     """Recover batch keys from an attendee file's folder when the webinar isn't in L2."""
@@ -567,9 +613,9 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
             continue
         dmap = {}
         for c in range(11, (ws.max_column or 1) + 1):
-            h1 = ws.cell(1, c).value
-            d = _mmdd(h1) or (_mmdd(ws.cell(2, c).value) if hr == 2 else None)
-            if d: dmap.setdefault((d, _col_pod(h1)), c)
+            k = session_key(ws.cell(1, c).value,
+                            ws.cell(2, c).value if hr == 2 else None, hr)
+            if k: dmap.setdefault(k, c)
         nxt = _last_used(ws) + 1
         # Real rosters sometimes have merged cells in the body; writing a mark into
         # a merged (non-anchor) cell raises in openpyxl. Unmerge any range that
@@ -581,13 +627,19 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
         for (s, mm, pod) in sorted((k for k in acc if k[0] == sheet),
                                    key=lambda k: (k[1], k[2])):
             a = acc[(s, mm, pod)]
-            if (mm, pod) in dmap:
-                ci, kind = dmap[(mm, pod)], 're-mark'
+            # Full date first, then the year-blind form: that second lookup is
+            # what still re-marks a legacy '9th May' column when its files are
+            # handed in, while stopping a 2027 session from overwriting the 2026
+            # column beside it.
+            hit = (a['ymd'], pod) if (a['ymd'], pod) in dmap else (
+                (mm, pod) if (mm, pod) in dmap else None)
+            if hit:
+                ci, kind = dmap[hit], 're-mark'
             else:
                 ci, kind = nxt, 'NEW'; nxt += 1
                 ws.cell(1, ci).value = _col_header(a['ymd'], pod)
                 if hr == 2 and a['topic']: ws.cell(2, ci).value = a['topic']
-                dmap[(mm, pod)] = ci
+                dmap[(a['ymd'], pod)] = ci
             em, pf, p10 = a['em'], a['pf'], a['p10']
             pres = tot = outside = 0
             for r in range(hr + 1, (ws.max_row or hr) + 1):

@@ -13,9 +13,12 @@ it rather than trusting it.
 
 ## 1. What this does, in one line
 
-Every Monday it reads the Zoom attendee reports for the week's live sessions,
-marks Present/Absent into a copy of the Master Batch Rosters, and publishes the
-data a Streamlit app shows.
+It reads the Zoom attendee reports for a week's live sessions, marks
+Present/Absent into a copy of the Master Batch Rosters, and publishes the data a
+Streamlit app shows. Since 2026-09-10 it runs when a human asks it to — the owner
+uploads the week's exports on the dashboard's **Add data** tab and that
+dispatches the job — and it marks only the sessions that are not marked yet
+(§4g). There is no schedule.
 
 ## 2. The architecture that matters
 
@@ -23,10 +26,11 @@ The heavy work runs **off** the Streamlit server. This is the single most
 important thing to understand:
 
 ```
-GitHub Actions (Mon 06:00 IST)          private Shared Drive         Streamlit app
-  .github/workflows/refresh.yml   ──►   attendance.duckdb      ──►   attendance_app.py
-  runs pipeline.py                      (+ marked .xlsx)             downloads & renders
-  fetch → mark → analyse → build                                     ~15-30s, no marking
+ app "Add data" tab                    GitHub Actions              private Shared Drive        Streamlit app
+  upload Zoom exports  ──► Drive  ──►  refresh.yml (dispatch)  ──►  attendance.duckdb    ──►  attendance_app.py
+  + dispatch the run                    runs pipeline.py             (+ marked .xlsx,          downloads & renders
+                                        fetch → mark → build          which is next week's     ~15-30s, no marking
+                                                                      BASE — see §4g)
 ```
 
 **Never move fetching or marking back into the app.** It was there originally and
@@ -47,8 +51,8 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 
 | File | Role |
 |---|---|
-| `pipeline.py` | the weekly job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--no-upload`, `--no-site`, `--allow-partial`, `--mode`, `--no-cache`, `--cache-file` (§4f). |
-| `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), Roster, Day-1 analysis, Forecast, BSIAI). Reads the store; does not compute. |
+| `pipeline.py` | the job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--incremental` (mark only what is unmarked — §4g), `--no-upload`, `--no-site`, `--allow-partial`, `--mode`, `--no-cache`, `--cache-file` (§4f). |
+| `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), Roster, Day-1 analysis, Forecast, BSIAI, **Add data**). Reads the store; does not compute. |
 | `attendance_core.py` | the marker engine: parses Zoom reports + L2, writes Present/Absent into the workbook. |
 | `dashboard_core.py` | `compute()` (per batch × session) and `roster_grid()` (per-student grid). |
 | `data.py` | pure data layer → the `DATA`/`summary` objects the dashboard renders. No I/O, unit-tested. |
@@ -64,6 +68,8 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `sessionmeta.py` | duration, peak, the per-minute retention curve and stickiness, swept from the attendee report's own join/leave times. Pure, unit-tested. See §4e. |
 | `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
 | `trainers.py` | per-trainer rollups + identity resolution (91 L2 spellings -> 63 people). Pure, unit-tested. See §4e. |
+| `carryforward.py` | last week's marked columns carried onto this week's roster export — the base workbook for `--incremental`. Pure, unit-tested. See §4g. |
+| `ingest.py` | the **Add data** tab's engine: reads the uploaded file names, checks them against L2, puts them on Drive, dispatches the workflow. Pure parts unit-tested. |
 | `archive.py` | dated snapshots of the four source Sheets, the store, **and the marked workbook** into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
 | `site_build.py`, `site_templates/` | the static-website build. See §7 — it is **wired to deploy**, not inert. |
 
@@ -443,6 +449,133 @@ the write, so a knowingly incomplete week leaves no residue. Entries carry
 `first_seen` and expire after 90 days, so ~8% of the corpus is re-derived from
 scratch every week with nobody remembering to do anything.
 
+### 4g. The freeze: sessions are marked once (added 2026-09-10)
+
+**The Monday cron is gone and nothing is rebuilt automatically.** The owner
+supplies each week's Zoom exports by hand, the dashboard's **Add data** tab puts
+them on Drive and dispatches the workflow, and `pipeline.py --incremental` marks
+ONLY the sessions that are not marked yet. Every other column is copied forward
+untouched. This was decided twice, with the cost stated both times, and it is a
+deliberate reversal of the rule in §5.11.
+
+**What it costs.** A counting fix no longer reaches the past. The last-10-digit
+phone fix (§5.3) lifted three months of sessions by 8.4% precisely because
+everything was re-marked weekly; under the freeze it would have repaired only
+the week it shipped. B29+ will accumulate frozen columns exactly as B17-B28
+already carry 133 of them — the mechanism is now intended rather than accidental.
+**The remedy is one command, and a human has to choose it:** dispatch the
+workflow with `incremental` unticked (or run `python pipeline.py` with no flag)
+to re-mark every session from the Zoom exports.
+
+**The marked workbook is now the system of record.**
+`Master_Batch_Rosters_marked.xlsx` in the store folder is not just an output any
+more — it is next week's base. Three consequences:
+
+1. It is uploaded at step `[8a]`, *after* every gate, not at `[5/8]`. Publishing
+   it earlier froze sessions the store never published, and the next incremental
+   run would skip them because their columns were already in the base.
+2. `--incremental --allow-partial` deliberately does NOT update it. That flag
+   means the week is knowingly incomplete; freezing it would make a one-off into
+   permanent history.
+3. `archive/` (§4d) is the only route back. **Restore:** download
+   `archive/Master_Batch_Rosters_marked_<date>.xlsx`, upload it over
+   `Master_Batch_Rosters_marked.xlsx` in the store folder (Drive → Manage
+   versions → Upload new version, so the file id the store points at survives),
+   then dispatch a run. Every session between that date and now whose Zoom
+   folder is still on Drive is re-fetched automatically, because its column is
+   absent from the restored base. What cannot be repaired is the archived stores
+   for the bad weeks: they are immutable by design.
+
+**`carryforward.merge_marks` is the whole design**, and its two rules are what
+make it faithful to what a full re-mark would have produced:
+
+- **Identity is the marker's identity** — registered email, then the whole
+  registered number, then its last ten digits. Not the row number: rows move
+  every week. Measured 2026-09-10: 61,865 of 61,865 students matched.
+- **A student who joined after a session is `Absent` for it, but only in scope.**
+  A full re-mark writes `Absent` for any enrolled student not in that session's
+  attendee list, so this keeps every historical number identical when the mode
+  changes. Published percentages are `present ÷ today's strength` either way, so
+  blank and `Absent` publish the same figures; what `Absent` protects is
+  `data.build_batch`'s "marked > 30% of strength" validity gate, which drops a
+  column silently. On a POD column only that POD's students are filled — the
+  marker leaves everyone else empty, and filling them would put ten false
+  absences against every student on an eleven-POD day.
+
+**`attendance_core.session_key` is the ONE definition of what a session column
+is**, shared by the marker's `dmap`, the carry-forward and the "already marked,
+do not download again" check. It is `(date, POD)`, with the full date when the
+header carries a year and the year-blind `MM_DD` only for legacy hand-typed
+B17-B28 headers. Three copies of this rule drifted apart within a day of each
+other:
+
+- keying year-blind collided `9th May` (2025) with `2026_05_09`, and
+  `setdefault` dropped one of them — on a freeze, a session gone for good;
+- keying without the POD meant marking any one POD suppressed the download of
+  the other ten on that date, which is a whole day missing from a green run;
+- `pods.from_folder` could not read the unspaced `AI CAP B37 8PM-Techis` /
+  `AICAPB35, B36-Generalist` folder forms, so 53 of 609 already-marked sessions
+  were re-downloaded and re-marked every run — they were not frozen at all.
+
+**Measured against a full run, 2026-09-10.** Built both workbooks from the
+same 611 attendee files (full = all of them onto the pristine roster;
+incremental = the 58 newest onto the carried base) and compared every session
+column cell by cell:
+
+| | |
+|---|---|
+| session columns | **568 in both, none missing either way** |
+| students matched by the carry | **61,865 of 61,865** — 0 new, 0 dropped |
+| marks carried | 1,169,292 across 383 columns on 23 tabs |
+| folders the fetch skipped as already marked | 606 of 613 |
+| cells that disagree | **4**, on two B35 POD sessions of 23 Aug |
+
+The four are not lost data. Both remaining residuals have the same cause: **one
+session can sit in TWO folders whose names disagree**, because the two Shared
+Drives name the same session differently — `2026-08-23 - AI CAP B35 - Educators
+- Blueprint to Launch...` on one and `2026-08-23 - AI CAP B35 - Blueprint to
+Launch: Designing Courses with AI` on the other. Only the first names the POD,
+so the POD-aware skip suppresses that one and queues the other; the two modes
+therefore mark the column from *different copies of the same Zoom export*, and
+those copies genuinely differ by a row or two (§4b.4). Same for the one column
+that exists only in the incremental workbook — webinar 99261543123, which is
+**not in L2 at all**, so `REQUIRE_L2` hides it from the dashboard either way.
+
+The exact fix, if those four cells ever matter: resolve a folder's POD through
+L2 by webinar id rather than from the folder name, so the skip decision and the
+marking use the identical rule. It costs listing the contents of all ~613
+folders every run (no downloads) and would also remove the ~39 already-marked
+sessions that are currently re-fetched and re-marked because their folder name
+spells the POD in a way `pods.from_folder` still cannot read. Both are cost and
+noise, not error — and the direction is safe: nothing is ever skipped that has
+not been marked (`this-week-but-not-queued: 0` on every run measured).
+
+**GATE 6 is the freeze's only detector.** A carry-forward that mismatches
+students writes `Absent` over real Presents and nothing would ever correct it.
+The one observable symptom is a past session's present count going DOWN, which
+cannot happen legitimately, so any drop on a session last week's store published
+refuses the publish. A session that DISAPPEARS is reported, not gated: an L2 row
+being corrected legitimately hides one (§5.6), and gating that would go red
+every time somebody fixed the schedule.
+
+**Known, accepted, not yet solved:**
+
+- **A carried column whose Zoom export is later deleted from Drive loses its L2
+  topic** and is then hidden by `REQUIRE_L2` — `sheets.webinar_topic_lookup` is
+  keyed off the attendee file names still present on Drive. The carried workbook
+  is not self-sufficient. Persisting the webinar id per session column would fix
+  it.
+- **A pod switcher's old mark in their former pod's column stops being counted**
+  (`data.build_batch` counts only rows currently in that POD), so historical pod
+  attendance erodes with churn. Pre-existing and identical before the freeze —
+  the marker never cleared those cells either — but worth knowing, because it is
+  a number that moves with nobody touching the data. Measured pod churn over the
+  week to 2026-09-10: zero across all 48 pod/batch pairs.
+- **A SECOND session on a date+POD a batch already has** is skipped forever
+  rather than merged, because the fetch sees that key as marked. Today's marker
+  would have merged both into one column, so this only differs for two webinars
+  on one day for one batch and pod.
+
 ## 5. Invariants — break these and the numbers go silently wrong
 
 1. **Locate roster columns by HEADER TEXT, never by fixed letter** (see §4).
@@ -515,7 +648,10 @@ scratch every week with nobody remembering to do anything.
    the phone fix (§5.3) repaired three months of sessions precisely because they
    were being re-marked, and the 133 frozen B17–B28 columns are the standing
    counter-example of what a cache that is really a freeze does to your numbers.
-
+   ⚠️ **Since 2026-09-10 this applies to DERIVED numbers only.** The owner chose
+   to freeze the MARKS: `--incremental` carries them forward and never recomputes
+   them (§4g). The model layer — ratings, recap, trainers, forecast, day-1 — is
+   still rebuilt from scratch every run, so a fix there still reaches everything.
 ## 6. Security — THIS REPOSITORY IS PUBLIC
 
 **The app is behind a shared password** (added 2026-09-01). `attendance_app.py`
@@ -641,10 +777,15 @@ streamlit run attendance_app.py
 # rebuild the data locally, exactly like the CI dry run
 python pipeline.py --no-upload --no-site
 
+# the same, but marking ONLY unmarked sessions (what the Add data tab triggers).
+# Needs store_folder_id configured, since that is where last week's marked
+# workbook — the base it carries forward — lives.
+python pipeline.py --no-upload --no-site --incremental
+
 # tests — stdlib unittest; pytest is NOT in requirements.txt
 python -m unittest tests.test_data
 
-# all of them (345 as of 2026-09-09). `discover` does not work: tests/ has no
+# all of them (393 as of 2026-09-10). `discover` does not work: tests/ has no
 # __init__.py, so the start directory is "not importable" — name them instead.
 # test_dashboard_core_tabs takes ~2 min: it proves the bytes and tabs= paths
 # agree by running the SLOW path too, which is the point of it.
@@ -652,8 +793,17 @@ python -m unittest tests.test_data tests.test_polls tests.test_recap \
   tests.test_trainers tests.test_forecast tests.test_pods tests.test_bsiai \
   tests.test_archive tests.test_attendee_format tests.test_sessionmeta \
   tests.test_derived_cache tests.test_pipeline_cache_gate \
+  tests.test_carryforward tests.test_ingest \
   tests.test_dashboard_core_tabs
 ```
+
+**The equivalence check is the one to run after touching the carry-forward,
+`session_key`, `pods.from_folder` or the fetch's skip rule.** It builds a full
+and an incremental workbook from the same corpus and diffs every session column
+cell by cell — the only thing that can catch a freeze quietly rewriting history,
+since there is no rebuild to correct it. It needs Drive and takes ~5 minutes;
+the shape of it is in §4g, and the numbers it produced on 2026-09-10 are there
+to compare against.
 
 The cold-vs-warm proof for the derived-facts memo (§4f) is not part of the
 suite — it needs Drive and takes ~13 minutes. Run it after touching anything the
@@ -671,7 +821,9 @@ student contact data to disk.
 Run the real job on GitHub (needs `gh auth login` once):
 
 ```bash
+# incremental is the DEFAULT; pass it explicitly for a full re-mark of history
 gh workflow run "Refresh dashboard data" --repo mukram-web/attendance-suite
+gh workflow run "Refresh dashboard data" --repo mukram-web/attendance-suite -f incremental=false
 gh workflow run "Refresh dashboard data" --repo mukram-web/attendance-suite -f skip_upload=true
 gh run watch <id> --repo mukram-web/attendance-suite
 ```
