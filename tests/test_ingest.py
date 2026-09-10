@@ -40,6 +40,21 @@ class TestNames(unittest.TestCase):
                     "recording.mp4", "", None, "attendee_97466597585.csv"):
             self.assertIsNone(ingest.classify_name(bad), bad)
 
+    def test_a_hyphenated_attendee_date_is_refused_not_silently_dropped(self):
+        """attendance_core._parse_filename accepts underscores ONLY.
+
+        Accepting a hyphen here would let the file pass validation, reach Drive
+        and dispatch a run, and then be skipped by the marker without a word —
+        a green run that added nothing.
+        """
+        self.assertIsNone(
+            ingest.classify_name("attendee_97466597585_2026-09-13.csv"))
+        self.assertEqual(
+            ac._parse_filename("attendee_97466597585_2026_09_13.csv"),
+            ("97466597585", "2026_09_13"))
+        self.assertIsNone(
+            ac._parse_filename("attendee_97466597585_2026-09-13.csv"))
+
     def test_files_group_into_sessions(self):
         sessions, rejected = ingest.classify([
             "attendee_9912345678_2026_09_13.csv",

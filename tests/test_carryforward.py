@@ -373,18 +373,33 @@ class TestFidelity(unittest.TestCase):
         self.assertEqual(rep["unmatched_prev"], 2)
         self.assertEqual(rep["matched"], 2)
 
+    def test_an_email_change_is_not_reported_as_a_lost_student(self):
+        # The case the design exists to handle must not also raise the warning
+        # that says it failed. The old email key is never touched, so counting
+        # KEYS rather than students reported this student as not carried.
+        prev = book(tab([("old@x.com", "919886440098", "", ["Present"])],
+                        ["2026_08_23"]))
+        fresh = book(tab([("new@x.com", "919886440098", "", [])]))
+        _out, rep = cf.merge_marks(fresh, prev)
+        self.assertEqual(rep["matched"], 1)
+        self.assertEqual(rep["unmatched_prev"], 0)
+        self.assertEqual(rep["warnings"], [])
+
     def test_a_short_phone_number_keeps_its_marks(self):
         """_phone_hit checks the WHOLE number before the last ten digits,
         "kept for numbers too short to have a last-10 form". Indexing only the
         last ten made such a student look new - and a new student is written
         'Absent', so their Presents were overwritten for good."""
-        prev = book(tab([("a@x.com", "98765432", "", ["Present"])],
+        # The EMAIL must differ, or it matches first and the whole-number phone
+        # branch this test exists to pin is never exercised.
+        prev = book(tab([("old@x.com", "98765432", "", ["Present"])],
                         ["2026_08_23"]))
-        fresh = book(tab([("a@x.com", "98765432", "", [])]))
+        fresh = book(tab([("new@x.com", "98765432", "", [])]))
         out, rep = cf.merge_marks(fresh, prev)
         _hdr, rows = read(out)
-        self.assertEqual(rows["a@x.com"]["2026_08_23"], "Present")
+        self.assertEqual(rows["new@x.com"]["2026_08_23"], "Present")
         self.assertEqual(rep["new_students"], 0)
+        self.assertEqual(rep["matched"], 1)
 
     def test_a_duplicated_student_keeps_the_present(self):
         # Two rows for one person, one Present one Absent: the marker's rule is
@@ -491,7 +506,59 @@ class TestWithTheMarker(unittest.TestCase):
         self.assertEqual([h for h in hdr if h and ac.session_key(h)], ["2026_09_13"])
         self.assertEqual(rows["a@x.com"]["2026_09_13"], "Present")
 
+    def test_a_frozen_column_is_left_alone_even_when_its_files_arrive(self):
+        """The bug the `frozen` set exists to prevent, measured on real data.
+
+        One session can sit in TWO folders whose names disagree — the POD-named
+        one is skipped as already marked, the other is downloaded, and the marker
+        used to rewrite the carried column from that second copy of the same
+        Zoom export. The copies differ by a row or two: B35's 23 Aug Educators
+        session went 63 -> 60 present and Sales/Marketing/HR 88 -> 87, and
+        GATE 6 refused to publish. Freezing at the point of WRITE makes it
+        irrelevant which copy the fetch hands over.
+        """
+        prev = book(tab([("a@x.com", "919000000001", "", ["Present"])],
+                        ["2026_09_13"]))
+        fresh = book(tab([("a@x.com", "919000000001", "", [])]))
+        base, rep = cf.merge_marks(fresh, prev)
+        frozen = rep["_carried_keys"]
+        self.assertEqual(frozen, {("CAP", 35): {("2026_09_13", "")}})
+        # a copy of that very session turns up, with FEWER attendees
+        marked, report, _w = ac.process_files(
+            base, None,
+            [("2026-09-13 - AI CAP B35 - A topic/attendee_9912345678_2026_09_13.csv",
+              report_csv([("someone.else@x.com", "919000009999")]))],
+            values_only=True, frozen=frozen)
+        self.assertEqual([r["kind"] for r in report], ["frozen"])
+        _hdr, rows = read(marked)
+        self.assertEqual(rows["a@x.com"]["2026_09_13"], "Present")   # untouched
+
+    def test_a_frozen_batch_does_not_freeze_a_different_batch(self):
+        prev = book(tab([("a@x.com", "919000000001", "", ["Present"])],
+                        ["2026_09_13"]))
+        fresh = book(tab([("a@x.com", "919000000001", "", [])]),
+                     tab([("n@x.com", "919000000009", "", [])], [],
+                         sheet="AI CAP B40"))
+        base, rep = cf.merge_marks(fresh, prev)
+        # the same date for B40, which carried nothing, must still be marked
+        marked, report, _w = ac.process_files(
+            base, None,
+            [("2026-09-13 - AI CAP B40 - A topic/attendee_8812345678_2026_09_13.csv",
+              report_csv([("n@x.com", "919000000009")]))],
+            values_only=True, frozen=rep["_carried_keys"])
+        self.assertEqual([r["kind"] for r in report], ["NEW"])
+        _hdr, rows40 = read(marked, "AI CAP B40")
+        self.assertEqual(rows40["n@x.com"]["2026_09_13"], "Present")
+
     def test_a_session_a_year_later_does_not_overwrite_the_carried_column(self):
+        """A real 2027 session, with a real attendee, must not land on the 2026
+        column of the same day.
+
+        The first version of this test used an EMPTY 2027 report, so
+        process_files skipped the session entirely and the assertion passed
+        whether or not the year rule worked at all. The attendee below is what
+        makes it a test.
+        """
         prev = book(tab([("a@x.com", "919000000001", "", ["Present"])],
                         ["2026_09_13"]))
         fresh = book(tab([("a@x.com", "919000000001", "", [])]))
@@ -499,12 +566,14 @@ class TestWithTheMarker(unittest.TestCase):
         marked, report, _w = ac.process_files(
             base, None,
             [("2027-09-13 - AI CAP B35 - A topic/attendee_9912345678_2027_09_13.csv",
-              report_csv([], wid="9912345678", date="09/13/2027"))],
+              report_csv([("a@x.com", "919000000001")], date="09/13/2027"))],
             values_only=True)
+        self.assertEqual([r["kind"] for r in report], ["NEW"])   # a real mark
         hdr, rows = read(marked)
-        # the 2027 session is skipped (nobody attended) but must never have been
-        # allowed to land on the 2026 column
+        self.assertEqual([h for h in hdr if h and ac.session_key(h)],
+                         ["2026_09_13", "2027_09_13"])
         self.assertEqual(rows["a@x.com"]["2026_09_13"], "Present")
+        self.assertEqual(rows["a@x.com"]["2027_09_13"], "Present")
 
 
 if __name__ == "__main__":

@@ -81,6 +81,15 @@ def _sheet_session_cols(row1, row2, hr) -> dict:
     it can be written out verbatim, preserving the year and the POD that
     `_col_header` put there, and the topic so an `hr == 2` tab keeps its second
     header row.
+
+    Two columns that resolve to the SAME key are a pre-existing anomaly — one
+    session with two columns in the workbook. The leftmost wins here, matching
+    the marker's own `dmap.setdefault`, so the two agree about which one is the
+    session; the duplicate is simply not carried. Under a freeze that means it
+    is dropped, which is the right outcome for a column that should not exist,
+    but it is not announced. Detecting it properly needs this function to return
+    two values and every caller to change, and it has never been observed on the
+    live corpus, so it is written down rather than coded around.
     """
     out: dict = {}
     width = max(len(row1 or ()), len(row2 or ()))
@@ -188,9 +197,17 @@ def _read_previous(prev_bytes: bytes) -> dict:
                         got[k] = s
                 if not got:
                     continue
-                people += 1
+                # ONE bucket per student, shared by all their identity keys, so
+                # "how many students did we fail to place" can be counted by
+                # distinct bucket. Keyed per identity instead, a single student
+                # counted up to three times.
+                bucket = next((marks[i] for i in idents if i in marks), None)
+                if bucket is None:
+                    bucket = {}
+                    people += 1
                 for ident in idents:
-                    _merge_marks_into(marks.setdefault(ident, {}), got)
+                    marks.setdefault(ident, bucket)
+                _merge_marks_into(bucket, got)
             out[key] = {"sheet": name, "cols": cols, "marks": marks,
                         "people": people}
     finally:
@@ -212,9 +229,15 @@ def merge_marks(fresh_roster_bytes: bytes,
     one failure that would otherwise look like a healthy run with a shorter
     history.
     """
+    # `_carried_keys` is {batch_key: {session_key}} — every column this merge is
+    # responsible for, which is exactly the set the marker must leave alone
+    # (`attendance_core.process_files(frozen=...)`). Private, and holding tuple
+    # keys that JSON cannot express, so the pipeline pops it before the report
+    # goes into the store.
     report = {"tabs": 0, "carried": 0, "cells": 0, "filled": 0, "matched": 0,
               "new_students": 0, "unmatched_prev": 0, "already_present": 0,
-              "overridden": 0, "skipped_tabs": [], "warnings": []}
+              "overridden": 0, "skipped_tabs": [], "warnings": [],
+              "_carried_keys": {}}
     if not prev_marked_bytes:
         report["warnings"].append("no previous marked workbook — full run")
         return fresh_roster_bytes, report
@@ -288,9 +311,12 @@ def merge_marks(fresh_roster_bytes: bytes,
                 nxt += 1
             report["tabs"] += 1
             report["carried"] += len(placed)
+            # Both the newly-placed columns and the ones written onto: all of
+            # them now hold last week's marks and none may be re-marked.
+            report["_carried_keys"][bkey] = set(placed) | set(onto)
 
             marks = src["marks"]
-            used = set()
+            used, used_buckets = set(), set()
             for r in range(hr + 1, (ws.max_row or hr) + 1):
                 e = ac._cell_email(ws.cell(r, rm).value) if rm else ""
                 p = ac._cell_phone(ws.cell(r, rn).value) if rn else ""
@@ -298,6 +324,13 @@ def merge_marks(fresh_roster_bytes: bytes,
                 if not idents:
                     continue
                 got = next((marks[i] for i in idents if i in marks), None)
+                if got is not None:
+                    # Track the BUCKET, not the identity keys. A student whose
+                    # email changed is found through their phone, so their old
+                    # email key is never touched — counting keys made the merge
+                    # warn "their marks are not carried" about precisely the
+                    # case the design exists to handle.
+                    used_buckets.add(id(got))
                 if got is None:
                     report["new_students"] += 1
                     # In scope for a whole-batch column always; for a POD column
@@ -335,8 +368,10 @@ def merge_marks(fresh_roster_bytes: bytes,
             # Students whose history could not be placed anywhere on this tab.
             # Counted per tab against that tab's own population - the one number
             # that would reveal "we lost N students' marks", so it must not be a
-            # running total compared against a per-tab count.
-            left = len({i for i in marks if i[0] == "e"} - used)
+            # running total compared against a per-tab count. Counted over
+            # distinct BUCKETS (one per student) rather than identity keys, so a
+            # student found by phone after an email change is not reported lost.
+            left = len({id(v) for v in marks.values()} - used_buckets)
             if left:
                 report["unmatched_prev"] += left
                 report["warnings"].append(

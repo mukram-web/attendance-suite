@@ -233,23 +233,99 @@ def _store_coverage(path: str) -> dict | None:
         return None
 
 
-def _store_present(path: str) -> dict:
-    """{(batch, mm, pod): present} for every session a store published.
+def _grid_tables(con) -> list:
+    return [r[0] for r in con.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name LIKE 'grid_%'").fetchall()]
 
-    The yardstick for GATE 6. Under a freeze a past session's present count can
-    only stay flat or grow (a late-entered student who did attend gets credited
-    the next time that column is written); a DROP means the carry-forward lost
-    people, and there is no weekly rebuild to put them back.
+
+def _store_marks(path: str) -> dict:
+    """{(batch, column): frozenset(emails marked Present)} from a store's grids.
+
+    The yardstick for GATE 6, and it measures the MARKS rather than the
+    published `present` count on purpose. Those are different things: `present`
+    is recomputed every run over the students CURRENTLY in that batch and POD,
+    so one student switching POD — or one row deleted, or one email cell blanked
+    — lowers the published figure for every past session that student attended.
+    Nobody touched the data, a full re-mark produces the identical lower number,
+    and §4g lists that erosion as known and accepted. Gating on it would refuse
+    to publish on an ordinary roster edit, blame the carry-forward, and train
+    whoever is on duty to reach for --allow-partial, which switches off every
+    other gate too.
+
+    A cell in the workbook is exactly what the freeze owns. The comparison is
+    therefore over the students in BOTH stores' rosters: an arrival or a
+    departure cannot move it, and a carry-forward that mismatched identities
+    can.
     """
+    out = {}
     try:
         con = duckdb.connect(path, read_only=True)
-        raw = con.execute("SELECT value FROM meta WHERE key = 'sessions'").fetchone()
-        con.close()
-        rows = json.loads(raw[0]) if raw else []
-        return {(r["batch"], r.get("mm"), r.get("pod") or ""): r.get("present") or 0
-                for r in rows if r.get("mm")}
+        try:
+            for t in _grid_tables(con):
+                cols = [r[0] for r in con.execute(f'DESCRIBE "{t}"').fetchall()]
+                if "Email" not in cols:
+                    continue
+                for c in [x for x in cols if x[:4].isdigit()]:
+                    rows = con.execute(
+                        f'SELECT "Email" FROM "{t}" '
+                        f'WHERE lower(CAST("{c}" AS VARCHAR)) = ?', ["present"]
+                    ).fetchall()
+                    out[(t[5:], c)] = frozenset(
+                        str(e[0]).strip().lower() for e in rows if e[0])
+        finally:
+            con.close()
     except Exception:
         return {}
+    return out
+
+
+def lost_marks(prev_marks: dict, now_marks: dict,
+               prev_roster: dict, now_roster: dict) -> tuple:
+    """GATE 6's arithmetic, pulled out so it can be tested without Drive.
+
+    -> (lost, gone) where `lost` is [((batch, column), was, now, dropped)] for
+    columns that lost a Present belonging to a student BOTH weeks' rosters
+    contain, and `gone` is [(batch, column)] for columns that vanished.
+
+    Restricting to the shared roster is the whole point: a student who left, or
+    joined, or moved POD must not register as a loss, because none of those is
+    the carry-forward failing — and a gate that cries wolf on a roster edit is a
+    gate somebody switches off.
+    """
+    lost, gone = [], []
+    for key, was in (prev_marks or {}).items():
+        if key not in (now_marks or {}):
+            gone.append(key)
+            continue
+        both = ((prev_roster or {}).get(key[0]) or frozenset()) & \
+               ((now_roster or {}).get(key[0]) or frozenset())
+        if not both:
+            continue
+        dropped = len((was & both) - now_marks[key])
+        if dropped:
+            lost.append((key, len(was & both), len(now_marks[key] & both), dropped))
+    return lost, gone
+
+
+def _store_roster(path: str) -> dict:
+    """{batch: frozenset(emails)} — who each store's grids knew about."""
+    out = {}
+    try:
+        con = duckdb.connect(path, read_only=True)
+        try:
+            for t in _grid_tables(con):
+                cols = [r[0] for r in con.execute(f'DESCRIBE "{t}"').fetchall()]
+                if "Email" not in cols:
+                    continue
+                rows = con.execute(f'SELECT "Email" FROM "{t}"').fetchall()
+                out[t[5:]] = frozenset(str(e[0]).strip().lower()
+                                       for e in rows if e[0])
+        finally:
+            con.close()
+    except Exception:
+        return {}
+    return out
 
 
 def _previous_coverage(svc, store_folder_id: str) -> dict | None:
@@ -266,7 +342,15 @@ def _previous_coverage(svc, store_folder_id: str) -> dict | None:
         meta = live_data.find_in_folder(svc, store_folder_id, STORE_NAME)
         if not meta:
             return None
-        blob = live_data.fetch_store_snapshot(meta["id"])
+        # NOT fetch_store_snapshot: that one is download_cached, keyed on the
+        # bare file id, and attendance.duckdb keeps its id forever because
+        # upload_to_folder replaces it in place. On a machine with a warm
+        # .cache/ the first copy would then be served to every later run, so
+        # both gates would silently compare against the store as it stood the
+        # first time — on exactly the machine somebody uses to diagnose a gate
+        # failure. That cache is right for immutable archived snapshots and
+        # wrong for the live store.
+        blob = live_data.fetch_file_bytes(svc, meta["id"])
         tmp = os.path.join(HERE, ".cache", PREV_STORE)
         os.makedirs(os.path.dirname(tmp), exist_ok=True)
         with open(tmp, "wb") as fh:
@@ -601,18 +685,26 @@ def main() -> None:
                          + "\nRe-run the job; pass --allow-partial to override.")
 
     print("[3/8] Marking attendance …", flush=True)
+    # Carried columns are frozen at the point of WRITE, not just in the fetch.
+    # The fetch decides per folder and one session can sit in two folders whose
+    # names disagree, so a second copy of an already-marked export used to slip
+    # through and rewrite its column - measured as B35 23 Aug Educators going
+    # 63 -> 60 present, which GATE 6 then refused to publish.
+    _frozen = carry.pop("_carried_keys", None) if args.incremental else None
     if attendee_files:
         marked_bytes, report, warnings = ac.process_files(
             base_bytes, l2_bytes, attendee_files, mode=args.mode,
-            values_only=True)
+            values_only=True, frozen=_frozen)
     else:
         # Nothing new to mark is a normal outcome for an incremental run — a
         # mid-week upload of one session, or a re-run of a week already loaded.
         # It publishes the carried history unchanged rather than failing.
         marked_bytes, report, warnings = base_bytes, [], []
     new_n = sum(1 for r in report if r["kind"] == "NEW")
-    print(f"   {len(report)} session column(s) marked "
+    froze_n = sum(1 for r in report if r["kind"] == "frozen")
+    print(f"   {len(report) - froze_n} session column(s) marked "
           f"({new_n} new) · {len(warnings)} warning(s)"
+          + (f" · {froze_n} already frozen, left alone" if froze_n else "")
           + (" — nothing new this run" if not report else ""))
 
     # Same rule as the attendee and day-1 gates: a session dropped because Zoom
@@ -664,35 +756,32 @@ def main() -> None:
             + "\n  - ".join(day1.get("errors") or ["no batches produced"])
             + "\nRe-run the job; pass --allow-partial to publish without it.")
 
-    # With --incremental the marked workbook stops being only an OUTPUT: it is
-    # next week's base. Uploading it here - before the day-1 gate's siblings,
-    # before build_store and before GATE 5/6 - would freeze sessions that the
-    # store never published, and the next incremental run would skip them
-    # because their columns are already in the base. So when a previous copy
-    # exists its id is merely looked up now (upload_to_folder replaces in place,
-    # so the id is stable) and the bytes go up beside the store at [8a], once
-    # every gate has passed.
+    # The marked workbook stops being only an OUTPUT: under --incremental it is
+    # next week's base. Uploading it HERE - before build_store, before GATE 5
+    # and GATE 6 - would freeze sessions the store never published, and the next
+    # incremental run would skip them because their columns are already in the
+    # base. So it is held back to [8a], after every gate AND after the store.
+    #
+    # ALWAYS held back, in full runs too, and not conditioned on a previous copy
+    # existing. Making the deferral depend on `find_in_folder` returning
+    # something meant a single transient Drive error - swallowed by the bare
+    # `except` below, and a separate API call from the one [1c] already made -
+    # silently reverted to publishing before the gates, including under
+    # --allow-partial. A rule that quietly turns itself off is not a rule. The
+    # only cost of deferring unconditionally is that the very first run leaves
+    # `marked_xlsx_file_id` empty, so the store's download button waits a week.
     marked_xlsx_file_id = ""
-    _existing_marked = None
     if cfg["store_folder_id"]:
         try:
-            _existing_marked = live_data.find_in_folder(
-                svc, cfg["store_folder_id"], MARKED_NAME)
+            # Just the id, for the store's download button: upload_to_folder
+            # replaces in place, so the id is stable across runs.
+            _hit = live_data.find_in_folder(svc, cfg["store_folder_id"], MARKED_NAME)
+            marked_xlsx_file_id = _hit["id"] if _hit else ""
         except Exception:
-            _existing_marked = None
-    _defer_marked = bool(args.incremental and not args.no_upload and _existing_marked)
-    if not args.no_upload and not _defer_marked:
-        print("[5/8] Uploading marked roster xlsx …", flush=True)
-        marked_xlsx_file_id = live_data.upload_to_folder(
-            svc, cfg["store_folder_id"], MARKED_NAME, marked_bytes, XLSX_MIME)
-    else:
-        # --no-upload: keep pointing at the xlsx a previous full run left on
-        # Drive, so a locally built store doesn't lose the download button if it
-        # is copied into the store folder by hand.
-        marked_xlsx_file_id = _existing_marked["id"] if _existing_marked else ""
-        if _defer_marked:
-            print("[5/8] Marked roster xlsx held back until the gates pass "
-                  "(--incremental: it is next week's base)", flush=True)
+            marked_xlsx_file_id = ""
+    if not args.no_upload:
+        print("[5/8] Marked roster xlsx held back until the gates pass "
+              "(it is next week's base)", flush=True)
 
     # BSIAI — a separate programme with its own roster Sheet, its own batch
     # numbering and no session columns anywhere, so it is computed from the
@@ -963,42 +1052,49 @@ def main() -> None:
     # recomputed, and a re-marked column can only gain people. So any drop on a
     # session last week's store already published refuses the publish.
     #
-    # A session that DISAPPEARS is not gated here on purpose - an L2 row being
-    # corrected legitimately hides one (REQUIRE_L2, §5.6), and gating that would
-    # go red every time somebody fixed the schedule. It is reported instead.
+    # A session column that DISAPPEARS is not gated here on purpose - an L2 row
+    # being corrected legitimately hides one (REQUIRE_L2, §5.6), and gating that
+    # would go red every time somebody fixed the schedule. It is reported.
     # _prev_cov is not None only when this run actually wrote _prev_store.duckdb,
     # so this can never compare against a leftover from an earlier local run.
     _prev_path = os.path.join(HERE, ".cache", PREV_STORE)
     if _prev_cov and os.path.exists(_prev_path):
-        _prev_p = _store_present(_prev_path)
-        _now_p = _store_present(store_path)
-        if _prev_p and _now_p:
-            _lost = [(k, v, _now_p[k]) for k, v in _prev_p.items()
-                     if k in _now_p and _now_p[k] < v]
-            _gone = [k for k in _prev_p if k not in _now_p]
+        _pm, _nm = _store_marks(_prev_path), _store_marks(store_path)
+        _pr, _nr = _store_roster(_prev_path), _store_roster(store_path)
+        if not _pm or not _nm:
+            # "the gate ran and found nothing" and "the gate did not run" must
+            # never look identical in the log - not on a system where a bad
+            # mark is permanent.
+            print("   GATE 6: SKIPPED - no roster grids readable in "
+                  + ("last week's" if not _pm else "this week's")
+                  + " store, so the freeze's only detector did NOT run.",
+                  flush=True)
+        else:
+            _lost, _gone = lost_marks(_pm, _nm, _pr, _nr)
             if _gone:
-                print(f"   GATE 6: {len(_gone)} session(s) last week's store had "
-                      "are not in this one (an L2 row corrected, or a Zoom export "
-                      "withdrawn): "
-                      + ", ".join(f"{b} {mm}{' ' + pod if pod else ''}"
-                                  for b, mm, pod in _gone[:5]), flush=True)
+                print(f"   GATE 6: {len(_gone)} session column(s) last week's "
+                      "store had are not in this one (an L2 row corrected, or a "
+                      "Zoom export withdrawn): "
+                      + ", ".join(f"{b} {c}" for b, c in _gone[:5]), flush=True)
             if _lost and not args.allow_partial:
                 raise SystemExit(
                     "Refusing to publish: "
-                    f"{len(_lost)} already-published session(s) LOST attendance — "
-                    "the previous store is left in place:\n  - "
+                    f"{len(_lost)} already-published session(s) LOST marks for "
+                    "students who are in BOTH weeks' rosters — the previous "
+                    "store is left in place:\n  - "
                     + "\n  - ".join(
-                        f"{b} {mm}{' ' + pod if pod else ''}: {was:,} → {now:,}"
-                        for (b, mm, pod), was, now in _lost[:8])
+                        f"{b} {c}: {was:,} → {now:,} present ({d:,} lost)"
+                        for (b, c), was, now, d in _lost[:8])
                     + (f"\n  ... and {len(_lost) - 8} more"
                        if len(_lost) > 8 else "")
-                    + "\nA frozen session cannot lose people, so this is the "
-                      "carry-forward failing to match students — check the [1c] "
-                      "line for how many were matched. Re-run WITHOUT "
-                      "--incremental to re-mark from the Zoom exports; "
-                      "--allow-partial publishes anyway.")
-            print(f"   GATE 6: {len(_prev_p):,} published session(s) checked, "
-                  f"{len(_lost)} lost attendance", flush=True)
+                    + "\nThe same students are in both weeks, so no roster edit "
+                      "explains this: the carry-forward failed to match them. "
+                      "Check the [1c] line for how many it matched, re-run "
+                      "WITHOUT --incremental to re-mark from the Zoom exports, "
+                      "or pass --allow-partial to publish anyway.")
+            print(f"   GATE 6: {len(_pm):,} published session column(s) checked "
+                  f"over the students both weeks share, {len(_lost)} lost marks",
+                  flush=True)
 
     # The static website the team actually opens. Built from the store that was
     # just written, so the site can never disagree with the app.
@@ -1018,25 +1114,34 @@ def main() -> None:
         print(f"[8/8] Skipped upload (--no-upload). Store at: {store_path}")
         return
 
-    # [8a] Now that every gate has passed, the marked workbook may become next
-    # week's base. Under --allow-partial it may NOT: that flag means this week's
-    # marks are knowingly incomplete, and freezing them would make a deliberate
-    # one-off into permanent history.
-    if _defer_marked and args.allow_partial:
-        print("[8a] NOT updating the marked roster xlsx: --allow-partial means "
-              "this week's marks are knowingly incomplete, so they must not "
-              "become next week's frozen base.", flush=True)
-    elif _defer_marked:
-        print("[8a] Uploading the marked roster xlsx (next week's base) …",
-              flush=True)
-        live_data.upload_to_folder(svc, cfg["store_folder_id"], MARKED_NAME,
-                                   marked_bytes, XLSX_MIME)
-
     print("[8/8] Uploading the store …", flush=True)
     with open(store_path, "rb") as fh:
         store_bytes = fh.read()
     live_data.upload_to_folder(svc, cfg["store_folder_id"], STORE_NAME,
                                store_bytes)
+
+    # [8a] The store is published, so the workbook behind it may now become next
+    # week's base. This order matters: the base is the irreversible write of the
+    # two, so it goes SECOND. If the store upload fails, the base simply lacks
+    # this week's columns, their folders are fetched again next run and GATE 6
+    # sees equal-or-greater counts — the failure heals itself. The other order
+    # left the base ahead of the published data, which is the exact asymmetry
+    # holding it back past the gates was meant to remove.
+    #
+    # Under --allow-partial the base is not written at all: that flag means this
+    # week's marks are knowingly incomplete, and freezing them would turn a
+    # deliberate one-off into permanent history.
+    _base_published = False
+    if args.allow_partial:
+        print("[8a] NOT updating the marked roster xlsx: --allow-partial means "
+              "this week's marks are knowingly incomplete, so they must not "
+              "become next week's frozen base.", flush=True)
+    else:
+        print("[8a] Uploading the marked roster xlsx (next week's base) …",
+              flush=True)
+        marked_xlsx_file_id = live_data.upload_to_folder(
+            svc, cfg["store_folder_id"], MARKED_NAME, marked_bytes, XLSX_MIME)
+        _base_published = True
 
     # Dated snapshots of the four source Sheets (+ this store) into archive/ on
     # the same private Shared Drive. The store itself is REPLACED every week, so
@@ -1049,9 +1154,13 @@ def main() -> None:
     # that. Failures are reported, not raised.
     print("[8b] Archiving the source sheets …", flush=True)
     try:
+        # The dated marked snapshot is what §4g's restore procedure installs AS
+        # the live base, and archive snapshots are immutable by design — so it
+        # must never hold marks [8a] refused to publish. Skipping it under
+        # --allow-partial keeps that restore trustworthy.
         archive.run(svc, cfg, cfg["store_folder_id"],
                     when=datetime.now(IST).date(), store_bytes=store_bytes,
-                    marked_bytes=marked_bytes)
+                    marked_bytes=marked_bytes if _base_published else None)
     except Exception as e:
         print(f"   WARNING: archive step failed entirely ({e})")
 

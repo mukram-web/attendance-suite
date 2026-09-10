@@ -249,7 +249,7 @@ mistake it for today. Two things to know:
 
 - Snapshots load through `_load_snapshot`, deliberately NOT `_load_store`. They
   are immutable so they cache permanently rather than on the live store's
-  30-minute TTL, and they must never be written to `_STORE_PATH` — that would
+  5-minute TTL, and they must never be written to `_STORE_PATH` — that would
   leave last month's data where the live loader expects today's.
 - **The marked .xlsx download follows the week you are viewing.** An archived
   week's store still carries `marked_xlsx_file_id`, but that id points at the
@@ -785,7 +785,7 @@ python pipeline.py --no-upload --no-site --incremental
 # tests — stdlib unittest; pytest is NOT in requirements.txt
 python -m unittest tests.test_data
 
-# all of them (393 as of 2026-09-10). `discover` does not work: tests/ has no
+# all of them (406 as of 2026-09-10). `discover` does not work: tests/ has no
 # __init__.py, so the start directory is "not importable" — name them instead.
 # test_dashboard_core_tabs takes ~2 min: it proves the bytes and tabs= paths
 # agree by running the SLOW path too, which is the point of it.
@@ -793,7 +793,7 @@ python -m unittest tests.test_data tests.test_polls tests.test_recap \
   tests.test_trainers tests.test_forecast tests.test_pods tests.test_bsiai \
   tests.test_archive tests.test_attendee_format tests.test_sessionmeta \
   tests.test_derived_cache tests.test_pipeline_cache_gate \
-  tests.test_carryforward tests.test_ingest \
+  tests.test_carryforward tests.test_ingest tests.test_gate6 \
   tests.test_dashboard_core_tabs
 ```
 
@@ -838,8 +838,8 @@ secrets, or the store could not be downloaded.
 `generated_at_iso`, `batches`, `sheet_map`, `marked_xlsx_file_id`, `stamps`,
 `day1`, `forecast`, `recap`, `trainers`, `sessions`, `cache`), the `compute` table (per batch × session), and one `grid_<batch>` table per
 batch. The `grid_*` tables carry emails and phones — that is why the store is
-PII and lives in a private Shared Drive. The app caches it with a **30-minute TTL**,
-so Monday's rebuild reaches viewers on its own; 🔄 Refresh forces it immediately.
+PII and lives in a private Shared Drive. The app caches it with a **5-minute TTL**,
+so an upload reaches other viewers on its own; 🔄 Refresh forces it immediately.
 
 Local runs read `.streamlit/secrets.toml` and the service-account `.json` key next
 to the code; CI uses env vars instead. `.cache/` holds the attendee byte cache and

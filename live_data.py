@@ -29,7 +29,6 @@ Only the `google-*` packages in requirements.txt are needed for this; they are
 imported lazily so upload-only use never has to install them locally.
 """
 from __future__ import annotations
-import datetime
 import hashlib
 import io
 import os
@@ -37,8 +36,6 @@ import re
 import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
-
-import pods as _pods            # pure, no third-party deps: safe at import time
 
 # Zoom export bytes are cached on disk so restarts skip re-downloading hundreds
 # of CSVs. This used to say "attendee files never change once uploaded" and key
@@ -99,6 +96,33 @@ def _drive_service():
         import streamlit as st
         info, scopes = dict(st.secrets["gcp_service_account"]), _SCOPES
     creds = Credentials.from_service_account_info(info, scopes=scopes)
+    return build("drive", "v3", credentials=creds, cache_discovery=False)
+
+
+def rw_service():
+    """A Drive client that may WRITE, built WITHOUT changing the module default.
+
+    `_SCOPES` is read-only on purpose: the app reads a prebuilt store and must
+    not be able to alter anything on Drive (§6 — this repository is public and
+    the store holds student PII). The "Add data" tab is the one exception, and
+    it needs an explicit, local widening rather than `set_service_account`,
+    which mutates module globals and would hand write access to every other
+    code path in the process for the life of the server.
+
+    Without this the tab could not work at all: `upload_to_folder` on a
+    read-only client is a 403, and the failure would surface only after the
+    user had already chosen their files.
+    """
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+
+    if _CREDS_INFO is not None:
+        info = dict(_CREDS_INFO)
+    else:
+        import streamlit as st
+        info = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(
+        info, scopes=["https://www.googleapis.com/auth/drive"])
     return build("drive", "v3", credentials=creds, cache_discovery=False)
 
 
@@ -426,7 +450,11 @@ def _existing_sessions(roster_bytes: bytes) -> dict:
             sk = ac.session_key(v1, v2, hr)
             if sk:
                 dates.add(sk)
-        out[k] = dates
+        # FIRST tab wins when two tabs map to the same batch key, matching
+        # `process_files`' `key_sheet` (attendance_core.py: `if k not in
+        # key_sheet`). Last-wins here meant the fetch and the marker disagreed
+        # about which tab a duplicate batch key refers to.
+        out.setdefault(k, dates)
     wb.close()
     return out
 
