@@ -3,7 +3,7 @@ Be10X — AI CAP Attendance (unified app)
 ========================================
 
 The app renders a PREBUILT store when one is available: pipeline.py (run by
-GitHub Actions every Monday 06:00 IST) fetches the roster + Zoom reports, marks
+GitHub Actions, dispatched from the Add data tab) fetches the roster + Zoom reports, marks
 attendance, and uploads one small attendance.duckdb to a private Drive folder.
 The app just downloads that file and renders — opens in seconds, and the
 memory-heavy marking never runs on the Streamlit server.
@@ -241,7 +241,7 @@ def _store_folder_id() -> str:
 # viewers on its own. Without a TTL, one cached load would pin the whole server
 # to that week's data until somebody happened to press Refresh.
 # Short on purpose. The owner now adds a week's data themselves and the
-# dashboard is expected to show it straight away; 30 minutes meant a
+# dashboard is expected to show it straight away; 5 minutes meant a
 # colleague could be looking at pre-upload numbers with no way to tell.
 _STORE_TTL_SECONDS = 5 * 60
 
@@ -331,7 +331,7 @@ def _load_snapshot(file_id, name):
 
     Kept separate from _load_store rather than parameterised, for two reasons:
     a snapshot is immutable so it wants permanent caching rather than the live
-    store's 30-minute TTL, and it must never be written to _STORE_PATH — doing
+    store's 5-minute TTL, and it must never be written to _STORE_PATH — doing
     so would leave last month's data sitting where the live loader expects
     today's, and the app would serve it as current long after the user moved on.
     """
@@ -463,7 +463,7 @@ with st.sidebar:
     if st.button("🔄 Refresh from Google", width='stretch',
                  disabled=not (live_ready or _store_available),
                  help="Pull the latest prebuilt dashboard from Drive "
-                      "(the pipeline rebuilds it every Monday 06:00 IST)"):
+                      "(rebuilt when a week's Zoom exports are added)"):
         st.session_state.nonce += 1
         st.cache_data.clear()
         st.rerun()
@@ -564,7 +564,7 @@ if not _viewing and _store_available:
             )
         else:
             st.sidebar.caption(f"📅 Data as of **{store['generated_at']}** · "
-                               "rebuilt every Monday 06:00 IST")
+                               "rebuilt when data is added")
         pipeline_mode = (store.get("stamps") or {}).get("mode") or "exact"
         st.sidebar.caption(f"Matching rule: **{pipeline_mode}** (set by the pipeline)")
     elif loaded and loaded.get("error"):
@@ -745,7 +745,8 @@ with tab_dash:
     if store_mode:
         # Everything was prebuilt by pipeline.py — render straight from the store.
         DATA, summary = store["DATA"], store["summary"]
-        note = f"🟢 Data as of {store['generated_at']} · rebuilt every Monday 06:00 IST"
+        note = (f"🟢 Data as of {store['generated_at']} · rebuilt when a week's "
+                "Zoom exports are added (➕ Add data)")
     else:
         # Legacy: build from the roster this server just marked.
         if live_ready and not live_failed:
@@ -1928,8 +1929,12 @@ with tab_add:
         if _f.name.lower().endswith(".zip"):
             try:
                 with zipfile.ZipFile(io.BytesIO(_f.getvalue())) as _z:
+                    # Read only the members that are Zoom exports. Reading
+                    # everything first and filtering after would pull a session
+                    # RECORDING - gigabytes - into this 1 GB process to decide
+                    # it was not wanted.
                     for _m in _z.namelist():
-                        if not _m.endswith("/"):
+                        if not _m.endswith("/") and _ingest.classify_name(_m):
                             _blobs[_m] = _z.read(_m)
             except Exception as _e:
                 _bad_zip.append(f"{_f.name}: {_e}")
@@ -1940,7 +1945,14 @@ with tab_add:
 
     _sessions, _rejected = _ingest.classify(list(_blobs))
     _l2_bytes = None
-    if _l2_id:
+    if not _l2_id:
+        # Without L2 every session looks unscheduled and the page would blame
+        # the schedule for a configuration problem.
+        st.error("`drive.l2_id` is not configured, so the L2 schedule cannot be "
+                 "read and every session below will look unscheduled. Add it to "
+                 "the app's secrets — this is a setup problem, not a problem "
+                 "with your files.")
+    else:
         try:
             _l2_bytes, _ = live_data.fetch_sheet_cached(
                 live_data._drive_service(), _l2_id)
@@ -1962,6 +1974,29 @@ with tab_add:
             "Attendee files": _r0["n_attendee"], "Poll files": _r0["n_poll"],
         } for _r0 in _rows]), width="stretch", hide_index=True)
 
+    # Sessions already marked are FROZEN: the pipeline will leave them exactly
+    # as they are, whatever arrives (attendance_core.process_files(frozen=...)).
+    # Saying nothing here would mean a green run, a longer file list on Drive and
+    # no change at all - the same trap the L2 check above exists to prevent.
+    _already = []
+    for _r0 in _rows:
+        _mm = f"{_r0['ymd'][5:7]}_{_r0['ymd'][8:10]}"
+        for _b0 in _r0["batches"]:
+            if any(_s0.get("batch") == _b0 and _s0.get("mm") == _mm
+                   and (_s0.get("pod") or "") == _r0["pod"]
+                   for _s0 in ((store or {}).get("sessions") or ())):
+                _already.append(f"{_r0['date']} {_b0}"
+                                + (f" {_r0['pod']}" if _r0["pod"] else ""))
+                break
+    if _already:
+        st.warning(
+            "**Already marked, and marks are frozen** — these will be uploaded "
+            "and kept on Drive, but the run will leave their existing numbers "
+            "untouched: " + ", ".join(_already[:6])
+            + (f" and {len(_already) - 6} more" if len(_already) > 6 else "")
+            + ". To replace them, run the workflow from GitHub's Actions tab "
+              "with **incremental** unticked.")
+
     _blocks = _ingest.blockers(_rows, _rejected) + _bad_zip
     if _blocks:
         for _b in _blocks:
@@ -1981,7 +2016,10 @@ with tab_add:
         "is left exactly as it is."
     )
     if st.button("Upload and refresh the dashboard", type="primary", key="add_go"):
-        _svc = live_data._drive_service()
+        # A WRITE-capable client, built just for this. The app's default Drive
+        # client is read-only (live_data._SCOPES, §6) and upload_to_folder on it
+        # is a 403 — which would only have surfaced after the files were chosen.
+        _svc = live_data.rw_service()
         _drive = _ingest.target_drive(_att_id)
         with st.status("Adding this week's data...", expanded=True) as _status:
             try:

@@ -41,7 +41,11 @@ import pods as _pods
 # `attendance_core._parse_filename`; `poll_` is `polls.name_key`. A file that
 # matches neither is refused rather than uploaded: the parsers skip unknown
 # names in silence, so it would sit on Drive forever doing nothing.
-_ATTENDEE = re.compile(r"^attendee_(\d{9,})_(20\d\d)[_-](\d{2})[_-](\d{2})", re.I)
+# Underscores only, because `attendance_core._parse_filename` accepts only
+# underscores. Allowing a hyphen here would let 'attendee_99_2026-09-13.csv'
+# pass this page's validation, upload, dispatch a run — and then be skipped in
+# silence by the marker, which is the worst of the three outcomes.
+_ATTENDEE = re.compile(r"^attendee_(\d{9,})_(20\d\d)_(\d{2})_(\d{2})", re.I)
 _POLL = re.compile(r"^poll_(\d{9,})_(20\d\d)[_-](\d{2})[_-](\d{2})", re.I)
 # The hand-saved form the poll reader also accepts: '9912345678 - 2026-08-30 - Poll Report.csv'
 _POLL_ALT = re.compile(r"^(\d{9,})\s*[-_]\s*(20\d\d)[-_](\d{2})[-_](\d{2}).*poll", re.I)

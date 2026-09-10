@@ -462,7 +462,8 @@ def process(roster_bytes, l2_bytes, zip_bytes, mode='exact', values_only=False):
     return process_files(roster_bytes, l2_bytes, files, mode=mode, values_only=values_only)
 
 
-def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_only=False):
+def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_only=False,
+                  frozen=None):
     """Same engine as process(), but attendee data arrives as a list of
     (name, raw_bytes) pairs instead of a ZIP.
 
@@ -478,6 +479,20 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
     static text, so the marked workbook still carries every Present/Absent when
     read straight back by a values-only reader (the dashboard). Without this,
     saving a formula-based roster drops those cached values.
+
+    `frozen`: {batch_key: {session_key}} that must NOT be re-marked, whatever
+    files arrive for them. This is what makes `--incremental` mean what it says.
+    Without it the freeze lived only in the FETCH, which decides per FOLDER — and
+    one session can sit in two folders whose names disagree ("...B35 - Educators
+    - Blueprint to Launch..." on one drive, "...B35 - Blueprint to Launch..." on
+    the other). The POD-named one is skipped, the other is downloaded, and the
+    marker cheerfully rewrites the carried column from that second copy of the
+    same Zoom export — which differs by a row or two. Measured 2026-09-10: that
+    moved B35's 23 Aug Educators session 63 -> 60 present and Sales/Marketing/HR
+    88 -> 87, and GATE 6 refused to publish, exactly as it should. A frozen
+    column is now left alone at the point of WRITE, so it cannot matter which
+    copy the fetch happens to hand over. Re-marking one deliberately is what a
+    run without --incremental is for.
 
     Returns (output_xlsx_bytes, report_rows, warnings).
     """
@@ -633,6 +648,15 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
             # column beside it.
             hit = (a['ymd'], pod) if (a['ymd'], pod) in dmap else (
                 (mm, pod) if (mm, pod) in dmap else None)
+            # A carried column is frozen: leave it exactly as it is, whichever
+            # duplicate copy of its export turned up. See `frozen` above.
+            _fz = (frozen or {}).get(_sheet_key(sheet)) or ()
+            if hit and hit in _fz:
+                report.append(dict(batch=sheet, date=a['ymd'],
+                                   col=get_column_letter(dmap[hit]),
+                                   kind='frozen', topic=a['topic'], pod=pod,
+                                   present=0, total=0, outside=0))
+                continue
             if hit:
                 ci, kind = dmap[hit], 're-mark'
             else:
