@@ -94,7 +94,8 @@ def _parse_filename(fname):
     m = re.match(r'attendee_(\d+)_((20\d\d)_(\d{2})_(\d{2}))', fname)
     return (m.group(1), m.group(2)) if m else None
 
-def _track(seg):
+def _track_named(seg):
+    """The programme this text actually NAMES, or None if it names none."""
     s = seg.lower()
     # BSIAI first: its folders and L2 rows say 'BSIAI B1', 'BSI AI B3' or a
     # plain 'BSI B1'. Without this they fall through to CAP and collide head-on
@@ -103,25 +104,53 @@ def _track(seg):
     if 'ecap' in s or 'e-cap' in s: return 'ECAP'
     if re.search(r'\bus\b', s):      return 'US'
     if 'lcp' in s:                   return 'LCP'
-    return 'CAP'
+    if 'cap' in s:                   return 'CAP'
+    return None
+
+def _track(seg):
+    return _track_named(seg) or 'CAP'
 
 def extract_batches(text):
-    """A batch-name string -> set of (track, number) keys. Handles &, + / commas, and - ranges."""
+    """A batch-name string -> set of (track, number) keys. Handles &, + / commas, and - ranges.
+
+    Each `+`/`,` item is read on its OWN, for two reasons found in real L2 rows
+    on 2026-09-14:
+
+    * **A bare number is still a batch.** 'AI CAP B20 + 21' means B20 AND B21,
+      but only a B-prefixed number was ever matched, so B21 silently lost the
+      session - as did B23 and B25 on 'AI CAP B22 + 23 + 25', and B27 on
+      'AI CAP B26 + 27'. A bare number counts only when the item is NOTHING but
+      that number, so 'AI CAP B17 11AM' - which has no separator at all - can
+      never have its '11AM' read as B11.
+
+    * **One label can name two programmes.** 'AI CAP B40 - Common + BSIAI
+      Accelerator B1' put the whole segment under BSIAI, because 'bsi' appeared
+      somewhere in it. That invented a 'BSIAI B40' which does not exist and lost
+      AI CAP B40 its first two sessions. An item naming its own programme now
+      keeps it; one naming none inherits the segment's.
+    """
     keys = set()
     for seg in re.split(r'&|\band\b', text):
-        tr = _track(seg)
-        # 'CAP\s*B?' also catches the run-together form the POD rows use
-        # ('AICAPB35, B36-Techies'): there is no word boundary before B35, so
-        # the B pattern alone silently credits the session to B36 only.
-        nums = sorted(set(int(x) for x in re.findall(r'\bB(\d{1,2})\b', seg, re.I)) |
-                      set(int(x) for x in re.findall(r'CAP\s*B?(\d{1,2})\b', seg, re.I)))
-        if not nums:
-            continue
-        is_list  = ('+' in seg) or (',' in seg)
-        is_range = (not is_list) and bool(re.search(r'[-–]', seg)) and len(nums) >= 2
-        chosen = range(min(nums), max(nums) + 1) if is_range else nums
-        for n in chosen:
-            keys.add((tr, n))
+        seg_track = _track_named(seg)
+        for part in re.split(r'[+,]', seg):
+            # 'CAP\s*B?' also catches the run-together form the POD rows use
+            # ('AICAPB35, B36-Techies'): there is no word boundary before B35,
+            # so the B pattern alone silently credits the session to B36 only.
+            nums = sorted(set(int(x) for x in re.findall(r'\bB(\d{1,2})\b', part, re.I)) |
+                          set(int(x) for x in re.findall(r'CAP\s*B?(\d{1,2})\b', part, re.I)))
+            if not nums:
+                bare = re.fullmatch(r'\s*(\d{1,2})\s*', part)
+                if not bare:
+                    continue
+                nums = [int(bare.group(1))]
+            tr = _track_named(part) or seg_track or 'CAP'
+            # A hyphen only means a RANGE when this item is not itself a list
+            # item; elsewhere it is far more often the POD separator
+            # ('AI CAP B35 - Techies').
+            is_range = bool(re.search(r'[-\u2013]', part)) and len(nums) >= 2
+            chosen = range(min(nums), max(nums) + 1) if is_range else nums
+            for n in chosen:
+                keys.add((tr, n))
     return keys
 
 def _sheet_key(name):
