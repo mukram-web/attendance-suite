@@ -229,6 +229,15 @@ def _prepend_intro_sessions(DATA: dict) -> None:
 # ─────────────────────── prebuilt store (pipeline.py) ────────────────────────
 _STORE_PATH = _DISK_CACHE / "attendance.duckdb"
 
+# The PARALLEL dataset: the same pipeline run with the roster built from the LMS
+# API alone and every session re-marked from the Zoom exports, rather than
+# carried forward. Written by
+#   STORE_OUT=attendance_lms.duckdb ROSTER_SOURCE=lms LMS_PURE=1 #     python pipeline.py --no-upload --no-site --allow-partial
+# It is a SEPARATE FILE on purpose: the published weekly numbers are frozen and
+# must not move, so the two datasets sit side by side and the sidebar chooses.
+_LMS_STORE_NAME = "attendance_lms.duckdb"
+_LMS_STORE_PATH = _DISK_CACHE / _LMS_STORE_NAME
+
 
 def _store_folder_id() -> str:
     try:
@@ -247,7 +256,7 @@ _STORE_TTL_SECONDS = 5 * 60
 
 
 @st.cache_data(show_spinner="Loading the latest dashboard…", ttl=_STORE_TTL_SECONDS)
-def _load_store(nonce):
+def _load_store(nonce, store_name="attendance.duckdb"):
     """Download the prebuilt attendance.duckdb the pipeline uploaded to Drive
     (a few MB — seconds, not minutes), keep a disk copy, and read out everything
     the UI needs. If Drive is unreachable, an existing local copy still serves.
@@ -257,25 +266,29 @@ def _load_store(nonce):
     corrupt / locked / version-mismatched file must degrade to the legacy live
     and upload modes, not paint a traceback over the whole app."""
     err = None
+    # Each dataset keeps its OWN disk path. _store_grid caches on
+    # (path, batch, generated_at_iso), so two datasets sharing one path could
+    # serve the wrong batch grid whenever their timestamps happened to match.
+    path = _DISK_CACHE / store_name
     fid = _store_folder_id()
     if fid:
         try:
-            raw, _stamp = live_data.fetch_store(fid)
+            raw, _stamp = live_data.fetch_store(fid, name=store_name)
             if raw:
                 _DISK_CACHE.mkdir(exist_ok=True)
-                tmp = _STORE_PATH.with_suffix(".tmp")
+                tmp = path.with_suffix(".tmp")
                 tmp.write_bytes(raw)
                 try:
-                    tmp.replace(_STORE_PATH)
+                    tmp.replace(path)
                 except OSError:
                     pass                     # another session holds it open — keep old copy
         except Exception as e:
             err = str(e)
-    if not _STORE_PATH.exists():
+    if not path.exists():
         return {"error": err} if err else None
     try:
         import duckdb
-        con = duckdb.connect(str(_STORE_PATH), read_only=True)
+        con = duckdb.connect(str(path), read_only=True)
         try:
             out = {k: json.loads(v)
                    for k, v in con.execute("SELECT key, value FROM meta").fetchall()}
@@ -288,7 +301,7 @@ def _load_store(nonce):
         return {"error": f"the prebuilt data file could not be read ({e})"}
     if "df" not in out or "generated_at" not in out:
         return {"error": "the prebuilt data file is incomplete (rebuild it)"}
-    out["path"] = str(_STORE_PATH)
+    out["path"] = str(path)
     out["drive_error"] = err
     return out
 
@@ -456,6 +469,12 @@ live_ready = live_data.config_present()
 _store_configured = bool(_store_folder_id())
 _store_local_only = not _store_configured and _STORE_PATH.exists()
 _store_available = _store_configured or _store_local_only
+# Offer the parallel LMS dataset only when the FILE IS ACTUALLY THERE. It is a
+# local artefact: pipeline.py writes it with STORE_OUT + --no-upload, and
+# nothing in this repo ever uploads `attendance_lms.duckdb` to Drive. Keying
+# this off `store_configured` instead put the control on the DEPLOYED app,
+# where choosing it downloaded a file that does not exist.
+_lms_available = _LMS_STORE_PATH.exists()
 
 with st.sidebar:
     st.header("① Data source")
@@ -524,6 +543,26 @@ if _snapshots:
         if _pick_week != "Latest (live)":
             _viewing = _snapshots[_labels.index(_pick_week) - 1]
 
+# ── which DATA SET? ──────────────────────────────────────────────────────────
+# Two rosters exist side by side. "Weekly" is the published record: marks frozen
+# once written, enrolment as the roster Sheet had it. "LMS API matched data" is
+# the same Zoom exports re-marked from scratch against enrolment taken from the
+# LMS API alone. They disagree — the API has never heard of ~9,000 people the
+# Sheet lists, and knows ~5,000 it does not — which is exactly why both are kept
+# rather than one being corrected into the other.
+_STORE_CHOICES = {"Weekly": "attendance.duckdb",
+                  "LMS API matched data": _LMS_STORE_NAME}
+_store_name = "attendance.duckdb"
+if _lms_available and not _viewing:
+    with st.sidebar:
+        _pick_set = st.radio(
+            "Data set", list(_STORE_CHOICES), index=0, key="store_pick",
+            help="Weekly is the published record — every session marked once "
+                 "and frozen, enrolment from the roster sheet. LMS API matched "
+                 "data rebuilds the same weeks from the LMS API roster and "
+                 "re-marks every session from the Zoom reports.")
+        _store_name = _STORE_CHOICES[_pick_set]
+
 if _viewing:
     loaded = _load_snapshot(_viewing["id"], _viewing["name"])
     if loaded and "df" in loaded:
@@ -546,12 +585,25 @@ if _viewing:
         _viewing = None
 
 if not _viewing and _store_available:
-    loaded = _load_store(st.session_state.nonce)
+    loaded = _load_store(st.session_state.nonce, _store_name)
     if loaded and "df" in loaded:
         store = loaded
         store_mode = True
         report, warnings = store["report"], store["warnings"]
         source_label = store["source"]
+        if _store_name == _LMS_STORE_NAME:
+            # On the PAGE, for the same reason the archived-week banner is: a
+            # screenshot of these numbers must not read as the published ones.
+            _lms = (store.get("stamps") or {}).get("lms") or {}
+            st.warning(
+                "🧪 **Viewing the LMS API data set** — enrolment comes from the "
+                "LMS API alone and every session was re-marked from the Zoom "
+                "reports, so these numbers are **not** the published weekly "
+                f"figures (built {store['generated_at']}). "
+                + (f"Batches rebuilt: {len(_lms.get('seeded') or [])}. "
+                   if _lms else "")
+                + "Switch **Data set** back to “Weekly” in the sidebar for the "
+                "record of truth.")
         if store.get("drive_error"):
             st.sidebar.warning("Drive unreachable — showing the last downloaded "
                                f"data.\n\n{store['drive_error']}")
@@ -1233,8 +1285,16 @@ with sub_browse:
                            f'<td{t}>{_bar(s.get("rating"))}</td>'
                            f'<td class="n"{t}>{_f(s.get("nps"), "{:+.0f}")}</td>'
                            f'<td class="n"{t}>{s.get("rating_n") or 0:,}</td>')
+                # Present/Absent are the COUNTS behind Att %, on the same
+                # denominator: a POD session is scored against that POD's
+                # strength, not the whole batch, so these add up per row.
+                _pres, _tot = s.get("present"), s.get("total")
+                _abs = (_tot - _pres if isinstance(_pres, (int, float))
+                        and isinstance(_tot, (int, float)) else None)
                 per = (f'<td>{_html.escape(s["batch"])}</td>'
-                       f'<td class="n">{_f(s.get("pct"))}%</td>' + own)
+                       f'<td class="n">{_f(s.get("pct"))}%</td>'
+                       f'<td class="n">{_f(_pres, "{:,.0f}")}</td>'
+                       f'<td class="n">{_f(_abs, "{:,.0f}")}</td>' + own)
                 _rows_html.append("<tr>" + (merged if i == 0 else "") + per
                                   + (tail if i == 0 else "") + "</tr>")
 
@@ -1258,7 +1318,7 @@ with sub_browse:
         st.markdown(
             '<div class="sess-wrap"><table class="sess"><tr>'
             '<th>Date</th><th>Title</th><th>Trainer</th><th>Type</th><th>POD</th>'
-            '<th>Batch</th><th>Att %</th>'
+            '<th>Batch</th><th>Att %</th><th>Present</th><th>Absent</th>'
             '<th>Trainer ★</th><th>Overall</th><th>NPS</th><th>Resp</th>'
             '<th>Dur (h)</th><th>Peak</th>'
             '<th>Joint ★</th><th>Joint overall</th><th>Joint NPS</th><th>Joint resp</th>'
@@ -1267,9 +1327,13 @@ with sub_browse:
             unsafe_allow_html=True)
         st.caption(f"{len(_groups):,} sessions · {len(_v):,} batch rows. "
                    "Title, trainer, duration and peak are one session's facts, so "
-                   "they span its batches. **Att %** and the first rating block "
+                   "they span its batches. **Att %**, **Present**, **Absent** and the "
+                   "first rating block "
                    "are per batch — each batch's own roster, and its own "
-                   "students' poll answers. The **Joint** block is the whole "
+                   "students' poll answers. Present + Absent is that row's strength: "
+                   "for a POD session that is the POD's strength, not the whole "
+                   "batch's — the same denominator Att % uses. "
+                   "The **Joint** block is the whole "
                    "room's poll, once; for a single-batch session it equals the "
                    "batch's own. Hover a rating cell in a shared session for the "
                    "split. *anonymous poll* means the hosts ran that feedback "
@@ -1296,6 +1360,9 @@ with sub_browse:
             "Shared with": ", ".join(b for b in (s.get("shared_batches") or [])
                                      if b != s["batch"]),
             "Attendance %": s["pct"], "Present": s["present"],
+            "Absent": (s["total"] - s["present"]
+                       if isinstance(s.get("present"), (int, float))
+                       and isinstance(s.get("total"), (int, float)) else None),
             "Invited": s["total"], "vs curve": s.get("index"),
             "Duration (hrs)": s.get("duration_hrs"), "Peak": s.get("peak"),
             "Trainer rating": _own(s, "rating_trainer"), "Overall": _own(s, "rating"),

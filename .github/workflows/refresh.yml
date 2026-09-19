@@ -110,6 +110,17 @@ jobs:
           # Off by default: the site carries NO student contact details until the
           # /roster login gate has been verified on a real deploy (SETUP_PIPELINE.md).
           PUBLISH_ROSTER: ${{ secrets.PUBLISH_ROSTER }}
+          # Where the roster comes from: unset or "sheet" reads the Google Sheet,
+          # "lms" builds it from the 10xstats API instead (lms_roster.py). Flipping
+          # this back is the rollback - no code change, no redeploy.
+          ROSTER_SOURCE: ${{ secrets.ROSTER_SOURCE }}
+          # Only needed when ROSTER_SOURCE=lms. Never echoed: the pipeline logs
+          # batch codes and counts, never the key, and this repo is PUBLIC so its
+          # Actions logs are world-readable.
+          LMS_API_KEY: ${{ secrets.LMS_API_KEY }}
+          # Optional: force which cohorts are re-fetched (e.g. "B40,B41").
+          # Unset -> the two highest batch numbers, which is the intended rule.
+          LMS_LIVE_BATCHES: ${{ secrets.LMS_LIVE_BATCHES }}
         run: |
           FLAGS=""
           if [ "${{ inputs.no_cache }}" = "true" ]; then

@@ -55,6 +55,14 @@ ARCHIVE_FOLDER = "archive"
 # sheet as the owners maintain it, unmarked.
 MARKED_LABEL = "Master_Batch_Rosters_marked"
 
+# The roster as built from the LMS API (lms_roster.py), when that is the source.
+# Distinct from both labels above: `Master_Batch_Rosters` is the Sheet as its
+# owners maintain it, `..._marked` is that plus Present/Absent, and this is the
+# API's answer for the same week. Keeping all three makes a disagreement
+# diagnosable months later, which matters because the API is the one input whose
+# history we cannot re-request — it has no as-of query.
+LMS_LABEL = "LMS_Roster"
+
 # What gets snapshotted, in priority order. `key` is the config key holding the
 # Sheet id; a missing or unconfigured id is skipped, not an error — BSIAI and the
 # curriculum are both optional and their absence must not fail the run.
@@ -95,7 +103,7 @@ def ensure_folder(svc, parent_id: str, name: str = ARCHIVE_FOLDER) -> str:
 
 def run(svc, cfg: dict, store_folder_id: str, when: date | None = None,
         store_bytes: bytes | None = None, marked_bytes: bytes | None = None,
-        log=print) -> dict:
+        lms_bytes: bytes | None = None, log=print) -> dict:
     """Snapshot every configured source Sheet (+ optionally the store and the
     marked workbook).
 
@@ -151,6 +159,8 @@ def run(svc, cfg: dict, store_folder_id: str, when: date | None = None,
              store_bytes, "application/octet-stream")
     if marked_bytes:
         _put(snapshot_name(MARKED_LABEL, when), marked_bytes, XLSX_MIME)
+    if lms_bytes:
+        _put(snapshot_name(LMS_LABEL, when), lms_bytes, XLSX_MIME)
 
     for line in out["saved"]:
         log(f"   archived {line}")

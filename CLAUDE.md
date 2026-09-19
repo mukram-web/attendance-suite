@@ -70,6 +70,8 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `trainers.py` | per-trainer rollups + identity resolution (91 L2 spellings -> 63 people). Pure, unit-tested. See §4e. |
 | `carryforward.py` | last week's marked columns carried onto this week's roster export — the base workbook for `--incremental`. Pure, unit-tested. See §4g. |
 | `ingest.py` | the **Add data** tab's engine: reads the uploaded file names, checks them against L2, puts them on Drive, dispatches the workflow. Pure parts unit-tested. |
+| `lms_client.py` | the 10xstats LMS API: `/batches`, `/customers`, retry + backoff, key handling. No pagination and 504s under load — see §4h. |
+| `lms_roster.py` | builds the roster workbook from that API instead of the Sheet, retaining everyone already in the marked workbook. Pure, unit-tested. **Opt-in** via `roster_source` — see §4h. |
 | `archive.py` | dated snapshots of the four source Sheets, the store, **and the marked workbook** into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
 | `site_build.py`, `site_templates/` | the static-website build. See §7 — it is **wired to deploy**, not inert. |
 
@@ -576,6 +578,110 @@ every time somebody fixed the schedule.
   would have merged both into one column, so this only differs for two webinars
   on one day for one batch and pod.
 
+### 4h. The roster from the LMS API (added 2026-09-16)
+
+**Status: built, tested, OFF.** `roster_source` defaults to `sheet`. Turning it on
+is one environment variable (`ROSTER_SOURCE=lms`), and turning it off again is the
+same variable — no code change, no redeploy.
+
+**Why.** The Sheet is the last hand-maintained input and it is ~8.2 MB against
+Google's 10 MB export ceiling (§7b.6). The 10xstats LMS API
+(`https://10xstats.com/api/v1/lms`, `X-API-Key` header) has the same enrolment
+data and no ceiling.
+
+**Why it is only a read-side swap.** Since B29 the pipeline has never written
+marks back to the Sheet. They live in `Master_Batch_Rosters_marked.xlsx` and
+`carryforward` re-attaches them by IDENTITY, never row order (§4g.4). So the Sheet
+was only ever an enrolment-and-attribute source. `lms_roster.build_from` produces
+the same workbook shape and everything downstream — marker, freeze, GATE 6, store —
+is untouched.
+
+**The three layers, and why layer 1 is not optional.** Each tab is retained rows
+(everyone in last week's marked workbook) + an API refresh for the live cohorts +
+an API seed for brand-new batches. Measured 2026-09-15: **9,017 people across
+B17-B39 are in the roster but NOT in their own API batch** (3,355 are really in a
+different CAP batch, 556 only in non-CAP workshops, 5,038 nowhere). Build the
+workbook from the API alone and `carryforward` counts them `unmatched_prev` and
+bins their marks. The gap is era-dependent: ~500 per batch on B23-B28 (~20%), but
+only 113 on B38 and 117 on B39.
+
+**Refresh policy (owner's rule).** Extract once, then each week refresh only the
+current cohort and the previous one; everything below is frozen and costs no API
+call. This is the §4g philosophy applied to enrolment, and it also stops a refund
+logged today flipping a student's Active flag on a session from three months ago.
+It matters for cost too: a full sweep is ~95 batch records against an endpoint
+that 504s under load.
+
+**⚠️ `closingType` is NARROWER than the Sheet's and this is visible in production.**
+The API returns only `unknown` / `bda_collection` / `system` / `l3_purchased`. It
+has no **BDA Closing** and no **Old Customer**, and collapses both into `unknown`.
+B40 was pasted in from the API by hand on 14 Sep and reads **Unknown 58%**, against
+B39's Sheet-sourced BDA Collection 39% / System 28% / Old Customer 27% / BDA
+Closing 6% / Unknown 0%. So `lms_roster._apply` takes the API's closing type ONLY
+when it maps to something real: a retained `BDA Closing` is never overwritten with
+a blank. New students the Sheet never saw still land in Unknown — **that is an
+upstream gap to raise with the LMS owner, not something this code can fix.**
+
+**Other API facts worth not rediscovering.** No `amount` field —
+`transactionLedger` is a LIFETIME history across every product (one account: 1,359
+entries, ₹34M), not this batch's deal value; nothing reads the roster's Amount
+column anyway, and retained rows keep theirs. No pagination: `?limit`/`?page` are
+accepted and ignored. No CORS header, so no browser can ever call it. From B35 the
+LMS stores one batch record PER POD, named byte-identically to the roster's own POD
+cell, so POD comes free through `pods.canon` — including the `Enterpreneurs` typo.
+Match on the full name `AI Career Accelerator Program B<n>`, **never the bare
+number**: numbers are reused across programme generations and 2025's `AICA IC B19`
+shares zero of 1,161 people with 2026's B19.
+
+**Files.** `lms_client.py` (retry/backoff, key handling), `lms_roster.py` (the
+builder), `tests/test_lms_roster.py` (45 tests, mostly pinning the workbook shape
+because every mismatch there fails silently), `tools/lms_cutover_diff.py` (the
+before/after gate — run it before switching; `Lost` must be 0),
+`tools/make_lms_sheet.py` (builds/refreshes the Google Sheet that REPLACES the
+roster — note it refreshes EVERY batch, unlike the weekly freeze), and
+`tools/extract_roster_facts.py` (freezes the Sheet-only facts, above all Closing
+Type, before the Sheet stops being read).
+
+**Config keys** `pipeline.load_config` actually reads (env name, then the
+`[drive]` key): `ROSTER_SOURCE`/`roster_source` (`sheet`|`lms`, default `sheet`),
+`LMS_API_KEY`/`lms_api_key`, `LMS_LIVE_BATCHES`/`lms_live_batches` (override for
+which cohorts refresh), `LMS_CACHE_DIR`/`lms_cache_dir` (local payload cache —
+leave unset in the weekly job, it must see live enrolment) and
+`LMS_PURE`/`lms_pure` (API only, NO retention — side-by-side datasets only,
+never the workbook that becomes next week's base). Plus the `STORE_OUT`
+environment variable, which redirects the store filename and **refuses to run
+without `--no-upload`**, because the upload and the archive both publish under
+`attendance.duckdb`.
+
+**GATE 0**, in `pipeline.py` INSIDE the `--incremental` block at `[1c]`,
+refuses to publish when `carry["unmatched_prev"]` is non-zero under
+`roster_source=lms`. It therefore does NOT apply to a full run: without
+`--incremental` there is no carry-forward and no `unmatched_prev` to read. It is
+also skipped under `lms_pure`, where dropping people is the point. It exists because
+**GATE 6 is structurally blind to this migration**: `lost_marks` restricts its
+comparison to students present in BOTH weeks' rosters, so a student who disappears
+from the roster entirely is invisible to it. `unmatched_prev` is the only signal
+that sees them.
+
+**Verified end to end, 2026-09-16** (`ROSTER_SOURCE=lms pipeline.py --incremental
+--no-upload --no-site`): 24 tabs frozen and 2 seeded, 596 columns carried,
+1,304,589 marks, 62,428 students matched, **`unmatched_prev` 0**. Every batch's
+`strength` and `active` identical to the live store (65,484 enrolled / 63,635
+active); session counts only rose, from that run's 21 newly marked sessions.
+
+**⚠️ The one thing it surfaced, and it is NOT an LMS problem.** The run was stopped
+by GATE 6 on `B20 2026_06_14: 3 → 385 present`. `AI CAP B20` has **two** columns
+headed `2026_06_14` (workbook indexes 23 and 25, with `2026_06_13` between them):
+the real marked one has 385 Present, a stray duplicate has 3, and they do not
+overlap. `carryforward._sheet_session_cols` keys on `session_key` and correctly
+keeps the first, so the LMS path publishes 385 — but `dashboard_core.roster_grid`
+builds each student as a **dict** (`rec[label] = mark`), so two columns sharing a
+header collapse and the LAST one wins. **The live store has therefore been
+publishing 3 for a session where 385 attended.** The Sheet path hides this because
+its fresh export still carries both columns. **Swept 2026-09-17: this is the ONLY
+duplicate session key in the whole marked workbook** — one column, one batch, one
+date. Fix the grid before switching sources.
+
 ## 5. Invariants — break these and the numbers go silently wrong
 
 1. **Locate roster columns by HEADER TEXT, never by fixed letter** (see §4).
@@ -750,7 +856,8 @@ Set it in **two** places, they are separate stores:
 6. **The roster is ~8.2 MB and Google refuses to export a Sheet over 10 MB as
    .xlsx.** When it crosses, step 1 fails every week with a clear message and old
    batches must be archived into a separate sheet. Watch the size in the log line
-   `roster N bytes`.
+   `roster N bytes`. **§4h is the way out of this one** — the LMS API has no such
+   ceiling — but it is opt-in and not switched on yet.
 7. **GitHub disables scheduled workflows after ~60 days of repo inactivity.** The
    only symptom is the "Data as of" date silently freezing — no failure email.
    Any commit, or a manual "Run workflow", resets the clock.
@@ -785,7 +892,11 @@ python pipeline.py --no-upload --no-site --incremental
 # tests — stdlib unittest; pytest is NOT in requirements.txt
 python -m unittest tests.test_data
 
-# all of them (406 as of 2026-09-10). `discover` does not work: tests/ has no
+# build the roster from the LMS API instead of the Sheet (§4h). Opt-in, and the
+# same variable set back to "sheet" is the rollback.
+ROSTER_SOURCE=lms python pipeline.py --no-upload --no-site --incremental
+
+# all of them (473 as of 2026-09-19). `discover` does not work: tests/ has no
 # __init__.py, so the start directory is "not importable" — name them instead.
 # test_dashboard_core_tabs takes ~2 min: it proves the bytes and tabs= paths
 # agree by running the SLOW path too, which is the point of it.
@@ -794,7 +905,19 @@ python -m unittest tests.test_data tests.test_polls tests.test_recap \
   tests.test_archive tests.test_attendee_format tests.test_sessionmeta \
   tests.test_derived_cache tests.test_pipeline_cache_gate \
   tests.test_carryforward tests.test_ingest tests.test_gate6 \
+  tests.test_extract_batches tests.test_lms_roster \
   tests.test_dashboard_core_tabs
+```
+
+**Before switching `roster_source` to `lms`, run the cutover diff** (§4h). It
+builds the roster both ways for the same week and reports, per batch, who is lost
+or gained and how the Active count and closing-type mix move. `Lost` must be **0**
+— those students' marks would be dropped by `carryforward`, and GATE 6 cannot see
+it because `lost_marks` only compares students present in BOTH rosters. Needs
+Drive and the LMS API; `--cache` makes a second run instant.
+
+```bash
+python tools/lms_cutover_diff.py --out cutover_diff.xlsx --cache .cache/lms
 ```
 
 **The equivalence check is the one to run after touching the carry-forward,

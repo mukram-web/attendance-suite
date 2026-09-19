@@ -61,6 +61,12 @@ def main() -> None:
         lines.append(f"attendee_zip_id = {_basic(ATTENDEE_ZIP_ID)}")
     if ATTENDEE_FOLDER_ID:
         lines.append(f"attendee_folder_id = {_basic(ATTENDEE_FOLDER_ID)}")
+    # The LMS roster source is opt-in and its key is a SECRET, so this script
+    # writes only the commented form: a generated file that carried a live API
+    # key would be one careless copy away from the public repo. See CLAUDE.md §4h.
+    lines += ['# roster_source = "lms"      # default "sheet"',
+              '# lms_api_key = "PUT_THE_LMS_API_KEY_HERE"',
+              '# lms_live_batches = "B40,B41"   # default: the two highest']
 
     os.makedirs(".streamlit", exist_ok=True)
     with open(os.path.join(".streamlit", "secrets.toml"), "w", encoding="utf-8") as f:
