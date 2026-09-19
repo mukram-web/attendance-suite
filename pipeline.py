@@ -61,6 +61,8 @@ import trainers                       # noqa: E402
 import sessionmeta                    # noqa: E402
 import sheets as dsheets              # noqa: E402
 import live_data                      # noqa: E402
+import lms_client                     # noqa: E402
+import lms_roster                     # noqa: E402
 
 # How many of the newest batches the day-1 dashboard covers. The window rolls by
 # itself: a new batch tab joins, the oldest drops off.
@@ -115,6 +117,30 @@ def load_config() -> dict:
         # this Sheet is owned outside the team that owns the roster, so sharing
         # it with the service account is a separate step that is easy to forget.
         "curriculum_id": pick("CURRICULUM_ID", "curriculum_id"),
+        # Where the roster comes from: "sheet" (Google Sheet, the original) or
+        # "lms" (the 10xstats API — see lms_roster.py). Defaults to "sheet" so
+        # the swap is opt-in and reverting is one environment variable, not a
+        # deploy. `roster_id` stays configured either way: it costs nothing, it
+        # keeps the archive's snapshot of the owner-maintained Sheet running,
+        # and it is the rollback.
+        "roster_source": (pick("ROSTER_SOURCE", "roster_source") or "sheet").lower(),
+        "lms_api_key": pick("LMS_API_KEY", "lms_api_key"),
+        # Optional override for which cohorts are re-fetched. Default: the two
+        # highest batch numbers, i.e. the current cohort and the previous one.
+        "lms_live_batches": pick("LMS_LIVE_BATCHES", "lms_live_batches"),
+        # Optional local cache of /customers payloads. Empty in the weekly job —
+        # it must see live enrolment. Set it when BUILDING A PARALLEL DATASET or
+        # iterating locally, where re-fetching ~84 batch records at a minute each
+        # is the difference between a two-hour loop and a two-minute one.
+        "lms_cache_dir": pick("LMS_CACHE_DIR", "lms_cache_dir"),
+        # "pure": build the roster from the API ALONE, with no retention layer.
+        # The normal path keeps every student already in the marked workbook —
+        # that is what stops the 9,017 people the API has never heard of losing
+        # their history (§4h). Pure mode deliberately drops them, so it is ONLY
+        # for a side-by-side dataset written to its own store, never for the
+        # workbook that becomes next week's base.
+        "lms_pure": (pick("LMS_PURE", "lms_pure") or "").strip().lower()
+                    in ("1", "true", "yes", "on"),
     }
 
     env_json = os.environ.get("GDRIVE_SERVICE_ACCOUNT_JSON")
@@ -136,10 +162,21 @@ def load_config() -> dict:
         with open(keys[0], encoding="utf-8") as fh:
             cfg["sa_info"] = json.load(fh)
 
-    missing = [k for k in ("roster_id", "attendee_folder_id") if not cfg[k]]
+    if cfg["roster_source"] not in ("sheet", "lms"):
+        raise SystemExit(f"roster_source must be 'sheet' or 'lms', "
+                         f"not {cfg['roster_source']!r}")
+    # With the LMS source the Sheet id is no longer needed to BUILD the roster,
+    # but it is still worth having: archive.py keeps snapshotting the
+    # owner-maintained Sheet, and it is the one-variable rollback.
+    need = ["attendee_folder_id"] + (["roster_id"] if cfg["roster_source"] == "sheet"
+                                     else [])
+    missing = [k for k in need if not cfg[k]]
     if missing:
         raise SystemExit(f"Missing config: {', '.join(missing)} "
                          "(env vars or .streamlit/secrets.toml [drive])")
+    if cfg["roster_source"] == "lms" and not cfg["roster_id"]:
+        print("NOTE: roster_source=lms and no roster_id — the Sheet will not be "
+              "archived and there is no one-variable rollback.", flush=True)
     return cfg
 
 
@@ -554,6 +591,165 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
             "sessions": summary["sessions"]}
 
 
+# ───────────────────────────── the roster source ─────────────────────────────
+def _lms_stamp(report: dict | None) -> dict | None:
+    """The provenance the store records for an LMS-sourced run.
+
+    Counts and batch codes only — the full report holds per-batch student totals
+    and nothing else, but keeping the store's meta small matters because the app
+    downloads it on every cold start.
+    """
+    if not report:
+        return None
+    return {k: report.get(k) for k in
+            ("live", "fetched", "failed", "degraded", "refreshed", "seeded",
+             "frozen", "tabs", "rows", "retained_students")}
+
+
+def fetch_prev_marked(svc, cfg: dict, why: str, log=print) -> bytes | None:
+    """Last week's marked workbook, or None.
+
+    Fetched ONCE per run and handed to both the LMS roster builder (which retains
+    the people the API has never heard of) and `carryforward` (which puts their
+    marks back). It used to be fetched inside step [1c]; the LMS source needs it
+    earlier, and downloading 8 MB twice would be silly.
+
+    Never fatal. Without it an LMS run degrades to a pure API seed and an
+    incremental run degrades to a full re-mark — both slower and louder, neither
+    wrong.
+    """
+    if not cfg.get("store_folder_id"):
+        return None
+    try:
+        hit = live_data.find_in_folder(svc, cfg["store_folder_id"], MARKED_NAME)
+    except Exception as e:
+        log(f"   WARNING: could not look for {MARKED_NAME} ({e}) — {why}")
+        return None
+    if not hit:
+        log(f"   WARNING: no {MARKED_NAME} in the store folder — {why}")
+        return None
+    try:
+        return live_data.fetch_file_bytes(svc, hit["id"])
+    except Exception as e:
+        log(f"   WARNING: could not fetch {MARKED_NAME} ({e}) — {why}")
+        return None
+
+
+def build_lms_roster(cfg: dict, prev_marked: bytes | None, allow_partial=False,
+                     log=print) -> tuple[bytes, str, dict]:
+    """The roster workbook, built from the LMS API. See lms_roster.py.
+
+    Only the live cohorts and never-seen batches are actually fetched — every
+    other batch is frozen and reuses last week's rows verbatim. That is the
+    owner's rule, and it is also what keeps the run affordable: a full sweep is
+    ~95 batch records against an endpoint that 504s under load.
+    """
+    key = lms_client.api_key(cfg.get("lms_api_key", ""))
+    cache_dir = cfg.get("lms_cache_dir") or None
+    warns: list[str] = []
+    # Pure mode ignores last week's workbook entirely — see the config comment.
+    retained = ({} if cfg.get("lms_pure")
+                else lms_roster.read_previous(prev_marked, warns))
+    if cfg.get("lms_pure"):
+        log("   PURE mode: the API alone decides who is enrolled. Students it "
+            "does not know are NOT carried over.")
+
+    # An unreachable API is survivable — but only knowingly. Every frozen batch
+    # is built from `retained` alone and needs no API at all, so the roster is
+    # still complete as of last week; what is missing is this week's NEW
+    # enrolments in the live cohorts, who would then not be counted at all.
+    # That understates attendance, so it refuses by default like every other
+    # gate here. Under --allow-partial the run proceeds AND step [8a] declines
+    # to publish the marked workbook, so a degraded roster never becomes next
+    # week's frozen base.
+    try:
+        raw = lms_client.fetch_batches(key, log=log)
+    except Exception as e:
+        if not (allow_partial and retained):
+            raise SystemExit(
+                f"REFUSING TO PUBLISH: the LMS API is unreachable ({e}).\n"
+                f"   Re-run later, set ROSTER_SOURCE=sheet to use the Google "
+                f"Sheet, or pass --allow-partial to publish last week's "
+                f"enrolment without this week's new students.")
+        log(f"   WARNING: LMS unreachable ({e}) — building from last week's "
+            f"roster alone. --allow-partial, so the marked workbook will NOT "
+            f"be republished.")
+        data, report = lms_roster.build_from(retained, {}, [], log=log)
+        report["warnings"] = warns + [f"LMS unreachable: {e}"]
+        report["live"], report["fetched"] = [], []
+        report["degraded"] = True
+        return data, datetime.now(IST).isoformat(timespec="seconds"), report
+
+    grouped = lms_roster.group_batches(raw)
+    log(f"   LMS: {len(raw)} batch record(s), {len(grouped)} CAP batch(es)")
+    if retained:
+        log(f"   carried forward: {len(retained)} batch tab(s), "
+            f"{sum(len(v) for v in retained.values()):,} student(s)")
+
+    override = [b.strip().upper() for b in
+                (cfg.get("lms_live_batches") or "").replace(";", ",").split(",")
+                if b.strip()]
+    live = override or lms_roster.live_codes(sorted(set(grouped) | set(retained)))
+    _missed: list[str] = []
+    want = lms_roster.plan_fetch(list(grouped), list(retained), live,
+                                 missing=_missed)
+    log(f"   live: {', '.join(live) or 'none'} · fetching {len(want)} batch(es)"
+        + (f" ({', '.join(want)})" if want else ""))
+    for code in _missed:
+        # The current cohort with no API record is the case that would otherwise
+        # pass unnoticed: it stays on last week's enrolment while the log claims
+        # a refresh. Usually a renamed batch or one not created in the LMS yet.
+        warns.append(f"{code}: named live but the LMS has no batch record for "
+                     f"it — left on last week's roster")
+        log(f"   WARNING: {warns[-1]}")
+
+    api_by_code: dict[str, list] = {}
+    failed: list[str] = []
+    for code in want:
+        recs = []
+        try:
+            for b in grouped.get(code, []):
+                recs.append((b, lms_client.cached_customers(
+                    key, b["id"], cache_dir, log=log)))
+        except Exception as e:
+            # One batch failing must not cost the other 24 their refresh. A
+            # frozen-equivalent result (retained rows only) is the safe outcome
+            # for that batch; the gate below decides whether it is acceptable.
+            failed.append(code)
+            log(f"      {code}: FAILED ({e}) — leaving it on last week's roster")
+            continue
+        api_by_code[code] = recs
+        log(f"      {code}: {sum(len(c) for _b, c in recs):,} customer(s) "
+            f"from {len(recs)} record(s)")
+
+    if failed:
+        lost = [c for c in failed if c not in retained]
+        if lost and not allow_partial:
+            raise SystemExit(
+                f"REFUSING TO PUBLISH: batch(es) {', '.join(lost)} could not be "
+                f"read from the LMS and have no rows to fall back on, so they "
+                f"would be missing from the dashboard entirely.\n"
+                f"   Re-run (the 504s are load-dependent and usually clear), or "
+                f"pass --allow-partial.")
+        if not allow_partial:
+            raise SystemExit(
+                f"REFUSING TO PUBLISH: batch(es) {', '.join(failed)} could not "
+                f"be refreshed, so this week's new enrolments in them would be "
+                f"missing and their attendance understated.\n"
+                f"   Re-run, or pass --allow-partial to publish last week's "
+                f"enrolment for them.")
+
+    data, report = lms_roster.build_from(retained, api_by_code, live, log=log)
+    report["warnings"] = (warns + list(report.get("warnings") or ())
+                          + [f"{c}: not refreshed (LMS read failed)" for c in failed])
+    report["live"] = live
+    report["fetched"] = sorted(api_by_code)
+    report["failed"] = failed
+    report["retained_students"] = sum(len(v) for v in retained.values())
+    stamp = datetime.now(IST).isoformat(timespec="seconds")
+    return data, stamp, report
+
+
 # ────────────────────────────────── main ─────────────────────────────────────
 def main() -> None:
     # Windows consoles default to cp1252, which can't print every character in
@@ -603,10 +799,31 @@ def main() -> None:
                    "polls": derived_cache.rule_version(polls)}
 
     print("[1/8] Fetching roster + L2 …", flush=True)
-    roster_bytes, roster_stamp = live_data.fetch_sheet_cached(svc, cfg["roster_id"])
     l2_bytes, l2_stamp = (live_data.fetch_sheet_cached(svc, cfg["l2_id"])
                           if cfg["l2_id"] else (None, ""))
-    print(f"   roster {len(roster_bytes):,} bytes (modified {roster_stamp})")
+
+    # Last week's marked workbook, fetched once and used twice: the LMS builder
+    # retains the students the API has never heard of, and carryforward then puts
+    # their marks back. Only downloaded when something actually needs it.
+    _use_lms = cfg.get("roster_source") == "lms"
+    prev_marked = None
+    if _use_lms or args.incremental:
+        prev_marked = fetch_prev_marked(
+            svc, cfg,
+            "this run will re-mark everything" if args.incremental
+            else "this run will seed the roster from the API alone")
+
+    lms_report = None
+    if _use_lms:
+        roster_bytes, roster_stamp, lms_report = build_lms_roster(
+            cfg, prev_marked, allow_partial=args.allow_partial)
+        print(f"   roster {len(roster_bytes):,} bytes from the LMS API — "
+              + lms_roster.summary(lms_report))
+        for w in lms_report.get("warnings") or ():
+            print(f"   WARNING: {w}", flush=True)
+    else:
+        roster_bytes, roster_stamp = live_data.fetch_sheet_cached(svc, cfg["roster_id"])
+        print(f"   roster {len(roster_bytes):,} bytes (modified {roster_stamp})")
 
     # [1b] The derived-facts memo: last week's per-file parse results, so this
     # run only parses what is genuinely new. Any problem at all yields an empty
@@ -639,19 +856,7 @@ def main() -> None:
     base_bytes, carry = roster_bytes, {"carried": 0, "warnings": []}
     if args.incremental:
         print("[1c] Carrying last week's marks forward …", flush=True)
-        prev_marked = None
-        try:
-            if cfg["store_folder_id"]:
-                _hit = live_data.find_in_folder(svc, cfg["store_folder_id"],
-                                                MARKED_NAME)
-                if _hit:
-                    prev_marked = live_data.fetch_file_bytes(svc, _hit["id"])
-        except Exception as e:
-            print(f"   WARNING: could not fetch {MARKED_NAME} ({e}) — this run "
-                  "will re-mark everything.", flush=True)
-        if prev_marked is None and cfg["store_folder_id"]:
-            print(f"   WARNING: no {MARKED_NAME} in the store folder — this run "
-                  "will re-mark everything.", flush=True)
+        # `prev_marked` was fetched at [1]; the LMS roster builder needs it too.
         base_bytes, carry = carryforward.merge_marks(roster_bytes, prev_marked)
         print("   " + carryforward.summary(carry), flush=True)
         # `summary` already quotes the warnings when it carried nothing, so only
@@ -659,6 +864,31 @@ def main() -> None:
         if carry.get("carried"):
             for w in carry.get("warnings") or ():
                 print(f"   WARNING: {w}", flush=True)
+
+        # GATE 0 — nobody may fall out of an LMS-built roster.
+        #
+        # GATE 6 cannot catch this. `lost_marks` restricts its comparison to
+        # students present in BOTH weeks' rosters, so a student who vanishes from
+        # the roster entirely is invisible to it — and that is exactly the failure
+        # mode of building the roster from an API that has never heard of 9,017 of
+        # our people (§4h). `unmatched_prev` is the signal that does see it.
+        #
+        # By construction it must be zero: lms_roster retains every row of last
+        # week's workbook before it adds anything. Non-zero means the retention
+        # layer missed a tab, and republishing would bin those students' history
+        # for good, since the marked workbook is the system of record (§4g).
+        _dropped = int(carry.get("unmatched_prev") or 0)
+        if _use_lms and _dropped and not cfg.get("lms_pure"):
+            msg = (f"{_dropped} student(s) in last week's marked workbook are "
+                   f"absent from the LMS-built roster, so their marks were NOT "
+                   f"carried. Publishing would lose that history permanently.")
+            if args.allow_partial:
+                print(f"   WARNING: {msg} Continuing: --allow-partial.", flush=True)
+            else:
+                raise SystemExit(
+                    f"REFUSING TO PUBLISH: {msg}\n"
+                    f"   Run tools/lms_cutover_diff.py to see which batches, or "
+                    f"set ROSTER_SOURCE=sheet to fall back to the Google Sheet.")
 
     print("[2/8] Fetching attendee reports (new sessions only) …", flush=True)
     attendee_files, info = live_data.fetch_new_attendees(
@@ -998,11 +1228,30 @@ def main() -> None:
     source = (f"Google Drive — roster, {info['files']} file(s) from "
               f"{info['new_folders']} new session(s)")
     os.makedirs(os.path.join(HERE, ".cache"), exist_ok=True)
-    store_path = os.path.join(HERE, ".cache", STORE_NAME)
+    # STORE_OUT lets a PARALLEL dataset be built without touching the real
+    # store: the app reads .cache/attendance.duckdb, so a side-by-side run must
+    # write somewhere else or it silently replaces the dashboard everyone is
+    # looking at. Only the file NAME is configurable — it always lands in
+    # .cache/, because that is the directory the app and .gitignore both know.
+    _store_out = os.path.basename(os.environ.get("STORE_OUT") or "").strip()
+    if _store_out and _store_out != STORE_NAME and not args.no_upload:
+        # The upload at [8/8] and the archive at [8b] both name the file
+        # STORE_NAME, NOT store_path — so without this guard a side-by-side run
+        # would publish itself as the real dashboard and, because archive
+        # snapshots are immutable and never pruned (§4d), freeze that week's
+        # history as the parallel dataset. Refuse instead of silently doing it.
+        raise SystemExit(
+            f"STORE_OUT={_store_out} builds a PARALLEL store, but the upload "
+            f"publishes under {STORE_NAME} and would replace the real "
+            f"dashboard. Pass --no-upload (that is what STORE_OUT is for), "
+            f"or unset STORE_OUT to publish normally.")
+    store_path = os.path.join(HERE, ".cache", _store_out or STORE_NAME)
     stats = build_store(store_path, marked_bytes, report, warnings, source,
                         l2_bytes, names, marked_xlsx_file_id,
                         {"roster": roster_stamp, "l2": l2_stamp, "mode": args.mode,
-                         "incremental": bool(args.incremental), "carry": carry},
+                         "incremental": bool(args.incremental), "carry": carry,
+                         "roster_source": cfg["roster_source"],
+                         "lms": _lms_stamp(lms_report)},
                         day1=day1, bsiai_section=bsiai_section, ratings=ratings,
                         session_meta=session_meta,
                         curric_tabs=curric_tabs,
@@ -1160,7 +1409,11 @@ def main() -> None:
         # --allow-partial keeps that restore trustworthy.
         archive.run(svc, cfg, cfg["store_folder_id"],
                     when=datetime.now(IST).date(), store_bytes=store_bytes,
-                    marked_bytes=marked_bytes if _base_published else None)
+                    marked_bytes=marked_bytes if _base_published else None,
+                    # The unmarked API answer for this week. Archived even on a
+                    # partial run: it is what the API said, and that is true
+                    # regardless of whether the marking was complete.
+                    lms_bytes=roster_bytes if lms_report else None)
     except Exception as e:
         print(f"   WARNING: archive step failed entirely ({e})")
 

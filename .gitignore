@@ -12,11 +12,23 @@ sample_data/
 *.json
 service_account*.json
 credentials*.json
+# `.env` under Python below only matches a file named EXACTLY that, so an
+# `lms_api.env` copied in here would have been committed. The LMS key lives in
+# the parent folder deliberately; this makes the repo refuse it either way.
+*.env
 # exception: aggregate-only data the app embeds (no PII, no secrets)
 !intro_attendance.json
 
 # ── Local speed cache (attendee bytes + marked-roster pickles) ─
 .cache/
+.lms_cache/
+
+# ── LMS extracts: raw API payloads, every row of them student PII ──
+# *.json already covers a plain dump, but a line-delimited or pickled cache
+# (the shapes the parent folder's sweep scripts use) was covered by nothing.
+*.jsonl
+*.pkl
+lms_extract*
 
 # ── Derived-facts memo (aggregates only, but it belongs on the Drive) ─
 # It lives in the private store folder, never here. These lines exist so a
