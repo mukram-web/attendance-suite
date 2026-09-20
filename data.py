@@ -485,7 +485,11 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
                 pres += 1                    # attended at least one of their sessions
         d["present"], d["total"] = pres, tot
         d["pct"] = round(pres / tot * 100, 1) if tot else 0.0
+        # Scratch keys only - the payload is JSON-serialised into the store, so
+        # anything left here that is a set takes the whole weekly run down at
+        # [6/8], long after the numbers were right.
         d.pop("cols"); d.pop("pods"); d.pop("whole")
+        d.pop("excl", None); d.pop("complement", None)
     dates = sorted(by_date.values(), key=lambda d: d["mm"] or "")
     dpcts = [d["pct"] for d in dates]
 
