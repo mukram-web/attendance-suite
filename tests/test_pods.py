@@ -501,3 +501,67 @@ class TestNoPollLabel(unittest.TestCase):
         self.assertIn("4.6", html)
         self.assertIn("657", html)
         self.assertNotIn("no poll conducted", html)
+
+
+class TestComplementRoom(unittest.TestCase):
+    """A batch's early weekends run TWO PARALLEL ROOMS: one domain POD, and one
+    for everybody else. That second room has no name anywhere - not in the
+    roster, not in L2 - so it arrives as an unlabelled column and used to be
+    scored against full batch strength. B40's 12 Sep reported 1,611 attendees as
+    43% of 3,711 when they were 51% of the 3,150 people actually invited.
+
+    The shape is IDENTICAL to a genuine whole-batch session that a POD also met
+    alongside, so the two can only be told apart by behaviour: if the POD met
+    instead of the main room, its members are Absent there and Present in their
+    own.
+    """
+
+    def test_two_parallel_rooms_score_the_complement_not_the_whole_batch(self):
+        pod_rows = ["Techies"] * 4 + ["AI Generalist"] * 6
+        # the Techies sat out the main room entirely - they were in their own
+        common = ["Absent"] * 4 + ["Present"] * 3 + ["Absent"] * 3
+        techies = ["Present"] * 3 + ["Absent"] + [""] * 6
+        rows = _pod_tab(pod_rows, [common, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        by_pod = {s["pod"]: s for s in b["sessions"] if s.get("mm")}
+        self.assertEqual(by_pod["Common"]["total"], 6)   # NOT 10
+        self.assertEqual(by_pod["Common"]["present"], 3)
+        self.assertEqual(by_pod["Common"]["pct"], 50.0)  # not 3/10 = 30%
+        self.assertEqual(by_pod["Techies"]["total"], 4)
+        self.assertEqual(by_pod["Techies"]["present"], 3)
+
+    def test_a_genuine_whole_batch_session_is_left_alone(self):
+        """The regression guard. When the POD's members are Present in the main
+        room too, the batch really did all meet - that column must keep full
+        strength as its denominator."""
+        pod_rows = ["Techies"] * 4 + ["AI Generalist"] * 6
+        whole = ["Present"] * 4 + ["Absent"] * 6
+        techies = ["Present"] * 4 + [""] * 6
+        rows = _pod_tab(pod_rows, [whole, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        whole_sx = [s for s in b["sessions"] if s.get("mm") and not s.get("excl")]
+        self.assertTrue(any(s["total"] == 10 for s in whole_sx), whole_sx)
+
+    def test_a_few_people_in_the_wrong_room_do_not_flip_it(self):
+        """One or two students wander in. That is noise, not a signal, and it
+        must not turn a real whole-batch session into a complement one."""
+        pod_rows = ["Techies"] * 10 + ["AI Generalist"] * 10
+        whole = ["Present"] * 8 + ["Absent"] * 2 + ["Present"] * 10
+        techies = ["Present"] * 9 + ["Absent"] + [""] * 10
+        rows = _pod_tab(pod_rows, [whole, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        self.assertTrue(any(s["total"] == 20 for s in b["sessions"] if s.get("mm")))
+
+    def test_the_complement_carries_which_pods_it_excluded(self):
+        pod_rows = ["Techies"] * 4 + ["AI Generalist"] * 6
+        common = ["Absent"] * 4 + ["Present"] * 6
+        techies = ["Present"] * 4 + [""] * 6
+        rows = _pod_tab(pod_rows, [common, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        comp = [s for s in b["sessions"] if s.get("pod") == "Common"]
+        self.assertEqual(len(comp), 1)
+        self.assertEqual(comp[0]["excl"], ["Techies"])
