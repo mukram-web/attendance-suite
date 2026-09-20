@@ -47,6 +47,10 @@ on:
         description: "Ignore the derived-facts memo and re-parse every Zoom export (slow, ~7 min)"
         type: boolean
         default: false
+      publish_parallel:
+        description: "Rebuild the LMS API dataset and publish it BESIDE the weekly one (this is what puts the app's Data set control on the deployed dashboard). Never touches the weekly store, next week's base or the archive."
+        type: boolean
+        default: false
 
 concurrency:
   group: refresh-dashboard
@@ -127,6 +131,27 @@ jobs:
             echo "::notice::Ignoring the derived-facts memo — full re-parse."
             FLAGS="--no-cache"
           fi
+          # A PARALLEL run builds the LMS API dataset and publishes it BESIDE
+          # the weekly one, under its own name, which is the only way the app's
+          # "Data set" control can appear on a deployment that has no local
+          # disk. It deliberately IGNORES the `incremental` input: carrying last
+          # week's marks forward is precisely what this dataset exists not to
+          # do — every session is re-marked from the Zoom exports against a
+          # roster taken from the API alone. --allow-partial because a pure API
+          # roster legitimately lacks people the Sheet carried (§4h), and
+          # --no-site because the website is built from the weekly record only.
+          if [ "${{ inputs.publish_parallel }}" = "true" ]; then
+            if [ "${{ inputs.skip_upload }}" = "true" ]; then
+              echo "::notice::PARALLEL dry run — building the LMS dataset without publishing it."
+              PUBLISH="--no-upload"
+            else
+              echo "::notice::PARALLEL dataset — LMS API roster, every session re-marked, published as attendance_lms.duckdb. The weekly store, next week's base and the archive are all untouched."
+              PUBLISH="--publish-parallel"
+            fi
+            STORE_OUT=attendance_lms.duckdb ROSTER_SOURCE=lms LMS_PURE=1               python pipeline.py $PUBLISH --no-site --allow-partial $FLAGS
+            exit 0
+          fi
+
           if [ "${{ inputs.incremental }}" = "true" ]; then
             echo "::notice::Incremental — carrying last week's marks forward; only unmarked sessions are processed."
             FLAGS="$FLAGS --incremental"
