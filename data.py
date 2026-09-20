@@ -248,6 +248,59 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
     ratings = ratings or {}
     mentors = mentors or {}
 
+    # Which PODs actually met on each date. A date that ran a named POD room AND
+    # an unlabelled room is a two-room weekend: the unlabelled one is the
+    # COMPLEMENT, not the whole batch. Needs its own pass because column order
+    # gives no guarantee the POD column comes first.
+    #
+    # Structure alone cannot say which it is: both look like one unlabelled
+    # column plus one "<date> | POD" column, and in BOTH the unlabelled column
+    # marks every student. What separates them is behaviour. If the POD met in
+    # its own room INSTEAD of the main one, its members are marked Absent in the
+    # unlabelled column while Present in their own - B40's 12 Sep has 347 of 561
+    # Techies present in the Techies column and exactly 1 in the plain one. When
+    # the whole batch genuinely met and the POD ALSO met, the same people are
+    # Present in both.
+    #
+    # So: treat the unlabelled column as the complement only when the day's PODs
+    # are essentially missing from it. The 10% floor is deliberately generous -
+    # a handful of people wander into the wrong room, and that must not flip a
+    # real whole-batch session into a complement one.
+    _POD_LEAK_MAX = 0.10
+
+    def _present_at(c, rows_):
+        return sum(1 for r in rows_
+                   if str(_cell(r, c) or "").strip().lower() == "present")
+
+    cols_by_date: dict = defaultdict(lambda: {"pod": [], "plain": []})
+    for c in range(close_col + 1, width):
+        mm_ = _mmdd(_cell(date_row, c)) or _mmdd(_cell(header, c))
+        if not mm_:
+            continue
+        p = _col_pod(_cell(date_row, c)) or _col_pod(_cell(header, c))
+        cols_by_date[mm_]["pod" if p else "plain"].append((c, p))
+
+    date_pods: dict = defaultdict(set)
+    for mm_, cc in cols_by_date.items():
+        if not cc["pod"] or not cc["plain"]:
+            continue                      # nothing to disambiguate
+        met = {p for _c, p in cc["pod"]}
+        members = [r for r in enrolled if row_pod.get(id(r), "") in met]
+        if not members:
+            continue
+        in_own = sum(_present_at(c, members) for c, _p in cc["pod"])
+        in_plain = max(_present_at(c, members) for c, _p in cc["plain"])
+        if in_own and in_plain <= _POD_LEAK_MAX * in_own:
+            date_pods[mm_] = met          # two parallel rooms
+
+    def _invited(rp, pod, excl):
+        """Is a student with POD `rp` invited to this session?"""
+        if excl:
+            return rp not in excl          # the complement room
+        if pod:
+            return rp == pod               # a named POD's room
+        return True                        # genuine whole-batch session
+
     # discover + validate session columns (everything after Closing Type)
     sessions = []
     for c in range(close_col + 1, width):
@@ -257,7 +310,14 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         # never clear "30% of the batch marked", and every small POD's session
         # would be discarded as a broken column.
         pod = _col_pod(_cell(date_row, c)) or _col_pod(hraw)
-        denom = pod_strength.get(pod, 0) if pod else strength
+        mm = _mmdd(_cell(date_row, c)) or _mmdd(_cell(header, c))
+        excl = frozenset(date_pods.get(mm, ())) if not pod else frozenset()
+        if excl:
+            # The complement room: everyone the day's POD rooms did not invite.
+            pod = pods.COMMON
+            denom = strength - sum(pod_strength.get(p, 0) for p in excl)
+        else:
+            denom = pod_strength.get(pod, 0) if pod else strength
         if not denom:
             continue        # a POD nobody in this batch belongs to
 
@@ -266,7 +326,7 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         # report 1,631 present out of 571 - 285%.
         present = absent = 0
         for r in enrolled:
-            if pod and row_pod.get(id(r), "") != pod:
+            if not _invited(row_pod.get(id(r), ""), pod, excl):
                 continue
             v = str(_cell(r, c) or "").strip().lower()
             if v == "present":
@@ -277,7 +337,6 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         if not (marked > _MIN_MARKED_FRAC * denom and present > _MIN_PRESENT_FRAC * denom):
             continue  # un-synced/empty formula column or broken near-empty column
 
-        mm = _mmdd(_cell(date_row, c)) or _mmdd(_cell(header, c))
         # a real roster header (topic) is one that ISN'T itself a date
         roster_topic = None if (hraw is None or _mmdd(hraw)) else str(hraw).strip()
         # POD-specific topic first: on a domain date the eleven sessions differ,
@@ -306,6 +365,11 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             # This is what lets trainer and weekly rollups count a room once.
             "shared_batches": shared_batches(raw_label),
             "pod": pod,
+            # Which PODs this room did NOT invite. Empty for a named-POD or a
+            # genuine whole-batch session; set only on a complement room, and
+            # the three places that decide "was this student invited" all read
+            # it through _invited so they cannot drift apart.
+            "excl": sorted(excl),
             "mentor": mentor,
             # The session's own feedback poll, joined on Webinar ID like the topic.
             # For a shared webinar these are THIS batch's students' answers only
@@ -357,15 +421,16 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
     # A student can only attend their OWN POD's sessions plus the whole-batch
     # ones, so the denominator is per person. Dividing by every session in the
     # batch quartered these numbers the moment B35 ran eleven PODs a day.
-    col_pod = {sx["col"]: sx.get("pod", "") for sx in sessions}
+    col_rule = {sx["col"]: (sx.get("pod", ""), frozenset(sx.get("excl") or ()))
+                for sx in sessions}
     closing = []
     for ctype, grp in groups.items():
         pres = slots = 0
         for r in grp:
             rp = row_pod.get(id(r), "")
             for c in valid_cols:
-                cp = col_pod.get(c, "")
-                if cp and cp != rp:
+                cp, cx = col_rule.get(c, ("", frozenset()))
+                if not _invited(rp, cp, cx):
                     continue            # a different POD's session
                 slots += 1
                 if str(_cell(r, c) or "").strip().lower() == "present":
@@ -391,7 +456,11 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
                                    "cols": [], "pods": set(), "whole": False})
         d["n_pods"] += 1
         d["cols"].append(sx["col"])
-        if sx.get("pod"):
+        if sx.get("excl"):
+            # a complement room: everyone outside the day's POD rooms was invited
+            d.setdefault("excl", set()).update(sx["excl"])
+            d["complement"] = True
+        elif sx.get("pod"):
             d["pods"].add(sx["pod"])
         else:
             d["whole"] = True
@@ -407,7 +476,8 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         pres = tot = 0
         for r in enrolled:
             rp = row_pod.get(id(r), "")
-            if not (d["whole"] or rp in d["pods"]):
+            if not (d["whole"] or rp in d["pods"]
+                    or (d.get("complement") and rp not in d.get("excl", ()))):
                 continue                     # not invited that day
             tot += 1
             if any(str(_cell(r, c) or "").strip().lower() == "present"

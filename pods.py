@@ -34,6 +34,19 @@ WHOLE_BATCH = "*all*"
 # the batch total below its roster count.
 UNKNOWN = "Unassigned"
 
+# The COMPLEMENT cohort. A batch's early weekends run as two parallel rooms:
+# one domain POD (in practice Techies) and one for everybody else. That second
+# room has no POD name of its own anywhere - not in the roster, not in L2 - so
+# it used to be read as a whole-batch session and divided by full strength,
+# reporting B40's 1,611 attendees as 43% of 3,711 when they were 51% of the
+# 3,150 people actually invited.
+#
+# It is deliberately NOT a value that can appear in a roster cell. Membership is
+# "not in the PODs that met that day", which is a property of the SESSION, not
+# of the student - the same person is Common on a two-room weekend and
+# Generalist once the batch moves to eleven domain PODs.
+COMMON = "Common"
+
 # canonical name -> every spelling seen in the roster, L2 or a folder name
 _ALIASES: dict[str, tuple[str, ...]] = {
     # 'general' is NOT here: B36 uses BOTH 'AI CAP B36 - General' (22/23 Aug,
