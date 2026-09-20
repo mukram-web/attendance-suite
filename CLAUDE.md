@@ -649,9 +649,23 @@ which cohorts refresh), `LMS_CACHE_DIR`/`lms_cache_dir` (local payload cache —
 leave unset in the weekly job, it must see live enrolment) and
 `LMS_PURE`/`lms_pure` (API only, NO retention — side-by-side datasets only,
 never the workbook that becomes next week's base). Plus the `STORE_OUT`
-environment variable, which redirects the store filename and **refuses to run
-without `--no-upload`**, because the upload and the archive both publish under
-`attendance.duckdb`.
+environment variable, which redirects the store filename and **refuses a plain
+upload**, because `[8/8]` and `[8b]` both publish under `attendance.duckdb`.
+Pair it with `--no-upload` to keep the parallel store local, or with
+`--publish-parallel` to upload it to the store folder **under its own name** so
+the deployed app can offer it as a second data set. `--publish-parallel` takes
+an early return at `[8/8]`: it never writes next week's base (`[8a]`) and never
+archives (`[8b]`), because those belong to the weekly record alone.
+`pipeline.parallel_store_name` is the single place that decision is made, and
+`tests/test_parallel_publish.py` pins every combination.
+
+The app decides whether to OFFER the second data set differently in each
+deployment, and getting this wrong is why the control was missing on Streamlit
+Cloud entirely: locally the store folder is unset and the file is an artefact on
+disk, so `_LMS_STORE_PATH.exists()` is the truth; deployed, `.cache/` and
+`*.duckdb` are both gitignored so nothing is ever on disk, and the truth is
+`live_data.store_exists` — a Drive **metadata probe, never a download**, since
+the app asks on every page load.
 
 **GATE 0**, in `pipeline.py` INSIDE the `--incremental` block at `[1c]`,
 refuses to publish when `carry["unmatched_prev"]` is non-zero under
