@@ -582,3 +582,47 @@ class TestBatchPayloadIsSerialisable(unittest.TestCase):
                         ["2026_08_15", "2026_08_15 | Techies"])
         b = data.build_batch(rows, "B35", {})
         json.dumps(b)          # must not raise
+
+
+class TestCommonIsSelectable(unittest.TestCase):
+    """The complement room is a property of the SESSION, not of any student, so
+    it never appears in d["pods"] and the POD filter could not offer it. For a
+    two-room batch that made the split invisible: 'All PODs' blended the two,
+    and picking 'Generalist' found no sessions at all."""
+
+    def _two_room_batch(self):
+        pod_rows = ["Techies"] * 4 + ["AI Generalist"] * 6
+        common = ["Absent"] * 4 + ["Present"] * 3 + ["Absent"] * 3
+        techies = ["Present"] * 3 + ["Absent"] + [""] * 6
+        rows = _pod_tab(pod_rows, [common, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        return data.build_batch(rows, "B35", {})
+
+    def test_pod_view_returns_only_the_complement_sessions(self):
+        import dash_view
+        import pods as _p
+        v = dash_view.pod_view(self._two_room_batch(), _p.COMMON)
+        self.assertEqual(len(v["sessions"]), 1)
+        self.assertEqual(v["sessions"][0]["pod"], _p.COMMON)
+        self.assertEqual(v["sessions"][0]["total"], 6)
+        self.assertEqual(v["strength"], 6)      # not the batch's 10
+        self.assertEqual(v["avg_pct"], 50.0)
+
+    def test_the_techies_view_is_unaffected(self):
+        import dash_view
+        v = dash_view.pod_view(self._two_room_batch(), "Techies")
+        self.assertTrue(v["sessions"])
+        self.assertTrue(all(s["pod"] == "Techies" for s in v["sessions"]))
+
+    def test_a_batch_with_no_complement_offers_none(self):
+        """The regression guard: B17-B34 have no PODs at all and must not grow
+        a phantom Common view."""
+        import dash_view
+        import pods as _p
+        pod_rows = [""] * 10
+        rows = _pod_tab(pod_rows, [["Present"] * 6 + ["Absent"] * 4],
+                        ["2026_08_15"])
+        b = data.build_batch(rows, "B20", {})
+        self.assertFalse([s for s in b["sessions"] if s.get("pod") == _p.COMMON])
+        v = dash_view.pod_view(b, _p.COMMON)
+        self.assertEqual(v["sessions"], [])
