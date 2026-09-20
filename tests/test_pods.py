@@ -565,3 +565,20 @@ class TestComplementRoom(unittest.TestCase):
         comp = [s for s in b["sessions"] if s.get("pod") == "Common"]
         self.assertEqual(len(comp), 1)
         self.assertEqual(comp[0]["excl"], ["Techies"])
+
+
+class TestBatchPayloadIsSerialisable(unittest.TestCase):
+    """`build_store` JSON-encodes this payload straight into the DuckDB store.
+    A stray set survives every unit test that only reads the numbers and then
+    kills the weekly run at [6/8] - which is exactly how a `set` in the per-date
+    rollup reached production once."""
+
+    def test_a_two_room_weekend_json_encodes(self):
+        import json
+        pod_rows = ["Techies"] * 4 + ["AI Generalist"] * 6
+        common = ["Absent"] * 4 + ["Present"] * 6
+        techies = ["Present"] * 4 + [""] * 6
+        rows = _pod_tab(pod_rows, [common, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        json.dumps(b)          # must not raise
