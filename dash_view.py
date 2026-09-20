@@ -190,6 +190,20 @@ def pod_view(d: dict, pod: str | None) -> dict:
         sess = [s for s in d["sessions"] if s.get("is_intro")] + sess
         return dict(d, sessions=sess)
 
+    if pod == _pods.COMMON:
+        # The complement room: everyone the day's POD rooms did not invite. It
+        # is NOT a roster POD - nobody's POD cell says "Common" - so it cannot
+        # come from d["pods"], and its strength is carried on the sessions
+        # themselves, which already divided by the people actually invited.
+        sess = [s for s in d["sessions"] if s.get("pod") == _pods.COMMON]
+        if not sess:
+            return dict(d, sessions=[], n_sessions=0, avg_pct=0.0, peak=0.0, low=0.0)
+        pcts = [s["pct"] for s in sess]
+        return dict(d, sessions=sess, n_sessions=len(sess),
+                    strength=sess[0]["total"], active=sess[0]["total"],
+                    avg_pct=round(sum(pcts) / len(pcts), 1),
+                    peak=max(pcts), low=min(pcts))
+
     if pod == _pods.WHOLE_BATCH:
         # The sessions L2 runs for EVERYONE. Its Batch Name cell says so in six
         # different ways across the live sheet -- 'All Domains', 'AllDomains',
@@ -395,15 +409,25 @@ def render(DATA: dict, summary: dict, source_note: str = "", *,
         pinfo = d.get("pods") or {}
         n_whole = sum(1 for s in d["sessions"] if not s.get("pod") and s.get("mm"))
         whole_lbl = f"All Domains ({n_whole})" if n_whole else None
+        # B40/B41 run two parallel rooms: Techies, and everybody else. That
+        # second room is a session property rather than a roster POD, so it is
+        # missing from pinfo and has to be offered separately or the split is
+        # invisible - picking "Generalist" just finds no sessions.
+        common = [s for s in d["sessions"] if s.get("pod") == _pods.COMMON]
+        common_lbl = f"Common ({common[0]['total']:,})" if common else None
         opts = (["All PODs"] + ([whole_lbl] if whole_lbl else [])
+                + ([common_lbl] if common_lbl else [])
                 + [f"{p} ({pinfo[p]['strength']:,})" for p in plist])
         picked = st.segmented_control("POD", opts, default=opts[0], key=f"{key}_pod")
         if picked and picked != "All PODs":
             if whole_lbl and picked == whole_lbl:
                 # not a POD - the sessions the whole batch was invited to
                 pod_sel = _pods.WHOLE_BATCH
+            elif common_lbl and picked == common_lbl:
+                pod_sel = _pods.COMMON
             else:
-                pod_sel = plist[opts.index(picked) - (2 if whole_lbl else 1)]
+                pod_sel = plist[opts.index(picked)
+                                - 1 - bool(whole_lbl) - bool(common_lbl)]
         if d.get("pod_guessed"):
             st.caption(f"{d['pod_guessed']} student(s) list more than one POD; the "
                        "last one in the cell was used.")
