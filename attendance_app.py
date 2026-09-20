@@ -797,10 +797,10 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
 (tab_dash, tab_sessions, tab_weekend, tab_roster, tab_day1, tab_fcst,
- tab_bsiai, tab_add) = st.tabs(
+ tab_add) = st.tabs(
     ["📊 Dashboard", "📚 Sessions", "🎬 Weekend Recap",
      "📋 Roster (marked attendance)", "🎯 Day-1 analysis", "🔮 Forecast",
-     "🧩 BSIAI", "➕ Add data"]
+     "➕ Add data"]
 )
 
 # Browse / This week / Trainers are three views of the SAME thing — the session
@@ -1867,47 +1867,6 @@ with tab_weekend:
                    "reference app asks for it at upload time. Nothing in L2, the "
                    "curriculum sheet or the Zoom report carries it, so a boundary "
                    "here would be a guess wearing a percentage.")
-
-
-# ============================ TAB 6 - BSIAI ==================================
-with tab_bsiai:
-    st.caption("The BSIAI programme. Separate roster, separate batch numbering - "
-               "a session counts only once the L2 schedule lists its webinar.")
-
-    _b = store.get("bsiai") if store_mode else None
-
-    if not store_mode:
-        st.info("The BSIAI tab reads the prebuilt store. It is empty in upload / "
-                "legacy-live mode because BSIAI's roster is a different Sheet that "
-                "the app does not fetch at runtime.")
-    elif _b is None:
-        st.warning(
-            "**BSIAI is not configured yet.** Add `BSIAI_ROSTER_ID` (repo secret, "
-            "or `bsiai_roster_id` under `[drive]` in secrets.toml) pointing at the "
-            "BSIAI roster Sheet, and share that Sheet with the service account. "
-            "The next refresh will fill this tab in."
-        )
-    elif not _b.get("DATA"):
-        st.warning("BSIAI is configured but produced no batches in the last refresh.")
-        for _w in _b.get("warnings", [])[:20]:
-            st.caption("- " + str(_w))
-    else:
-        _note = (f"\U0001F7E2 Data as of {store['generated_at']} - {_b.get('source','')}"
-                 .strip(" -"))
-        dash_view.render(
-            _b["DATA"], _b["summary"], _note, key="bsiai_batch",
-            # BSIAI has no Close Type to slice by, so the same panel carries the
-            # question its data CAN answer: how much of the course each learner
-            # actually attends. A 55% average hides very different cohorts.
-            show_closing=True,
-            closing_title="Engagement",
-            closing_sub=("bar = share of active learners · pill = that group's "
-                         "own attendance rate"))
-        _w = _b.get("warnings") or []
-        if _w:
-            with st.expander(f"Skipped / warnings ({len(_w)})"):
-                for _line in _w:
-                    st.text("- " + str(_line))
 
 
 # ======================== TAB 8 - ADD THIS WEEK'S DATA =======================
