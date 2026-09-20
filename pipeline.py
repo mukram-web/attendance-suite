@@ -78,6 +78,40 @@ IST = timezone(timedelta(hours=5, minutes=30))
 STORE_NAME = "attendance.duckdb"
 PREV_STORE = "_prev_store.duckdb"
 MARKED_NAME = "Master_Batch_Rosters_marked.xlsx"
+
+
+def parallel_store_name(store_out: str, no_upload: bool,
+                        publish_parallel: bool) -> str:
+    """The Drive name a PARALLEL run publishes under, or "" for a normal run.
+
+    STORE_OUT builds a second dataset beside the real one. Whether that is safe
+    depends entirely on where it gets UPLOADED, so the decision is made here,
+    once, rather than inferred at three separate call sites.
+
+    Raises SystemExit on the two combinations that would corrupt the weekly
+    record:
+
+    * a parallel store with a plain upload — [8/8] and [8b] both name the file
+      by STORE_NAME, so it would publish itself as the real dashboard and, since
+      archive snapshots are immutable and never pruned (§4d), freeze that week's
+      history as the parallel dataset;
+    * --publish-parallel with no STORE_OUT — that sends the REAL store down the
+      parallel path, which deliberately skips [8a] and [8b], so the dashboard
+      would move while next week's base and the archive silently did not.
+    """
+    parallel = bool(store_out) and store_out != STORE_NAME
+    if publish_parallel and not parallel:
+        raise SystemExit(
+            f"--publish-parallel needs STORE_OUT set to a name other than "
+            f"{STORE_NAME}; there is no parallel store to publish otherwise.")
+    if parallel and not no_upload and not publish_parallel:
+        raise SystemExit(
+            f"STORE_OUT={store_out} builds a PARALLEL store, but the upload "
+            f"publishes under {STORE_NAME} and would replace the real "
+            f"dashboard. Pass --no-upload to keep it local, "
+            f"--publish-parallel to publish it under its own name as a second "
+            f"data set, or unset STORE_OUT to publish normally.")
+    return store_out if parallel else ""
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 RW_SCOPES = ["https://www.googleapis.com/auth/drive"]
 
@@ -761,6 +795,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--no-upload", action="store_true",
                     help="build the store locally, skip the Drive upload")
+    ap.add_argument("--publish-parallel", action="store_true",
+                    help="upload the STORE_OUT store to the Drive store folder "
+                         "UNDER ITS OWN NAME, so the deployed app can offer it "
+                         "as a second data set. Requires STORE_OUT. Never "
+                         "touches the real store, next week's base or the "
+                         "archive (see the early return at [8/8]).")
     ap.add_argument("--mode", default="exact", choices=["exact", "inclusive"],
                     help="marker matching rule (default: exact, same as the app)")
     ap.add_argument("--no-site", action="store_true",
@@ -784,6 +824,13 @@ def main() -> None:
                          "price is that a later rule fix never reaches them "
                          "(see CLAUDE.md §4g). Omit it for a full rebuild.")
     args = ap.parse_args()
+
+    # Validate the STORE_OUT / upload combination NOW, not at [6/8] where the
+    # name is actually used. The check is pure, so it costs nothing here — and
+    # a run that fetches every Zoom export before refusing an argument mistake
+    # spends a quarter of an hour to say something it knew at startup.
+    parallel_store_name(os.path.basename(os.environ.get("STORE_OUT") or "").strip(),
+                        args.no_upload, args.publish_parallel)
 
     cfg = load_config()
     live_data.set_service_account(cfg["sa_info"], scopes=RW_SCOPES)
@@ -1234,17 +1281,8 @@ def main() -> None:
     # looking at. Only the file NAME is configurable — it always lands in
     # .cache/, because that is the directory the app and .gitignore both know.
     _store_out = os.path.basename(os.environ.get("STORE_OUT") or "").strip()
-    if _store_out and _store_out != STORE_NAME and not args.no_upload:
-        # The upload at [8/8] and the archive at [8b] both name the file
-        # STORE_NAME, NOT store_path — so without this guard a side-by-side run
-        # would publish itself as the real dashboard and, because archive
-        # snapshots are immutable and never pruned (§4d), freeze that week's
-        # history as the parallel dataset. Refuse instead of silently doing it.
-        raise SystemExit(
-            f"STORE_OUT={_store_out} builds a PARALLEL store, but the upload "
-            f"publishes under {STORE_NAME} and would replace the real "
-            f"dashboard. Pass --no-upload (that is what STORE_OUT is for), "
-            f"or unset STORE_OUT to publish normally.")
+    _parallel_name = parallel_store_name(_store_out, args.no_upload,
+                                         args.publish_parallel)
     store_path = os.path.join(HERE, ".cache", _store_out or STORE_NAME)
     stats = build_store(store_path, marked_bytes, report, warnings, source,
                         l2_bytes, names, marked_xlsx_file_id,
@@ -1363,9 +1401,30 @@ def main() -> None:
         print(f"[8/8] Skipped upload (--no-upload). Store at: {store_path}")
         return
 
-    print("[8/8] Uploading the store …", flush=True)
     with open(store_path, "rb") as fh:
         store_bytes = fh.read()
+
+    # A PARALLEL dataset publishes under its own name and STOPS. The early
+    # return is the safety property, not a shortcut: [8a] writes next week's
+    # frozen base and [8b] writes an immutable archive snapshot, and both of
+    # them name the file by the REAL constants. A parallel run reaching either
+    # one would hand the weekly record a workbook built from a different roster
+    # — the exact corruption the STORE_OUT guard above exists to prevent, just
+    # arriving one step later.
+    if _parallel_name:
+        print(f"[8/8] Uploading the PARALLEL store as {_parallel_name} …",
+              flush=True)
+        live_data.upload_to_folder(svc, cfg["store_folder_id"], _parallel_name,
+                                   store_bytes)
+        print(f"[8a] NOT updating the marked roster xlsx: a parallel dataset "
+              f"never becomes next week's base.", flush=True)
+        print(f"[8b] NOT archiving: the week's immutable snapshot belongs to "
+              f"{STORE_NAME}.", flush=True)
+        print(f"Done — parallel dataset published as {_parallel_name}. The "
+              f"real dashboard is untouched.")
+        return
+
+    print("[8/8] Uploading the store …", flush=True)
     live_data.upload_to_folder(svc, cfg["store_folder_id"], STORE_NAME,
                                store_bytes)
 

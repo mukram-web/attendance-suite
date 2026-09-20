@@ -373,6 +373,22 @@ def fetch_store(store_folder_id: str, name: str = "attendance.duckdb"):
     return data, meta.get("modifiedTime", "")
 
 
+def store_exists(store_folder_id: str, name: str) -> bool:
+    """Is a store with this name present in the Drive folder? A metadata lookup,
+    never a download: the app asks on every page load merely to decide whether to
+    OFFER a data set, and answering a yes/no by pulling several MB would put that
+    cost on every viewer.
+
+    False on any Drive error, so an unreachable Drive hides the control rather
+    than offering one whose file cannot be fetched.
+    """
+    try:
+        svc = _drive_service()
+        return find_in_folder(svc, store_folder_id, name) is not None
+    except Exception:
+        return False
+
+
 def list_store_snapshots(store_folder_id: str) -> list[dict]:
     """Past weeks' stores from archive/, newest first.
 

@@ -232,7 +232,11 @@ _STORE_PATH = _DISK_CACHE / "attendance.duckdb"
 # The PARALLEL dataset: the same pipeline run with the roster built from the LMS
 # API alone and every session re-marked from the Zoom exports, rather than
 # carried forward. Written by
-#   STORE_OUT=attendance_lms.duckdb ROSTER_SOURCE=lms LMS_PURE=1 #     python pipeline.py --no-upload --no-site --allow-partial
+#   STORE_OUT=attendance_lms.duckdb ROSTER_SOURCE=lms LMS_PURE=1 \n#     python pipeline.py --no-upload --no-site --allow-partial
+# Swap --no-upload for --publish-parallel to put it in the Drive store
+# folder under this same name. That is what makes the control appear on
+# the DEPLOYED app, where nothing is ever on local disk — see
+# _lms_available below.
 # It is a SEPARATE FILE on purpose: the published weekly numbers are frozen and
 # must not move, so the two datasets sit side by side and the sidebar chooses.
 _LMS_STORE_NAME = "attendance_lms.duckdb"
@@ -317,6 +321,17 @@ def _snapshot_list(nonce):
         return live_data.list_store_snapshots(fid)
     except Exception:
         return []
+
+
+@st.cache_data(show_spinner=False, ttl=_STORE_TTL_SECONDS)
+def _lms_store_published(nonce) -> bool:
+    """Has the parallel LMS store been uploaded to the Drive store folder?
+
+    Same TTL as the store itself, so publishing one makes the control appear
+    within the refresh window instead of needing a restart. Never raises —
+    `store_exists` already answers False on any Drive error."""
+    fid = _store_folder_id()
+    return bool(fid) and live_data.store_exists(fid, _LMS_STORE_NAME)
 
 
 @st.cache_data(show_spinner=False)
@@ -469,12 +484,6 @@ live_ready = live_data.config_present()
 _store_configured = bool(_store_folder_id())
 _store_local_only = not _store_configured and _STORE_PATH.exists()
 _store_available = _store_configured or _store_local_only
-# Offer the parallel LMS dataset only when the FILE IS ACTUALLY THERE. It is a
-# local artefact: pipeline.py writes it with STORE_OUT + --no-upload, and
-# nothing in this repo ever uploads `attendance_lms.duckdb` to Drive. Keying
-# this off `store_configured` instead put the control on the DEPLOYED app,
-# where choosing it downloaded a file that does not exist.
-_lms_available = _LMS_STORE_PATH.exists()
 
 with st.sidebar:
     st.header("① Data source")
@@ -542,6 +551,16 @@ if _snapshots:
                  "forecast and roster all as they were.")
         if _pick_week != "Latest (live)":
             _viewing = _snapshots[_labels.index(_pick_week) - 1]
+
+# Offer the parallel LMS dataset only when its file can ACTUALLY BE FETCHED —
+# and the two deployments answer that differently. Locally the store folder is
+# unset and the file is an artefact on disk, so the disk is the truth. On
+# Streamlit Cloud nothing is on disk (.cache/ and *.duckdb are both gitignored),
+# and the truth is whether `pipeline.py --publish-parallel` has uploaded it.
+# Asking the disk in both places is why this control was missing on the deployed
+# app entirely. The Drive answer is a metadata probe, never a download.
+_lms_available = (_lms_store_published(st.session_state.nonce)
+                  if _store_configured else _LMS_STORE_PATH.exists())
 
 # ── which DATA SET? ──────────────────────────────────────────────────────────
 # Two rosters exist side by side. "Weekly" is the published record: marks frozen
