@@ -197,7 +197,10 @@ manual upload** otherwise — so it runs with or without Google.
   `attendance_app.py`.
 
 ### 12a. Live integration findings (verified against the real Drive, 2026-06-27)
-Real IDs: roster `1CzASgM5yrbASE5vIxSrKBB-yQSRtQxh_iCVS9GTpfgg`, L2
+Real IDs as of 2026-06-27. The roster has SINCE MOVED to "LMS Attendance
+Roaster " `1_zkHVSKy_F-I6dNlswUbYgSwVXQXM5Tr9UMs93X_wG4` (see CLAUDE.md); the
+id below is the old hand-maintained sheet and is no longer read by anything.
+Roster `1CzASgM5yrbASE5vIxSrKBB-yQSRtQxh_iCVS9GTpfgg`, L2
 `1nlQPkg1l_cNHMtN2HKvqinmU_n0bLsC9RkkMfeqvPlM`, attendee **Shared Drive**
 `0ADZkkxHLwZa9Uk9PVA`. Service account `attendance-robot@fresh-delight-500710-g6
 .iam.gserviceaccount.com` (personal-Gmail project, no org → key download allowed).
