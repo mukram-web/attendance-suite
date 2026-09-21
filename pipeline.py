@@ -795,6 +795,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--no-upload", action="store_true",
                     help="build the store locally, skip the Drive upload")
+    ap.add_argument("--marked-out", default="",
+                    help="also save the marked roster workbook to this local "
+                         "path. The marks otherwise exist only in memory and "
+                         "in the [8a] upload, so a --no-upload run that exists "
+                         "to produce them had no way to hand them over.")
     ap.add_argument("--publish-parallel", action="store_true",
                     help="upload the STORE_OUT store to the Drive store folder "
                          "UNDER ITS OWN NAME, so the deployed app can offer it "
@@ -977,6 +982,12 @@ def main() -> None:
         # mid-week upload of one session, or a re-run of a week already loaded.
         # It publishes the carried history unchanged rather than failing.
         marked_bytes, report, warnings = base_bytes, [], []
+    if args.marked_out:
+        with open(args.marked_out, "wb") as _fh:
+            _fh.write(marked_bytes)
+        print(f"   marked workbook saved to {args.marked_out} "
+              f"({len(marked_bytes) / 1e6:.1f} MB)", flush=True)
+
     new_n = sum(1 for r in report if r["kind"] == "NEW")
     froze_n = sum(1 for r in report if r["kind"] == "frozen")
     print(f"   {len(report) - froze_n} session column(s) marked "
