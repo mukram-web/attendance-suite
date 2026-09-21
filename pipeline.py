@@ -22,9 +22,8 @@ Credentials & config resolve in this order:
 The store schema (attendance.duckdb):
   meta(key, value)       — JSON blobs: DATA, summary, report, warnings, source,
                            generated_at, batches, sheet_map, marked_xlsx_file_id,
-                           day1 (the Day-1 analysis for the newest batches —
-                           aggregates only), forecast (predicted attendance for
-                           sessions that have not run yet — aggregates only)
+                           forecast (predicted attendance for sessions that
+                           have not run yet — aggregates only)
   compute                — dashboard_core.compute() table (per batch × session)
   grid_<batch>           — roster_grid() per batch (the Roster tab, incl. PII —
                            the store must stay in a PRIVATE Drive folder)
@@ -47,13 +46,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 import attendance_core as ac          # noqa: E402
-import bsiai                          # noqa: E402
 import carryforward                   # noqa: E402
 import dashboard_core as dc           # noqa: E402
 import data as ddata                  # noqa: E402
 import derived_cache                  # noqa: E402
 import polls                          # noqa: E402
-import day1_analysis                  # noqa: E402
 import forecast                       # noqa: E402
 import archive                        # noqa: E402
 import recap                          # noqa: E402
@@ -63,10 +60,6 @@ import sheets as dsheets              # noqa: E402
 import live_data                      # noqa: E402
 import lms_client                     # noqa: E402
 import lms_roster                     # noqa: E402
-
-# How many of the newest batches the day-1 dashboard covers. The window rolls by
-# itself: a new batch tab joins, the oldest drops off.
-DAY1_BATCHES = 4
 
 # How far ahead the forecast runs. Eight weeks is where the backtest still holds
 # under ~13% MAPE and the curriculum sheet is actually filled in; past that the
@@ -142,10 +135,6 @@ def load_config() -> dict:
         "l2_id": pick("L2_ID", "l2_id"),
         "attendee_folder_id": pick("ATTENDEE_FOLDER_ID", "attendee_folder_id"),
         "store_folder_id": pick("STORE_FOLDER_ID", "store_folder_id"),
-        # Optional: the BSIAI programme's own roster Sheet. Absent -> the BSIAI
-        # section is simply not built, and the app shows its tab as unconfigured.
-        # Like every other id, the Sheet must be shared with the service account.
-        "bsiai_roster_id": pick("BSIAI_ROSTER_ID", "bsiai_roster_id"),
         # Optional: the Master Curriculum Schedule Sheet — what is PLANNED, one
         # tab per pod. Absent -> no forecast section and the tab says so. Note
         # this Sheet is owned outside the team that owns the roster, so sharing
@@ -466,8 +455,7 @@ def _prepend_intro_sessions(DATA: dict) -> None:
 
 def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
                 l2_bytes, attendee_names, marked_xlsx_file_id: str,
-                stamps: dict, day1: dict | None = None,
-                bsiai_section: dict | None = None,
+                stamps: dict,
                 ratings: dict | None = None,
                 curric_tabs: dict | None = None,
                 session_meta: dict | None = None,
@@ -603,14 +591,10 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
         # namespace ran under. Provenance, so a week built on a suspect rule
         # can be identified later at zero storage cost. Counts only.
         "cache": cache_stats or {},
-        "day1": day1 or {"batches": [], "skipped": []},
         # None = no CURRICULUM_ID configured. A section present but with empty
         # `sessions` means it was configured and produced nothing — the app says
         # which, because "not set up" and "set up but broken" need different fixes.
         "forecast": forecast_section,
-        # None means "not configured" (no BSIAI_ROSTER_ID). A section whose DATA
-        # is empty means "configured, nothing to show yet". The app distinguishes.
-        "bsiai": bsiai_section,
         # Aggregates only — counts and percentages, never a respondent or a
         # student — so both are safe in the store and on the public site.
         "recap": recap_section,
@@ -995,10 +979,9 @@ def main() -> None:
           + (f" · {froze_n} already frozen, left alone" if froze_n else "")
           + (" — nothing new this run" if not report else ""))
 
-    # Same rule as the attendee and day-1 gates: a session dropped because Zoom
-    # exported the wrong shape is a session MISSING from the dashboard. The file
-    # downloaded fine, so the gate above cannot see it, and one bad batch still
-    # produces batches, so the day-1 gate below cannot either. Left ungated this
+    # Same rule as the attendee gate: a session dropped because Zoom exported
+    # the wrong shape is a session MISSING from the dashboard. The file
+    # downloaded fine, so the gate above cannot see it. Left ungated this
     # publishes quietly incomplete numbers on a green run. Fix the export, or
     # pass --allow-partial to publish the week without those sessions.
     unreadable = [w for w in warnings if ac.ZERO_ATTENDEE_TAG in w]
@@ -1016,33 +999,48 @@ def main() -> None:
         raise SystemExit("STORE_FOLDER_ID missing — where should the store "
                          "be uploaded? (or run with --no-upload)")
 
-    # Day-1 analysis runs BEFORE anything is uploaded: if it refuses below, this
-    # run must have left Drive exactly as it found it.
-    print(f"[4/8] Day-1 analysis (newest {DAY1_BATCHES} batches) …", flush=True)
-    day1 = {"batches": [], "skipped": [], "errors": []}
-    # Bound OUTSIDE the try: [5a] below divides shared polls by these rosters,
-    # and a day-1 failure must cost the day-1 tab, not every rating.
+    # The per-batch roster tabs, read once. [5a] below divides shared polls by
+    # these rosters (ddata.roster_emails).
+    print("[4/8] Reading the roster tabs …", flush=True)
     roster_tabs = {}
+    tab_err = ""
     try:
         wb_r = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
         roster_tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
                        for ws in wb_r.worksheets
                        if re.fullmatch(r"\s*AI\s*CAP\s*B\d+\s*", ws.title, re.I)}
         wb_r.close()
-        day1 = day1_analysis.build(svc, roster_tabs, l2_bytes,
-                                   cfg["attendee_folder_id"],
-                                   n_batches=DAY1_BATCHES)
     except Exception as e:
-        day1 = {"batches": [], "skipped": [], "errors": [f"analysis failed: {e}"]}
+        tab_err = str(e)
+    print(f"   {len(roster_tabs)} batch tab(s)"
+          + (f" — read FAILED: {tab_err}" if tab_err else ""), flush=True)
 
-    # Same rule as the attendee gate above: a transiently broken day-1 analysis
-    # must not overwrite last week's complete tab with an empty one and go green.
-    if (day1.get("errors") or not day1["batches"]) and not args.allow_partial:
-        raise SystemExit(
-            "Refusing to publish: the day-1 analysis is incomplete — the previous "
-            "store is left in place:\n  - "
-            + "\n  - ".join(day1.get("errors") or ["no batches produced"])
-            + "\nRe-run the job; pass --allow-partial to publish without it.")
+    # Gated, because no later gate can see the damage. With no roster tabs,
+    # `polls.apply_roster_split` cannot tell a shared room's batches apart, so
+    # every batch in it keeps the whole room's JOINT rating - the exact
+    # double-count [5a.1] exists to prevent. GATE 5 counts that joint figure as
+    # a valid rating, so its coverage does not move; GATE 6 only compares marks;
+    # and the app then labels the result "anonymous poll", which is false. The
+    # dashboard builds normally and only the ratings are wrong, which is
+    # precisely why this must not pass quietly.
+    #
+    # Zero tabs does NOT imply a broken workbook: this fullmatch is stricter
+    # than `ac._sheet_key`, so a rename the rest of the stack tolerates
+    # ("AI CAP B37 8PM") reads as zero here while the marking stays correct.
+    if not roster_tabs:
+        _why = (f"could not read the roster tabs: {tab_err}" if tab_err
+                else 'no "AI CAP B<n>" tab matched in the marked workbook')
+        warnings.append(
+            "Shared-session poll ratings were NOT split per batch — " + _why
+            + ". Every batch in a shared room carries the joint rating.")
+        if not args.allow_partial:
+            raise SystemExit(
+                "Refusing to publish: " + _why + ", so a shared room's poll "
+                "rating cannot be divided between its batches and each of them "
+                "would publish the joint figure — the previous store is left "
+                "in place.\nCheck the roster tab names (the pipeline wants a "
+                'bare "AI CAP B<n>"), or pass --allow-partial to publish with '
+                "unsplit ratings.")
 
     # The marked workbook stops being only an OUTPUT: under --incremental it is
     # next week's base. Uploading it HERE - before build_store, before GATE 5
@@ -1071,10 +1069,6 @@ def main() -> None:
         print("[5/8] Marked roster xlsx held back until the gates pass "
               "(it is next week's base)", flush=True)
 
-    # BSIAI — a separate programme with its own roster Sheet, its own batch
-    # numbering and no session columns anywhere, so it is computed from the
-    # attendee reports rather than marked into a workbook. Never fatal: a BSIAI
-    # problem must not cost the AI CAP refresh its weekly publish.
     # Session feedback polls: one small CSV per session, disk-cached like the
     # attendee reports. Never fatal - a missing poll costs that session its
     # rating, not the run.
@@ -1234,32 +1228,6 @@ def main() -> None:
     # The coverage gate for these two steps lives after the store is built, so
     # it can compare like with like against last week's store — see GATE 5.
 
-    bsiai_section = None
-    if cfg["bsiai_roster_id"]:
-        print("[5b] BSIAI attendance …", flush=True)
-        try:
-            b_roster, b_stamp = live_data.fetch_sheet_cached(svc, cfg["bsiai_roster_id"])
-            b_files, b_info = live_data.fetch_track_attendees(
-                svc, cfg["attendee_folder_id"], "BSIAI")
-            l2_map = ac.parse_l2(l2_bytes) if l2_bytes else {}
-            B_DATA, b_summary, b_warn = bsiai.analyse(b_roster, b_files, l2_map,
-                                                      ratings_by_wid)
-            bsiai_section = {"DATA": B_DATA, "summary": b_summary,
-                             "warnings": b_warn, "stamp": b_stamp,
-                             "source": (f"BSIAI roster + {b_info['files']} attendee "
-                                        f"file(s) from {b_info['new_folders']} folder(s)")}
-            print(f"   {b_summary['batches']} batch(es) · "
-                  f"{b_summary['enrolled']:,} enrolled · "
-                  f"{b_summary['sessions']} session(s) · {len(b_warn)} warning(s)")
-        except Exception as e:
-            bsiai_section = {"DATA": {}, "summary": {"batches": 0, "enrolled": 0,
-                                                     "active": 0, "sessions": 0},
-                             "warnings": [f"BSIAI build failed: {e}"],
-                             "stamp": "", "source": ""}
-            print(f"   WARNING: BSIAI section failed ({e}) - the tab will say so.")
-    else:
-        print("[5b] BSIAI skipped (no BSIAI_ROSTER_ID configured)", flush=True)
-
     # The Master Curriculum Schedule — what is PLANNED, one tab per pod. Read as
     # xlsx like every other Sheet so the same modifiedTime cache applies.
     # A failure here must never sink the run: the forecast is an extra, and last
@@ -1301,7 +1269,7 @@ def main() -> None:
                          "incremental": bool(args.incremental), "carry": carry,
                          "roster_source": cfg["roster_source"],
                          "lms": _lms_stamp(lms_report)},
-                        day1=day1, bsiai_section=bsiai_section, ratings=ratings,
+                        ratings=ratings,
                         session_meta=session_meta,
                         curric_tabs=curric_tabs,
                         cache_stats=_cache_meta(cache_stats, cache_rules))

@@ -3,13 +3,12 @@
 Zoom emits two shapes for the same webinar. Only the Attendee Report is usable;
 the flat participant list has no Attended column and no Phone, and used to parse
 to zero attendees WITHOUT raising in both AI CAP paths. That marked a whole batch
-absent, published a real-looking 0% day one, and left the weekly run green.
+absent and left the weekly run green.
 
 These tests pin the three things that must stay true:
   1. the two shapes are told apart,
   2. a GENUINELY empty report is still allowed to be empty,
-  3. each of the three callers refuses the bad shape in its own way
-     (marker skips, day-1 raises, BSIAI warns).
+  3. the marker refuses the bad shape by SKIPPING the session.
 """
 import io
 import os
@@ -19,15 +18,13 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import attendance_core as ac  # noqa: E402
-import bsiai  # noqa: E402
-import day1_analysis  # noqa: E402
 
 
 # ── the two shapes, as Zoom actually writes them ────────────────────────────
 def report_csv(rows=(("a@x.com", "919000000001"), ("b@x.com", "919000000002")),
                sections=True):
     """A real Attendee Report. `sections=False` drops the named-section rows,
-    which is how the BSIAI fixtures write it — still a valid report."""
+    as some real exports do — still a valid report."""
     out = ["Attendee Report",
            "Report generated time,09/09/2026 05:29:06 AM",
            "",
@@ -69,8 +66,8 @@ class TestIsAttendeeReport(unittest.TestCase):
         self.assertTrue(ac.is_attendee_report(report_csv()))
 
     def test_a_report_without_section_rows_is_still_accepted(self):
-        # The Attended/First Name header alone is enough — this is the shape the
-        # BSIAI fixtures use, and rejecting it would break real marking.
+        # The Attended/First Name header alone is enough — real exports come
+        # in this shape, and rejecting it would break real marking.
         self.assertTrue(ac.is_attendee_report(report_csv(sections=False)))
 
     def test_a_genuinely_empty_report_is_NOT_a_format_error(self):
@@ -120,36 +117,6 @@ class TestParseAttendeesUnchanged(unittest.TestCase):
         # Unchanged behaviour: parse_attendees stays total and returns empties.
         # It is the CALLERS that now refuse to act on that.
         self.assertEqual(ac.parse_attendees(FLAT), (set(), set(), set()))
-
-
-class TestDay1Raises(unittest.TestCase):
-    def test_read_attendees_raises_on_the_flat_list(self):
-        with self.assertRaises(ValueError) as cm:
-            day1_analysis.read_attendees(FLAT.encode())
-        self.assertIn(ac.UNREADABLE_FORMAT_TAG, str(cm.exception))
-
-    def test_read_attendees_raises_on_a_tab_delimited_report(self):
-        # The case shape-detection missed: refused because nothing parsed.
-        with self.assertRaises(ValueError) as cm:
-            day1_analysis.read_attendees(tab_report().encode())
-        self.assertIn(ac.ZERO_ATTENDEE_TAG, str(cm.exception))
-
-    def test_read_attendees_raises_on_a_report_with_no_rows(self):
-        # A day one where not one row is readable is not a real 0%.
-        with self.assertRaises(ValueError):
-            day1_analysis.read_attendees(report_csv(rows=()).encode())
-
-    def test_read_attendees_still_reads_a_real_report(self):
-        people, viewers = day1_analysis.read_attendees(report_csv().encode())
-        self.assertEqual(set(people), {"a@x.com", "b@x.com"})
-        self.assertEqual(viewers, 2)
-
-    def test_an_all_internal_report_returns_empty_WITHOUT_raising(self):
-        # people is non-empty, attended is empty. That is the internal-account
-        # filter working, not a broken file, so it must not raise.
-        raw = report_csv(rows=(("staff@be10x.com", "919000000009"),)).encode()
-        attended, _ = day1_analysis.read_attendees(raw)
-        self.assertEqual(attended, {})
 
 
 class TestMarkerSkips(unittest.TestCase):
@@ -211,23 +178,6 @@ class TestMarkerSkips(unittest.TestCase):
         self.assertEqual(report[0]["present"], 2)
 
 
-class TestBsiaiStillWarns(unittest.TestCase):
-    L2 = {"111": (frozenset({("BSIAI", 1)}), "WhatsApp")}
-
-    def test_the_flat_list_is_skipped_and_named_as_a_format_problem(self):
-        files = [("2026-09-09 - BSI B1 - X/attendee_111_2026_09_09.csv",
-                  FLAT.encode())]
-        sess, warns = bsiai.sessions_from_files(files, self.L2)
-        self.assertEqual(sess, {})
-        self.assertTrue(any("ZERO" in w for w in warns))
-        self.assertTrue(any(ac.UNREADABLE_FORMAT_TAG in w for w in warns),
-                        f"the warning should name the cause, got {warns}")
-
-    def test_a_real_report_is_still_accepted(self):
-        files = [("2026-09-09 - BSI B1 - X/attendee_111_2026_09_09.csv",
-                  report_csv().encode())]
-        sess, _ = bsiai.sessions_from_files(files, self.L2)
-        self.assertEqual(len(sess[1]["111"]["emails"]), 2)
 
 
 
@@ -357,64 +307,6 @@ class TestEitherKeyIsEnough(unittest.TestCase):
         self.assertEqual(len(report), 1, f"session should be marked: {warnings}")
         self.assertEqual(report[0]["present"], 2)
         self.assertFalse([w for w in warnings if ac.ZERO_ATTENDEE_TAG in w])
-
-
-
-class TestDay1EitherKey(unittest.TestCase):
-    """Day-1 identifies a person by email OR phone, like the roster join it
-    feeds. A report with only one of the two columns must still produce numbers
-    rather than an empty parse the publish gate reads as a broken export."""
-
-    def _rep(self, header, rows):
-        return chr(10).join(
-            ["Attendee Report", "",
-             "Topic,Webinar ID,Actual Start Time,Unique Viewers",
-             "Some Session,91695866411,09/09/2026 19:00,2", "",
-             "Attendee Details", header] + rows).encode()
-
-    BOTH = ("Attended,First Name,Last Name,Email,Phone,Join Time,Leave Time,"
-            "Time in Session (minutes)")
-    NO_EMAIL = ("Attended,First Name,Last Name,Phone,Join Time,Leave Time,"
-                "Time in Session (minutes)")
-    NO_PHONE = ("Attended,First Name,Last Name,Email,Join Time,Leave Time,"
-                "Time in Session (minutes)")
-
-    def test_email_and_phone(self):
-        people, viewers = day1_analysis.read_attendees(self._rep(self.BOTH, [
-            "Yes,A,B,a@x.com,919000000001,09/09/2026 19:02,09/09/2026 20:31,89"]))
-        self.assertEqual(set(people), {"a@x.com"})
-        self.assertEqual(people["a@x.com"]["phones"], {"9000000001"})
-        self.assertEqual(viewers, 2)
-
-    def test_email_only_column(self):
-        people, _ = day1_analysis.read_attendees(self._rep(self.NO_PHONE, [
-            "Yes,A,B,a@x.com,09/09/2026 19:02,09/09/2026 20:31,89"]))
-        self.assertEqual(set(people), {"a@x.com"})
-
-    def test_phone_only_column_is_keyed_by_phone(self):
-        people, _ = day1_analysis.read_attendees(self._rep(self.NO_EMAIL, [
-            "Yes,A,B,919000000001,09/09/2026 19:02,09/09/2026 20:31,89"]))
-        self.assertEqual(set(people), {"phone:9000000001"})
-        # the phone must still be in `phones`, since that is what the roster
-        # join actually matches on
-        self.assertEqual(people["phone:9000000001"]["phones"], {"9000000001"})
-
-    def test_a_phone_only_report_does_not_raise(self):
-        # It used to: empty people -> ValueError -> the whole week unpublished.
-        day1_analysis.read_attendees(self._rep(self.NO_EMAIL, [
-            "Yes,A,B,919000000001,09/09/2026 19:02,09/09/2026 20:31,89",
-            "Yes,C,D,919000000002,09/09/2026 19:05,09/09/2026 20:30,85"]))
-
-    def test_rows_with_neither_key_are_still_dropped(self):
-        with self.assertRaises(ValueError):
-            day1_analysis.read_attendees(self._rep(self.BOTH, [
-                "Yes,A,B,,,09/09/2026 19:02,09/09/2026 20:31,89"]))
-
-    def test_a_phone_key_never_collides_with_an_email_one(self):
-        people, _ = day1_analysis.read_attendees(self._rep(self.BOTH, [
-            "Yes,A,B,a@x.com,919000000001,09/09/2026 19:02,09/09/2026 20:31,89",
-            "Yes,C,D,,919000000002,09/09/2026 19:05,09/09/2026 20:30,85"]))
-        self.assertEqual(set(people), {"a@x.com", "phone:9000000002"})
 
 
 

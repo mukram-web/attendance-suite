@@ -340,7 +340,7 @@ class TestPerRespondent(unittest.TestCase):
             self.assertEqual(e["_batches"], ["B35", "B36", "B37"])
             self.assertEqual(e["_wid"], "9")
         self.assertEqual(out[("B38", "09_06", "")]["_batches"], ["B38"])
-        # each key holds its OWN dict, and by_wid (BSIAI's input) is untouched
+        # each key holds its OWN dict, and by_wid is untouched
         self.assertIsNot(out[("B35", "09_06", "Finance")], out[("B36", "09_06", "Finance")])
         self.assertNotIn("_batches", by_wid["9"])
 

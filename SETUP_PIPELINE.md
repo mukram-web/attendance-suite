@@ -76,8 +76,8 @@ That's it. From then on:
 ## 4. (Optional) The website on Vercel
 
 The pipeline also renders `site/` — the same dashboard as a **static website**
-that opens instantly and never sleeps. Three pages: `/` dashboard, `/day1.html`
-day-1 analysis, `/roster/` behind a login.
+that opens instantly and never sleeps. Two pages: `/` dashboard and `/roster/`
+behind a login.
 
 1. **Create the project.** On vercel.com → *Add New… → Project → skip the git
    import → deploy an empty project* (or run `npx vercel` once locally from
@@ -119,8 +119,8 @@ behind the login.
 Notes:
 - `site/` is **never committed** — the roster JSON holds student contact
   details. It is uploaded straight to Vercel by the Action.
-- The dashboard and day-1 pages carry **aggregates only**, so the public URL
-  exposes no student data. They are `noindex`, so search engines skip them.
+- The dashboard page carries **aggregates only**, so the public URL exposes no
+  student data. It is `noindex`, so search engines skip it.
 - Vercel's free Hobby plan is for non-commercial use; a Be10x deployment should
   be on a paid plan.
 
@@ -130,7 +130,7 @@ Notes:
 push all of them or the CI build silently loses data:
 
 ```bash
-git add .github pipeline.py day1_analysis.py day1_template.html SETUP_PIPELINE.md \
+git add .github pipeline.py SETUP_PIPELINE.md \
         requirements.txt .gitignore attendance_app.py live_data.py dashboard_core.py \
         dash_view.py site_build.py site_templates intro_attendance.json
 ```
@@ -184,13 +184,8 @@ Actions tab with **incremental** unticked.
   uploading). Don't run it while the local app is open — the app holds the store
   file; if a build is interrupted, delete `.cache/attendance.duckdb` and rebuild.
 - If the roster gains a new batch tab, nothing to do — the next pipeline run
-  picks it up automatically, in the main dashboard **and** in the Day-1 analysis
-  (which always covers the newest `DAY1_BATCHES` batches — 4 by default; change
-  that constant in `pipeline.py`).
-- **Day one is auto-detected** as the earliest session the L2 schedule registers
-  as a real class for that batch, so marketing walkthroughs are never mistaken for
-  class 1. That means **a session missing from L2 is invisible to this tab** — if
-  a batch shows "no session registered in L2 yet", the fix is to add the session's
-  Webinar ID to the L2 schedule.
+  picks it up automatically.
+- **A session missing from L2 is invisible to the dashboard** (`data.REQUIRE_L2`).
+  If a session ran but does not appear, add its Webinar ID to the L2 schedule.
 - The app re-checks Drive for a newer store every 30 minutes, so Monday's rebuild
   reaches viewers on its own; 🔄 Refresh forces it immediately.

@@ -1,8 +1,8 @@
 # Be10X — AI CAP Attendance Suite
 
 Attendance for the AI CAP live-cohort batches: a weekly job marks Present/Absent
-from the Zoom exports and publishes the data; a Streamlit app shows the dashboard,
-the marked roster, and a day-1 payment/close-type analysis.
+from the Zoom exports and publishes the data; a Streamlit app shows the dashboard
+and the marked roster.
 
 **New here (human or AI)? Read [CLAUDE.md](CLAUDE.md) first** — it explains the
 architecture, the data quirks that silently corrupt numbers, and what must never
@@ -15,13 +15,13 @@ pip install -r requirements.txt
 streamlit run attendance_app.py
 ```
 
-It has **three tabs**:
+It has **six tabs** — Dashboard, Sessions (Browse / This week / Trainers),
+Weekend Recap, Roster, Forecast and Add data. The two documented in detail here:
 
 | Tab | What you see |
 |---|---|
 | **📊 Dashboard** | KPIs (enrolled, active, batches, sessions logged) → a **cross-batch comparison bar** → a **batch selector**; pick a batch to drill into metric cards, an **attendance-by-date line chart**, a **closing-types panel** (share + per-channel attendance), and a **sessions table**. Attendance = **present ÷ total batch strength**; colour bands ≥45 / 30–45 / <30. |
 | **📋 Roster (marked attendance)** | The marked sheet, student-by-student, with **Present/Absent** colour-coded per session — like the spreadsheet. Contacts are masked by default; full marked `.xlsx` is downloadable. |
-| **🎯 Day-1 analysis** | For the newest batches: day-one and latest-session attendance cut against payment (col I) and close type (col J). Built by the weekly pipeline. |
 
 ### The Dashboard tab (new, data-driven)
 The Dashboard shows the **same updated roster the app fetches** from your links —

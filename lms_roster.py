@@ -88,9 +88,9 @@ N_FIXED = len(HEADERS)
 # API value -> the spelling the roster uses, validated against B38 by the parent
 # folder's cmp_values.py. 'none' maps to blank deliberately: `data.is_active`
 # already treats blank as inactive, and inventing a value would be worse than an
-# empty cell. All three independent active-vocabularies (data._REFUND_TOKENS,
-# dashboard_core._REFUND_HINTS, day1_analysis._canon_payment) classify these the
-# same way — 'Unidentified/Refunded' matches on both 'refund' and 'unidentif'.
+# empty cell. Both independent active-vocabularies (data._REFUND_TOKENS and
+# dashboard_core._REFUND_HINTS) classify these the same way —
+# 'Unidentified/Refunded' matches on both 'refund' and 'unidentif'.
 PAYMENT = {"full_paid": "Full Paid", "booking": "Booking Amount",
            "partially_paid": "Partially Paid",
            "refunded": "Unidentified/Refunded", "none": ""}

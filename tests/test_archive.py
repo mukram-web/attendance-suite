@@ -73,8 +73,7 @@ class FakeLiveData:
 
 class ArchiveTest(unittest.TestCase):
     WHEN = date(2026, 9, 5)
-    CFG = {"l2_id": "L2", "roster_id": "R",
-           "curriculum_id": "C", "bsiai_roster_id": "B"}
+    CFG = {"l2_id": "L2", "roster_id": "R", "curriculum_id": "C"}
 
     def setUp(self):
         self.fake = FakeLiveData()
@@ -122,10 +121,10 @@ class TestFolder(unittest.TestCase):
 class TestRun(ArchiveTest):
     def test_every_configured_sheet_is_saved(self):
         out = self._run()
-        self.assertEqual(len(out["saved"]), 4)
+        self.assertEqual(len(out["saved"]), 3)
         self.assertEqual(out["errors"], [])
         for label in ("L2_Weekly_Live_Sessions", "Master_Batch_Rosters",
-                      "Master_Curriculum_Schedule", "BSIAI_Roster"):
+                      "Master_Curriculum_Schedule"):
             self.assertIn(f"{label}_2026-09-05.xlsx", self.fake.uploaded)
 
     def test_rerunning_the_same_day_uploads_nothing(self):
@@ -136,7 +135,7 @@ class TestRun(ArchiveTest):
         out = self._run()
         self.assertEqual(self.fake.uploaded, first)
         self.assertEqual(out["saved"], [])
-        self.assertEqual(len(out["skipped"]), 4)
+        self.assertEqual(len(out["skipped"]), 3)
 
     def test_a_later_date_makes_a_new_snapshot(self):
         self._run()
@@ -154,7 +153,7 @@ class TestRun(ArchiveTest):
     def test_one_failing_sheet_does_not_stop_the_others(self):
         self.fake.fetch_fails.add("R")                # roster unreadable
         out = self._run()
-        self.assertEqual(len(out["saved"]), 3)
+        self.assertEqual(len(out["saved"]), 2)
         self.assertEqual(len(out["errors"]), 1)
         self.assertIn("Master_Batch_Rosters", out["errors"][0])
         self.assertIn("L2_Weekly_Live_Sessions_2026-09-05.xlsx", self.fake.uploaded)
@@ -162,7 +161,7 @@ class TestRun(ArchiveTest):
     def test_store_is_archived_when_given(self):
         out = self._run(store_bytes=b"duckdb-bytes")
         self.assertIn("attendance_store_2026-09-05.duckdb", self.fake.uploaded)
-        self.assertEqual(len(out["saved"]), 5)
+        self.assertEqual(len(out["saved"]), 4)
 
     def test_marked_workbook_is_archived_when_given(self):
         """The pipeline overwrites the live marked .xlsx every Monday, so the
@@ -170,7 +169,7 @@ class TestRun(ArchiveTest):
         out = self._run(marked_bytes=b"marked-xlsx")
         self.assertIn("Master_Batch_Rosters_marked_2026-09-05.xlsx",
                       self.fake.uploaded)
-        self.assertEqual(len(out["saved"]), 5)
+        self.assertEqual(len(out["saved"]), 4)
 
     def test_marked_snapshot_does_not_collide_with_the_source_roster(self):
         """Two different artefacts: the sheet as its owners keep it, and the
@@ -182,7 +181,7 @@ class TestRun(ArchiveTest):
 
     def test_marked_and_store_together(self):
         out = self._run(store_bytes=b"db", marked_bytes=b"xlsx")
-        self.assertEqual(len(out["saved"]), 6)
+        self.assertEqual(len(out["saved"]), 5)
 
     def test_marked_omitted_when_not_given(self):
         self._run()

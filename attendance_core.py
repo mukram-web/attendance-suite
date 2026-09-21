@@ -335,11 +335,11 @@ def l2_mentor_emails(l2_bytes) -> dict:
 #                      Phone. Zoom emits this for webinars run WITHOUT
 #                      registration, so two sessions on the same day can differ.
 #
-# The flat shape used to parse to zero attendees WITHOUT raising, in both
-# `parse_attendees` (here) and `day1_analysis.read_attendees`. That marked a
-# whole batch absent, published a real-looking 0%, and left the run green.
-# `is_attendee_report` is the single definition of "usable shape" that all three
-# callers now gate on. Only `bsiai.sessions_from_files` ever guarded this.
+# The flat shape used to parse to zero attendees WITHOUT raising in
+# `parse_attendees` (here). That marked a whole batch absent, published a
+# real-looking 0%, and left the run green. `is_attendee_report` is now a
+# DIAGNOSTIC rather than a gate: it tells `zero_attendee_reason` which cause to
+# name.
 # The gate is the PARSE RESULT, not the shape. Shape detection alone is not
 # enough: a tab-delimited or UTF-16 report still carries a readable "Attendee
 # Details" line, so it looks like a report, yet `parse_attendees` (comma dialect)
@@ -372,10 +372,9 @@ def is_attendee_report(text) -> bool:
     """True when `text` is a real Zoom *Attendee Report* rather than a flat
     participant list.
 
-    Accepts EITHER marker, because the two parsers key on different ones: the
-    marker here wants the `Attended` + `First Name` header row, while
-    `day1_analysis.read_attendees` walks the named sections. A genuine report
-    has both; the flat list has neither.
+    Accepts EITHER marker: the marker here wants the `Attended` + `First Name`
+    header row, while a section-walking reader wants the named sections. A
+    genuine report has both; the flat list has neither.
 
     A report whose header exists but carries NO data rows is a genuinely empty
     session (nobody joined), not a format problem — this returns True for it, so
@@ -461,8 +460,9 @@ def _phone_hit(p, ph_full, ph_last10) -> bool:
 
     Safe for this data: an Indian mobile number IS its last 10 digits, so two
     different people cannot collide on them. The full-string check is kept first
-    for numbers too short to have a last-10 form. `day1_analysis.norm_phone` has
-    always compared this way; this is the marker catching up, not a new rule.
+    for numbers too short to have a last-10 form. The day-1 analysis always
+    compared this way before it was removed; this was the marker catching up,
+    not a new rule.
     """
     if not p:
         return False

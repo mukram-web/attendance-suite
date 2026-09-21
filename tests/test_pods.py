@@ -251,8 +251,8 @@ class TestClosingTypeIsPerPerson(unittest.TestCase):
 
 
 class TestPodViewHandlesProgrammesWithoutPods(unittest.TestCase):
-    """BSIAI builds no `by_date` rollup and no PODs. pod_view assumed both and
-    returned an empty session list, blanking the whole BSIAI tab with
+    """A programme with no `by_date` rollup and no PODs. pod_view assumed both
+    and returned an empty session list, blanking the whole tab with
     "No sessions logged for None yet"."""
 
     def test_a_batch_with_no_by_date_is_returned_untouched(self):
