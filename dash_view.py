@@ -125,9 +125,8 @@ def pod_view(d: dict, pod: str | None) -> dict:
     if not pod:
         rows = d.get("by_date")
         if not rows:
-            # No date rollup (BSIAI builds none - one session per date, no PODs).
-            # Return the batch untouched rather than an empty list, which blanked
-            # the whole BSIAI tab with "No sessions logged for None yet".
+            # A batch with no date rollup: return it untouched rather than an
+            # empty list, which rendered "No sessions logged for None yet".
             return d
         rows = list(rows)
         # These rows are rendered by the same table as real sessions, so they must
@@ -400,7 +399,7 @@ def sessions_subtitle(d: dict) -> str:
     Under `data.REQUIRE_L2` those are filtered out before they get here, so the
     honest thing to report is that they are HIDDEN - otherwise the page silently
     shows a shorter list than the workbook contains. `no_l2` rows are still
-    counted for any caller that keeps them (BSIAI never has one)."""
+    counted for any caller that keeps them."""
     n_hidden = int(d.get("hidden_no_l2") or 0)
     n_missing = sum(1 for s in d["sessions"] if s.get("no_l2"))
     sub = f' <span class="dh-sub">· {len(d["sessions"])} rows'
@@ -411,16 +410,8 @@ def sessions_subtitle(d: dict) -> str:
     return sub + "</span>"
 
 
-def render(DATA: dict, summary: dict, source_note: str = "", *,
-           key: str = "aicap_batch", show_closing: bool = True,
-           closing_title: str = "Closing types",
-           closing_sub: str = ("bar = share of batch · pill = that "
-                               "channel's avg attendance")) -> None:
-    """Draw one programme's dashboard.
-
-    `key` must differ per programme - two segmented_controls sharing a key is a
-    Streamlit duplicate-key error. `show_closing=False` drops the closing-type
-    panel for programmes whose roster has no Close Type column (BSIAI)."""
+def render(DATA: dict, summary: dict, source_note: str = "") -> None:
+    """Draw the dashboard."""
     import streamlit as st
     st.markdown(_CSS, unsafe_allow_html=True)
     st.markdown('<div class="aicap">', unsafe_allow_html=True)
@@ -450,7 +441,7 @@ def render(DATA: dict, summary: dict, source_note: str = "", *,
 
     # ── batch selector (drives drill-down) ──
     sel = st.segmented_control("Batch — pick to drill in", codes,
-                               default=codes[0], key=key)
+                               default=codes[0], key="aicap_batch")
     if sel is None:
         sel = codes[0]
     d = DATA[sel]
@@ -471,7 +462,8 @@ def render(DATA: dict, summary: dict, source_note: str = "", *,
         opts = (["All PODs"] + ([whole_lbl] if whole_lbl else [])
                 + ([common_lbl] if common_lbl else [])
                 + [f"{p} ({pinfo[p]['strength']:,})" for p in plist])
-        picked = st.segmented_control("POD", opts, default=opts[0], key=f"{key}_pod")
+        picked = st.segmented_control("POD", opts, default=opts[0],
+                                      key="aicap_batch_pod")
         if picked and picked != "All PODs":
             if whole_lbl and picked == whole_lbl:
                 # not a POD - the sessions the whole batch was invited to
@@ -516,12 +508,12 @@ def render(DATA: dict, summary: dict, source_note: str = "", *,
     st.markdown('<div class="panel-title">Attendance by date</div>', unsafe_allow_html=True)
     st.plotly_chart(_date_line(d), width="stretch", config={"displayModeBar": False})
 
-    if show_closing:
-        # ── closing types ──
-        st.markdown(f'<div class="panel-title">{closing_title} '
-                    f'<span class="dh-sub">· {closing_sub}</span></div>',
-                    unsafe_allow_html=True)
-        st.markdown(closing_rows_html(d), unsafe_allow_html=True)
+    # ── closing types ──
+    st.markdown('<div class="panel-title">Closing types '
+                '<span class="dh-sub">· bar = share of batch · pill = that '
+                "channel's avg attendance</span></div>",
+                unsafe_allow_html=True)
+    st.markdown(closing_rows_html(d), unsafe_allow_html=True)
     # ── sessions table ──
     st.markdown(f'<div class="panel-title">All sessions{sessions_subtitle(d)}</div>',
                 unsafe_allow_html=True)

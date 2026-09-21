@@ -3,10 +3,13 @@ site_build.py — render the static website from attendance.duckdb.
 
 Output (site/, gitignored — it contains roster PII under /roster/):
   index.html            dashboard (public: aggregates only)
-  day1.html             day-1 analysis (public: aggregates only)
   roster/index.html     per-student grid — served ONLY behind Basic Auth
   roster/data/B<n>.json one file per batch (cols + rows)
-  middleware.js         Vercel Edge Middleware: HTTP Basic Auth on /roster*
+  roster/canary.txt     probe for proving the login gate works BEFORE any PII
+                        is published (SETUP_PIPELINE.md)
+  assets/plotly.min.js  bundled, so the site is self-contained and version-pinned
+  middleware.mjs        Vercel Edge Middleware: HTTP Basic Auth on /roster*
+  package.json          "type": "module", belt-and-braces with the .mjs above
   vercel.json           noindex everywhere; no-store on roster responses
 
 The public pages carry no student contact data; everything under /roster/ is
@@ -32,7 +35,6 @@ sys.path.insert(0, HERE)
 import dash_view                       # noqa: E402 — figures + fragments shared with the app
 
 TEMPLATES = os.path.join(HERE, "site_templates")
-DAY1_TEMPLATE = os.path.join(HERE, "day1_template.html")
 
 
 def _plotly_js_path() -> str:
@@ -197,16 +199,6 @@ def build_site(store_path: str, out_dir: str, log=print,
 
     os.makedirs(os.path.join(out_dir, "assets"), exist_ok=True)
     shutil.copyfile(_plotly_js_path(), os.path.join(out_dir, "assets", "plotly.min.js"))
-
-    # ── public: day-1 analysis (same template the Streamlit tab embeds) ────
-    day1 = meta.get("day1") or {"batches": [], "skipped": [], "errors": []}
-    day1_payload = dict(day1)
-    day1_payload["generated"] = generated
-    day1_payload["sheet_url"] = ""      # public page — never link the source sheet
-    day1_payload["standalone"] = True   # show nav + in-page batch chips
-    _write(os.path.join(out_dir, "day1.html"),
-           _read_template(DAY1_TEMPLATE)
-           .replace("__DATA__", _script_safe(day1_payload)))
 
     # ── restricted: roster grids ────────────────────────────────────────────
     # Publishing student contact details is OPT-IN. Until PUBLISH_ROSTER is set,

@@ -64,13 +64,12 @@ MARKED_LABEL = "Master_Batch_Rosters_marked"
 LMS_LABEL = "LMS_Roster"
 
 # What gets snapshotted, in priority order. `key` is the config key holding the
-# Sheet id; a missing or unconfigured id is skipped, not an error — BSIAI and the
-# curriculum are both optional and their absence must not fail the run.
+# Sheet id; a missing or unconfigured id is skipped, not an error — the
+# curriculum is optional and its absence must not fail the run.
 SHEETS = [
     ("l2", "l2_id", "L2_Weekly_Live_Sessions"),
     ("roster", "roster_id", "Master_Batch_Rosters"),
     ("curriculum", "curriculum_id", "Master_Curriculum_Schedule"),
-    ("bsiai", "bsiai_roster_id", "BSIAI_Roster"),
 ]
 
 

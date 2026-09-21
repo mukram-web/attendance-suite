@@ -22,7 +22,6 @@
 #                                (CLAUDE.md 4f) - delete it to force a full
 #                                re-parse, or tick no_cache below.
 # Optional:
-#   BSIAI_ROSTER_ID              BSIAI roster sheet id (its own programme tab)
 #   CURRICULUM_ID                Master Curriculum Schedule sheet id (drives the
 #                                Forecast tab; one tab per pod)
 #
@@ -102,10 +101,6 @@ jobs:
           L2_ID: ${{ secrets.L2_ID }}
           ATTENDEE_FOLDER_ID: ${{ secrets.ATTENDEE_FOLDER_ID }}
           STORE_FOLDER_ID: ${{ secrets.STORE_FOLDER_ID }}
-          # Optional: the BSIAI programme's roster Sheet. Unset -> the pipeline
-          # skips that section and the app's BSIAI tab says so; AI CAP is
-          # unaffected either way.
-          BSIAI_ROSTER_ID: ${{ secrets.BSIAI_ROSTER_ID }}
           # Optional: the Master Curriculum Schedule (what is PLANNED). Unset ->
           # no forecast is built and the app's Forecast tab says so. This Sheet is
           # owned outside the roster team, so it needs sharing with the service

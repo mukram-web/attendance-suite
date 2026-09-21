@@ -547,7 +547,7 @@ if _snapshots:
         _pick_week = st.selectbox(
             "Week", _labels, index=0, key="week_pick",
             help="Past weeks are archived every Monday. Choosing one shows the "
-                 "dashboard exactly as it stood then — attendance, day-1, "
+                 "dashboard exactly as it stood then — attendance, "
                  "forecast and roster all as they were.")
         if _pick_week != "Latest (live)":
             _viewing = _snapshots[_labels.index(_pick_week) - 1]
@@ -796,10 +796,10 @@ all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
-(tab_dash, tab_sessions, tab_weekend, tab_roster, tab_day1, tab_fcst,
+(tab_dash, tab_sessions, tab_weekend, tab_roster, tab_fcst,
  tab_add) = st.tabs(
     ["📊 Dashboard", "📚 Sessions", "🎬 Weekend Recap",
-     "📋 Roster (marked attendance)", "🎯 Day-1 analysis", "🔮 Forecast",
+     "📋 Roster (marked attendance)", "🔮 Forecast",
      "➕ Add data"]
 )
 
@@ -883,46 +883,6 @@ with tab_roster:
     st.divider()
     _marked_roster_download("dl_roster")
 
-# ========================= TAB 3 — DAY-1 ANALYSIS ============================
-# Day-one (and latest-session) attendance cut against payment (col I) and close
-# type (col J), for the newest batches. Built by pipeline.py — day one is the
-# earliest session the L2 schedule registers as a real class, so marketing
-# walkthroughs never get mistaken for class 1 — and carried in the store as
-# aggregates only (no PII). New batches appear on their own each Monday.
-with tab_day1:
-    import streamlit.components.v1 as _components
-    _day1 = (store or {}).get("day1") if store_mode else None
-    if not store_mode:
-        st.info("This tab is built by the weekly pipeline. It appears once the app "
-                "is reading the prebuilt store — see **SETUP_PIPELINE.md**.")
-    elif not _day1 or not _day1.get("batches"):
-        st.warning("No day-1 analysis in this build of the data.")
-        for _s in (_day1 or {}).get("skipped", []):
-            st.caption("• " + _s)
-    else:
-        _all = _day1["batches"]
-        _codes = [b["batch"] for b in _all]
-        # Batch choice lives HERE, not inside the page: st.components.html ignores
-        # a frame-height message when a height is given, so the only way to avoid
-        # either a nested scrollbar or a screen of dead space is for Python to
-        # know how many batches it is about to draw.
-        _pick = st.multiselect("Batches", _codes, default=_codes, key="day1_batches",
-                               help="The newest batches; the window rolls on its own "
-                                    "as new ones start.")
-        _sel = [b for b in _all if b["batch"] in _pick] or _all
-        _payload = dict(_day1, batches=_sel)
-        _payload["generated"] = store["generated_at"]
-        _payload["sheet_url"] = (
-            "https://docs.google.com/spreadsheets/d/"
-            f"{st.secrets.get('drive', {}).get('roster_id', '')}/edit"
-            if _store_configured or live_ready else "")
-        _tpl = (Path(__file__).parent / "day1_template.html").read_text(encoding="utf-8")
-        # `</` must be escaped or a session title containing "</script>" would
-        # terminate the inline script and blank the tab with no error shown.
-        _blob = json.dumps(_payload).replace("</", "<\\/")
-        # Measured: ~3.3k px of fixed chrome + ~1.15k per batch of chart rows.
-        _components.html(_tpl.replace("__DATA__", _blob),
-                         height=3350 + 1150 * len(_sel), scrolling=True)
 # ========================== TAB 4 — FORECAST =================================
 # Predicted attendance for sessions that have not run yet, built by pipeline.py
 # from the dashboard's own DATA plus the Master Curriculum Schedule. Aggregates

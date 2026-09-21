@@ -11,7 +11,7 @@ store, so an unstable column wedges every later run.
 Byte size was tried as the tie-break and is a BAD proxy: B26's 22 Aug had a
 bigger file with 22 fewer people present, so ranking on size fixed one session
 and moved three others the wrong way. The count of people the file actually
-names is the rule `bsiai.sessions_from_files` already uses here.
+names is the rule the marker already uses here.
 """
 import os
 import sys

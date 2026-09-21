@@ -51,19 +51,16 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 
 | File | Role |
 |---|---|
-| `pipeline.py` | the job: fetch → mark → day-1 analysis → build store → **render `site/`** → upload. Flags: `--incremental` (mark only what is unmarked — §4g), `--no-upload`, `--no-site`, `--allow-partial`, `--mode`, `--no-cache`, `--cache-file` (§4f). |
-| `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), Roster, Day-1 analysis, Forecast, BSIAI, **Add data**). Reads the store; does not compute. |
+| `pipeline.py` | the job: fetch → mark → build store → **render `site/`** → upload. Flags: `--incremental` (mark only what is unmarked — §4g), `--no-upload`, `--no-site`, `--allow-partial`, `--mode`, `--no-cache`, `--cache-file` (§4f). |
+| `attendance_app.py` | the Streamlit app (tabs: Dashboard, **Sessions** (Browse / This week / Trainers), **Weekend Recap**, Roster, Forecast, **Add data**). Reads the store; does not compute. |
 | `attendance_core.py` | the marker engine: parses Zoom reports + L2, writes Present/Absent into the workbook. |
 | `dashboard_core.py` | `compute()` (per batch × session) and `roster_grid()` (per-student grid). |
 | `data.py` | pure data layer → the `DATA`/`summary` objects the dashboard renders. No I/O, unit-tested. |
 | `dash_view.py` | Plotly + Streamlit rendering. Its figure builders and HTML fragments are **pure** so `site_build.py` can reuse them. |
-| `day1_analysis.py` | day-one / latest-session cut of payment and close type for the newest `DAY1_BATCHES` (4) batches. |
 | `forecast.py` | predicted attendance for sessions that have not run yet: decay curve x batch offset x pod multiplier. Pure, no I/O, unit-tested. See §4c. |
-| `day1_template.html` | **used by the live app** to render the Day-1 tab (and by the static site). Not dormant — do not delete. |
 | `derived_cache.py` | the per-file parse memo that makes the weekly run incremental. Pure, unit-tested. See §4f. |
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
-| `bsiai.py` | the **BSIAI programme** — its own roster Sheet, its own batch numbers, no session columns. Computes attendance straight from the attendee reports. |
 | `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. `parse_responses` + `split_by_roster` divide a shared webinar's poll between its batches (§4e). |
 | `sessionmeta.py` | duration, peak, the per-minute retention curve and stickiness, swept from the attendee report's own join/leave times. Pure, unit-tested. See §4e. |
 | `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
@@ -102,48 +99,42 @@ itself. Newer batches (B29+) do not — the marker **appends** them to its own c
 of the workbook and they are never written back to the Sheet. So "the roster has no
 attendance columns" is true of the Sheet and false of the marked store.
 
-### 4b. BSIAI — the second programme (added 2026-08-28)
+### 4b. BSIAI — detected and excluded (programme removed 2026-09-22)
 
-BSIAI is **not** AI CAP with different numbers; it is a separate programme that
-shares only the L2 schedule and the attendee drives.
+The BSIAI programme's own dashboard is **gone**: `bsiai.py`, `tests/test_bsiai.py`,
+the `BSIAI_ROSTER_ID` config, `live_data.fetch_track_attendees`, the pipeline's
+`[5b]` step, the store's `bsiai` section and the `BSIAI_Roster` archive snapshot
+were all deleted on 2026-09-22.
 
-| | AI CAP | BSIAI |
-|---|---|---|
-| roster | Master Batch Rosters, one tab per batch | its own Sheet (`BSIAI_ROSTER_ID`), batch read from a **`Batch` column**, not the tab name |
-| status columns | `Payment` + `Close Type` | **only `Refund`** — so no closing-type panel, and Active = not refunded |
-| session columns | in the workbook / appended by the marker | **none, ever** — attendance is recomputed from the reports each run |
-| session gate | **L2 only** for display since 2026-08-29 (§5.6); still falls back to the folder name when deciding what to *mark* | **L2 only** everywhere — no L2 row, no session |
-
-Things that will trip you up:
+What REMAINS is deliberate. BSIAI still shares the L2 schedule and the attendee
+Shared Drives with AI CAP, so the code must go on recognising it — not to report
+it, but to keep it OUT of AI CAP's numbers. Do not "simplify" any of this away:
 
 1. **`_track()` must classify BSIAI before CAP.** Its folders read `BSI B1`,
    `bsi b2`, `BSIAI B1`; L2 reads `BSIAI B1`. Without the BSIAI branch every one
    of them parses to `('CAP', 1)` — the same key as AI CAP B1. Verified: adding
    the track moved exactly 25 of 1,188 L2 webinars, all to BSIAI, none away.
-2. **Batch numbers carry group suffixes in the roster only** — `BSIAI B1GA`,
-   `BSI B2W1/W2/W3`. `bsiai.batch_num` folds them into the parent batch; the
-   shared `extract_batches` cannot read them and is not asked to.
-3. **Folder names are lowercase on one drive.** The word-boundary batch-number pattern was case-sensitive
-   in both `extract_batches` and `_folder_batches`; both now pass `re.I`.
-   Verified across all 1,048 top-level folders: exactly 7 changed, all `bsi b2`.
+   `tests/test_extract_batches.py` and `test_lms_roster.test_bsiai_tabs_are_not_cap`
+   are the guarantees. A roster tab whose track is unrecognised defaults to CAP,
+   so dropping the branch would invent phantom AI CAP batches.
+2. **One label can name two programmes.** `AI CAP B40 - Common + BSIAI
+   Accelerator B1` is an AI CAP session sharing a room with a BSIAI batch.
+   `extract_batches` reads each item separately and returns BOTH `('CAP', 40)`
+   and `('BSIAI', 1)`; folding them together put the whole segment under BSIAI,
+   invented a `BSIAI B40` that does not exist and lost AI CAP B40.
+   `polls.batch_label` is what names the other room `BSIAI B1` on the shared
+   -session view, and `pods` treats the unlabelled remainder as the complement.
+3. **Folder names are lowercase on one drive.** The word-boundary batch-number
+   pattern was case-sensitive in both `extract_batches` and `_folder_batches`;
+   both now pass `re.I`. Verified across all 1,048 top-level folders: exactly 7
+   changed, all `bsi b2`.
 4. **The same session sits on both Shared Drives** ("Weekly Sessions Files" as
    `BSI B1`, "Zoom extracts" as `BSIAI B1`) and sometimes twice on one of them.
-   `sessions_from_files` keys on webinar id and keeps the copy with the most
-   attendees — the copies differ by a row or two.
-5. **`MM-AI B1` is a third programme**, not BSIAI. `batch_num` returns None for
-   it. It has no session folders on Drive at all.
-6. **Three tabs are excluded on purpose** (owner-confirmed 2026-08-29), listed in
-   `bsiai._IGNORED_TABS`: `failed BSI B1` (a Q&A group split), `Sheet8` (~466
-   contacts with no Batch column) and `NEXT BATCH 15K MMAI`. They are skipped
-   **silently**; every other unusable tab still warns, which is what stops a real
-   roster tab from disappearing unnoticed. Revisit `Sheet8` if a Batch column is
-   ever added - those rows would then join a denominator and move the numbers.
+   `live_data.dedupe_by_webinar` keys on webinar id and keeps the copy naming the
+   most people — the copies differ by a row or two.
 
-Config: `BSIAI_ROSTER_ID` (repo secret) or `bsiai_roster_id` under `[drive]`.
-Absent → the pipeline skips the section entirely and the tab says so; the AI CAP
-refresh is never affected. A BSIAI failure is caught and reported in the tab
-rather than failing the run.
-
+`MM-AI B1` is a third programme again, distinct from both; it has no session
+folders on Drive at all.
 
 ### 4c. The Forecast tab (added 2026-08-31)
 
@@ -244,7 +235,7 @@ Sheet, or point the relevant `*_ID` at a copy of it and re-run the pipeline.
 
 **Past weeks are readable in the app**, not just recoverable from Drive. The
 sidebar's **Week** selector lists every archived store newest-first; picking one
-renders that week verbatim — attendance, day-1, forecast, BSIAI and roster all as
+renders that week verbatim — attendance, forecast and roster all as
 they stood. A yellow banner sits on the PAGE, not just the sidebar, because
 someone screenshotting a number from a historical week must not be able to
 mistake it for today. Two things to know:
@@ -437,7 +428,7 @@ week.
 **What is NOT cached, and must never be.** The whole-drive listing (it is the
 change detector — a cache hit skips a download, never the question of what
 exists). The marking, all 429 columns. Every denominator. `REQUIRE_L2`. Both L2
-joins. `forecast.fit_curve` and its backtest. `recap`. `trainers`. Day-1. BSIAI.
+joins. `forecast.fit_curve` and its backtest. `recap`. `trainers`.
 **Measured total cost of that entire model layer: 0.18 seconds.** There is
 nothing to save there and everything to lose — recomputing it weekly is exactly
 what let the phone fix reach three months of past sessions.
@@ -704,10 +695,12 @@ date. Fix the grid before switching sources.
    Prefer the substring matching used in `attendance_core.py` / `data.py`.
 2. **Phones from openpyxl are floats** (`919704189186.0`). Strip the `.0` BEFORE
    removing non-digits, or every phone shifts a digit and phone matching dies
-   silently. This bug made day-1 attendance read 53.9% instead of 58.0%.
+   silently. This bug once made a day-one reading come out 53.9%, not 58.0%.
 3. **Match attendees on email OR phone, comparing the LAST 10 DIGITS.**
-   `attendance_core._phone_hit` and `day1_analysis.norm_phone` now agree; they
-   did not until 2026-09-06, when `exact` mode compared the whole digit string.
+   The last-10 comparison applies in BOTH modes — via
+   `attendance_core._phone_hit` in `exact`, and inlined in the `inclusive`
+   branch, which has NO full-string fallback for sub-10-digit numbers. It did
+   not until 2026-09-06, when `exact` mode compared the whole digit string.
    That made the phone half of the rule dead in production: the roster is 99.4%
    12-digit (91 prefix) and Zoom is 78.8% bare 10-digit, so it added 1-6 students
    per session where last-10 adds 126-145. Fixing it raised every re-marked
@@ -722,20 +715,20 @@ date. Fix the grid before switching sources.
    pipeline never writes back to.
 4. **Column I/J vocabulary drifts per batch** — `Full Paid`/`Full paid`/`Full`,
    `BDA Closing`/`Bda closing`/`BDA Closimg`, eight spellings of
-   unidentified-refunded. Canonicalise on meaning. Beware: **three independent
-   vocabularies exist** — `day1_analysis._canon_payment/_canon_close` (Day-1 tab),
-   `data._REFUND_TOKENS`/`normalize_closing` (Dashboard), and
-   `dashboard_core._REFUND_HINTS`. They do not agree (e.g. "Cancelled" counts as
+   unidentified-refunded. Canonicalise on meaning. Beware: **two independent
+   vocabularies exist** — `data._REFUND_TOKENS`/`normalize_closing` (Dashboard)
+   and `dashboard_core._REFUND_HINTS`. They do not agree (e.g. "Cancelled" counts as
    inactive in `data.py` but active in `dashboard_core.py`). Unifying them is
    worthwhile; until then, know which module governs the number you are changing.
-5. **Day one = the earliest session the L2 schedule registers by webinar id.**
-   Marketing walkthroughs share the batch folder naming but are never in L2.
-   A title guard may FLAG but must never VETO (real topics contain "onboarding").
-   Verified across B31–B35, 28 sessions, zero false negatives.
+5. **Marketing walkthroughs are never in L2.** They share the batch folder
+   naming, so a folder name alone cannot tell a real class from a walkthrough —
+   L2 membership can. A title guard may FLAG but must never VETO (real topics
+   contain "onboarding"). Verified across B31–B35, 28 sessions, zero false
+   negatives.
 6. **L2 is the register of what ran — the dashboard shows nothing else.**
    `data.REQUIRE_L2` (owner's rule, 2026-08-29) drops any session column whose
-   webinar has no L2 row. It applies to **both** programmes: BSIAI never admitted
-   one, and AI CAP stopped falling back to the folder name for display. The
+   webinar has no L2 row — AI CAP stopped falling back to the folder name for
+   display. The
    columns are still MARKED into the workbook — the roster download keeps the
    full record — they are just not counted or shown, and the sessions panel says
    how many are hidden. It engages **only when a non-empty L2 lookup exists**: with
@@ -754,9 +747,11 @@ date. Fix the grid before switching sources.
    a Shared Drive itself.
 9. **Never `next(ws.iter_rows(...))` unguarded** — people add empty scratch tabs
    (a "Pivot Table 2" tab once crashed the whole build).
-10. **The pipeline refuses to publish partial data.** A failed folder listing or
-   download, or a day-1 analysis that produced nothing, exits non-zero and leaves
-   last week's store intact. `--allow-partial` overrides it; the workflow
+10. **The pipeline refuses to publish partial data.** A failed folder listing
+   or download, an attendee export that parsed to nobody (`ZERO_ATTENDEE_TAG`),
+   a roster with no `AI CAP B<n>` tab to split shared polls by, a coverage
+   collapse (GATE 5) or a lost mark (GATE 6) each exit non-zero and leave last
+   week's store intact. `--allow-partial` overrides it; the workflow
    deliberately never passes that flag. Keep it this way — a green run that
    silently drops a weekend's session is worse than a red one.
 11. **Cache PRE-join per-file facts only, and never the file's NAME.** Anything
@@ -770,7 +765,7 @@ date. Fix the grid before switching sources.
    counter-example of what a cache that is really a freeze does to your numbers.
    ⚠️ **Since 2026-09-10 this applies to DERIVED numbers only.** The owner chose
    to freeze the MARKS: `--incremental` carries them forward and never recomputes
-   them (§4g). The model layer — ratings, recap, trainers, forecast, day-1 — is
+   them (§4g). The model layer — ratings, recap, trainers, forecast — is
    still rebuilt from scratch every run, so a fix there still reaches everything.
 ## 6. Security — THIS REPOSITORY IS PUBLIC
 
@@ -821,7 +816,7 @@ Set it in **two** places, they are separate stores:
   — repo `mukram-web/attendance-suite`, branch `main`, main file `attendance_app.py`.
   **Confirmed in store mode 2026-08-12** by loading it signed-out: caption read
   "🟢 Prebuilt data · data as of 12 Aug 2026, 01:28 IST" (the pipeline's build time,
-  not its own crawl) and the Day-1 tab rendered 20 tiles / 104 bars for B32–B35.
+  not its own crawl).
   ⚠️ **It is PUBLIC — it loads with no login at all**, and its Roster tab has a
   "Show full contact details" checkbox over student emails and phones. Restrict via
   the app's Settings → Sharing if that is not intended. An older `attendance-marker`
@@ -910,17 +905,12 @@ python -m unittest tests.test_data
 # same variable set back to "sheet" is the rollback.
 ROSTER_SOURCE=lms python pipeline.py --no-upload --no-site --incremental
 
-# all of them (473 as of 2026-09-19). `discover` does not work: tests/ has no
-# __init__.py, so the start directory is "not importable" — name them instead.
-# test_dashboard_core_tabs takes ~2 min: it proves the bytes and tabs= paths
+# all of them - 476 as of 2026-09-22, ~45 s. `discover` DOES work from the repo
+# root (do not pass `-t .`), and it is the only form that cannot silently skip a
+# new test file, which a hand-maintained module list has done twice.
+# test_dashboard_core_tabs is the slow one: it proves the bytes and tabs= paths
 # agree by running the SLOW path too, which is the point of it.
-python -m unittest tests.test_data tests.test_polls tests.test_recap \
-  tests.test_trainers tests.test_forecast tests.test_pods tests.test_bsiai \
-  tests.test_archive tests.test_attendee_format tests.test_sessionmeta \
-  tests.test_derived_cache tests.test_pipeline_cache_gate \
-  tests.test_carryforward tests.test_ingest tests.test_gate6 \
-  tests.test_extract_batches tests.test_lms_roster \
-  tests.test_dashboard_core_tabs
+python -m unittest discover tests
 ```
 
 **Before switching `roster_source` to `lms`, run the cutover diff** (§4h). It
@@ -973,7 +963,7 @@ secrets, or the store could not be downloaded.
 **What is inside `attendance.duckdb`:** `meta(key, value)` holding JSON blobs
 (`DATA`, `summary`, `report`, `warnings`, `source`, `generated_at`,
 `generated_at_iso`, `batches`, `sheet_map`, `marked_xlsx_file_id`, `stamps`,
-`day1`, `forecast`, `recap`, `trainers`, `sessions`, `cache`), the `compute` table (per batch × session), and one `grid_<batch>` table per
+`forecast`, `recap`, `trainers`, `sessions`, `cache`), the `compute` table (per batch × session), and one `grid_<batch>` table per
 batch. The `grid_*` tables carry emails and phones — that is why the store is
 PII and lives in a private Shared Drive. The app caches it with a **5-minute TTL**,
 so an upload reaches other viewers on its own; 🔄 Refresh forces it immediately.
@@ -983,5 +973,4 @@ to the code; CI uses env vars instead. `.cache/` holds the attendee byte cache a
 the exported sheets — safe to delete, just slower afterwards.
 
 When a new batch starts, **nothing needs changing**: the batch tab appears in the
-roster, and the next Monday run picks it up in both the dashboard and the day-1
-analysis (which always covers the newest `DAY1_BATCHES` batches).
+roster, and the next run picks it up in the dashboard.

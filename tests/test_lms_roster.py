@@ -126,7 +126,7 @@ class TestTabNames(unittest.TestCase):
         self.assertEqual(ddata.batch_label(name), "B7")          # strictest
         self.assertIsNotNone(ac._sheet_key(name))                # loosest
         self.assertEqual(dc._clean_batch_name(name), "B7")
-        self.assertRegex(name, r"^\s*AI\s*CAP\s*B\d+\s*$")       # pipeline/day1
+        self.assertRegex(name, r"^\s*AI\s*CAP\s*B\d+\s*$")       # pipeline
 
 
 # ── API record parsing ───────────────────────────────────────────────────────

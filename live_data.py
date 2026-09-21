@@ -43,8 +43,13 @@ from concurrent.futures import ThreadPoolExecutor
 # versions → Upload new version" keeps the id, and that is the documented remedy
 # for a bad Zoom export (CLAUDE.md §7b.1). The listing paths now key on
 # (id, md5-or-modifiedTime) via _sig_path, so a replaced file misses the cache.
-# download_cached() below still keys on the bare id; its caller (day1) re-lists
-# every run, so a stale hit there costs one analysis, not a persisted fact.
+# download_cached() below still keys on the bare id, and that is safe for only
+# ONE of fetch_store_snapshot's two callers. The app reads archive/ snapshots,
+# which are immutable once written. But derived_cache.load fetches the LIVE
+# derived_facts.json.gz, which derived_cache.save replaces IN PLACE through
+# upload_to_folder - same id for ever - so a warm .cache/attendee/<id> serves
+# the first memo that machine ever downloaded. fetch_file_bytes exists for
+# exactly this reason; see pipeline._previous_coverage.
 _CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "attendee")
 _SHEET_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "sheets")
 
@@ -341,9 +346,12 @@ def _download_any(svc, file_id: str) -> bytes:
 
 
 def download_cached(svc, file_id: str) -> bytes:
-    """Download a Drive file, reusing the per-file-id byte cache. Attendee CSVs
-    never change once uploaded, so a second reader (e.g. the day-1 analysis)
-    costs nothing after the marker has already pulled them."""
+    """Download a Drive file, reusing the per-file-id byte cache.
+
+    Correct ONLY for files that are never replaced under the same id - the
+    archive/ snapshots. It is also reached, via fetch_store_snapshot, from
+    derived_cache.load, whose file IS replaced in place; use fetch_file_bytes
+    when the bytes behind an id can change."""
     cpath = os.path.join(_CACHE_DIR, file_id)
     try:
         with open(cpath, "rb") as fh:
@@ -424,8 +432,10 @@ def find_archived(store_folder_id: str, name: str) -> dict | None:
 
 
 def fetch_store_snapshot(file_id: str) -> bytes:
-    """One archived store by file id. Snapshots are immutable, so the byte cache
-    is always valid — reopening last month's week costs nothing after the first."""
+    """One store by file id, through the byte cache. For archive/ snapshots that
+    is always valid — they are immutable, so reopening last month's week costs
+    nothing after the first. NOT valid for a file replaced under the same id
+    (see download_cached)."""
     return download_cached(_drive_service(), file_id)
 
 
@@ -492,7 +502,7 @@ def dedupe_by_webinar(files):
     store, so an unstable column wedges every later run.
 
     The tie-break is the PARSED ATTENDEE COUNT, which is what
-    `bsiai.sessions_from_files` already uses for this same duplication. Byte
+    the marker already uses for this same duplication. Byte
     size was tried and is a bad proxy: B26's 22 Aug had a bigger file with 22
     FEWER people present, so ranking on size moved three sessions the wrong way
     while fixing one.
@@ -687,105 +697,6 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     return out, info
 
 
-def fetch_track_attendees(svc, folder_id, track: str, max_workers: int = 8):
-    """Every attendee report belonging to one programme track (e.g. "BSIAI").
-
-    `fetch_new_attendees` selects folders by which roster sheet already carries
-    which dates — that only works for a programme whose workbook holds session
-    columns. BSIAI has none: its attendance is recomputed from the reports each
-    run, so this simply takes every folder whose name resolves to the requested
-    track, across every configured drive.
-
-    Cheap despite that: downloads are disk-cached by Drive file id, so a re-run
-    touches the network only for genuinely new files.
-
-    Returns (attendee_files, info) with the same info keys the caller's
-    partial-data gate already understands.
-    """
-    import attendance_core as ac
-
-    def keep(name: str) -> bool:
-        return name.lower().startswith("attendee")
-
-    folders = []
-    for fid in _folder_ids(folder_id):
-        for f in _list_children(svc, fid):
-            if f["mimeType"] != _FOLDER_MIME:
-                continue
-            if any(t == track for t, _ in ac._folder_batches(f["name"])):
-                folders.append((f["name"], f["id"]))
-
-    entries, listing_errors = [], []
-    if folders:
-        def _kids(item):
-            name, fid = item
-            try:
-                return name, _list_children(_thread_drive(), fid), None
-            except Exception as e:
-                return name, [], str(e)
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(folders))) as ex:
-            for name, kids, kerr in ex.map(_kids, folders):
-                if kerr:
-                    listing_errors.append(f"{name}: {kerr}")
-                    continue
-                for f in kids:
-                    if f["mimeType"] != _FOLDER_MIME and keep(f["name"]):
-                        entries.append((f"{name}/{f['name']}", f["id"]))
-
-    out, failed, download_errors = [], 0, []
-    if entries:
-        try:
-            os.makedirs(_CACHE_DIR, exist_ok=True)
-        except OSError:
-            pass
-
-        def _dl(e):
-            path, fid = e
-            cpath = os.path.join(_CACHE_DIR, fid)
-            try:
-                with open(cpath, "rb") as fh:
-                    return path, fh.read(), None
-            except OSError:
-                pass
-            try:
-                data = _download_any(_thread_drive(), fid)
-                try:
-                    tmp = cpath + ".tmp"
-                    with open(tmp, "wb") as fh:
-                        fh.write(data)
-                    os.replace(tmp, cpath)
-                except OSError:
-                    pass
-                return path, data, None
-            except Exception as e:
-                return path, None, str(e)
-
-        with ThreadPoolExecutor(max_workers=min(max_workers, len(entries))) as ex:
-            for path, data, err in ex.map(_dl, entries):
-                if data is None:
-                    failed += 1
-                    download_errors.append(f"{path}: {err}")
-                    continue
-                out.append((path, data))
-
-    info = dict(new_folders=len(folders), files=len(out), failed=failed,
-                skipped_already_marked=0, skipped_no_sheet=0,
-                listing_errors=listing_errors, bad_zips=[],
-                download_errors=download_errors)
-    return out, info
-
-
-# Fields every whole-drive listing asks for. md5Checksum and modifiedTime are
-# what let a cross-run cache tell a REPLACED file from an unchanged one — Drive's
-# "Manage versions → Upload new version" keeps the id, and that is the documented
-# remedy for a bad Zoom export. They are free: the listing already runs, and
-# these are two more fields on a response we already page through.
-_LIST_FIELDS = "nextPageToken, files(id, name, md5Checksum, modifiedTime)"
-
-_ATTENDEE_Q = "name contains 'attendee_' and trashed = false"
-# both conventions — see polls.name_key
-_POLL_Q = ("(name contains 'poll_' or name contains 'Poll Report') "
-           "and trashed = false")
 
 
 def _list_by_query(svc, folder_id, q) -> list[dict]:
