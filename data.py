@@ -299,6 +299,27 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         if in_own and in_plain <= _POD_LEAK_MAX * in_own:
             date_pods[mm_] = met          # two parallel rooms
 
+    def _real_split(raw, invited):
+        """{domain: {present,total,pct}}, minus anything that is not a breakdown.
+
+        Two ways a "split" can say nothing, and B17-B34 hit both depending on
+        whether the tab has a POD column at all: with none, every student keys
+        on "" and with one full of blanks they all key on "Unassigned". Either
+        way it was ONE bucket covering everyone, restating the session's own
+        total - 464 of 491 stored splits, and a row per session downstream.
+
+        So: drop the nameless bucket, and drop a lone bucket that covers the
+        entire invited population. A named domain smaller than the session is
+        kept even when it is the only one left after the day's own-room PODs
+        are excluded - Finance at 6 of a 10-person session still says
+        something the session line does not.
+        """
+        out = {k: v for k, v in raw.items() if v["total"] and str(k).strip()}
+        if len(out) == 1 and next(iter(out.values()))["total"] >= invited:
+            return {}
+        return {k: dict(v, pct=round(v["present"] / v["total"] * 100, 1))
+                for k, v in sorted(out.items())}
+
     def _invited(rp, pod, excl):
         """Is a student with POD `rp` invited to this session?"""
         if excl:
@@ -395,8 +416,13 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             "excl": sorted(excl),
             # {domain: {present, total, pct}} for any multi-domain session -
             # All Domains or a complement room; {} for a single POD's own room.
-            "pod_split": {k: dict(v, pct=round(v["present"] / v["total"] * 100, 1))
-                          for k, v in sorted(split.items()) if v["total"]},
+            #
+            # A split needs at least TWO domains to say anything. B17-B34 have
+            # no POD column, so every student fell into one bucket keyed on ""
+            # and 464 of 491 "splits" were a single nameless entry restating
+            # the session's own total - noise in the store and a row per
+            # session in anything that renders it.
+            "pod_split": _real_split(split, denom),
             "mentor": mentor,
             # The session's own feedback poll, joined on Webinar ID like the topic.
             # For a shared webinar these are THIS batch's students' answers only

@@ -732,3 +732,26 @@ class TestDomainMatrixHtml(unittest.TestCase):
                         ["2026_08_15 | Techies"])
         b = data.build_batch(rows, "B35", {})
         self.assertEqual(dash_view.domain_matrix_html(b), "")
+
+
+class TestSplitDropsNonBreakdowns(unittest.TestCase):
+    """A single bucket covering everyone is not a breakdown - it restates the
+    session's own total. B17-B34 hit this two ways: with no POD column every
+    student keys on "", and with a column full of blanks they all key on
+    "Unassigned". 464 of 491 stored splits were one such bucket."""
+
+    def test_a_batch_with_no_real_pods_stores_no_split(self):
+        rows = _pod_tab([""] * 10, [["Present"] * 6 + ["Absent"] * 4],
+                        ["2026_08_15"])
+        b = data.build_batch(rows, "B20", {})
+        for s in b["sessions"]:
+            if s.get("mm"):
+                self.assertEqual(s["pod_split"], {}, s)
+
+    def test_two_real_domains_are_kept(self):
+        rows = _pod_tab(["Finance"] * 4 + ["Data"] * 6,
+                        [["Present"] * 3 + ["Absent"] + ["Present"] * 2 + ["Absent"] * 4],
+                        ["2026_08_15"])
+        b = data.build_batch(rows, "B35", {})
+        sx = next(s for s in b["sessions"] if s.get("mm"))
+        self.assertEqual(sorted(sx["pod_split"]), ["Data", "Finance"])
