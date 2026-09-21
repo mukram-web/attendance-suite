@@ -280,6 +280,12 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         p = _col_pod(_cell(date_row, c)) or _col_pod(_cell(header, c))
         cols_by_date[mm_]["pod" if p else "plain"].append((c, p))
 
+    # PODs that ran a room of their OWN on a date - whatever else happened that
+    # day. A whole-batch session's breakdown must skip them or they appear twice
+    # for one date: once in their own room, once inside the All Domains split.
+    pod_rooms: dict = {mm_: {p for _c, p in cc["pod"]}
+                       for mm_, cc in cols_by_date.items() if cc["pod"]}
+
     date_pods: dict = defaultdict(set)
     for mm_, cc in cols_by_date.items():
         if not cc["pod"] or not cc["plain"]:
@@ -324,19 +330,23 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         # Count over the SAME population the denominator uses. Counting every
         # marked row against a POD-sized denominator is how B37's 22 Aug came to
         # report 1,631 present out of 571 - 285%.
-        # A complement room mixes every domain that did not have its own room
-        # that day. The roster still knows which domain each of those people
-        # belongs to, so the breakdown is recoverable even though L2 called the
-        # whole thing one session - which is what lets the first two weekends
-        # report Finance or Data at all, instead of a single "Common" number.
+        # ANY session that invited more than one domain can be broken down by
+        # domain: an All Domains session (a batch's first two or three) just as
+        # much as a complement room. L2 calls each of them one session, but the
+        # roster records which domain every attendee belongs to, so Finance and
+        # Data are recoverable instead of being folded into a single number
+        # until the eleven-POD format starts in week three. A named POD's own
+        # room needs none - it is one domain by construction.
         split: dict = defaultdict(lambda: {"present": 0, "total": 0})
+        multi = bool(excl) or not pod
+        own_rooms = pod_rooms.get(mm, frozenset()) if not excl else frozenset()
 
         present = absent = 0
         for r in enrolled:
             rp_ = row_pod.get(id(r), "")
             if not _invited(rp_, pod, excl):
                 continue
-            if excl:
+            if multi and rp_ not in own_rooms:
                 v_ = str(_cell(r, c) or "").strip().lower()
                 split[rp_]["total"] += 1
                 if v_ == "present":
@@ -383,7 +393,8 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             # the three places that decide "was this student invited" all read
             # it through _invited so they cannot drift apart.
             "excl": sorted(excl),
-            # {domain: {present, total, pct}} for a complement room, {} otherwise.
+            # {domain: {present, total, pct}} for any multi-domain session -
+            # All Domains or a complement room; {} for a single POD's own room.
             "pod_split": {k: dict(v, pct=round(v["present"] / v["total"] * 100, 1))
                           for k, v in sorted(split.items()) if v["total"]},
             "mentor": mentor,

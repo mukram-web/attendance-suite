@@ -666,15 +666,36 @@ class TestDomainSplitInsideTheComplement(unittest.TestCase):
         self.assertEqual(len(v["sessions"]), 1)
         self.assertFalse(v["sessions"][0].get("within_common"))
 
-    def test_a_genuine_whole_batch_session_carries_no_split(self):
-        """Everyone was invited, so there is no complement to break down and no
-        domain may claim a slice of it."""
+    def test_an_all_domains_session_is_split_too(self):
+        """A batch's first two or three sessions are All Domains - one room,
+        everyone invited. They are exactly where a domain's attendance used to
+        be invisible, so they get the same breakdown."""
+        pod_rows = ["Finance"] * 4 + ["Data"] * 6
+        whole = ["Present"] * 3 + ["Absent"] + ["Present"] * 2 + ["Absent"] * 4
+        rows = _pod_tab(pod_rows, [whole], ["2026_08_15"])
+        b = data.build_batch(rows, "B35", {})
+        sx = next(s for s in b["sessions"] if s.get("mm"))
+        self.assertFalse(sx.get("pod"))                       # still All Domains
+        self.assertEqual(sx["pod_split"]["Finance"], {"present": 3, "total": 4, "pct": 75.0})
+        self.assertEqual(sx["pod_split"]["Data"], {"present": 2, "total": 6, "pct": 33.3})
+
+    def test_a_pod_with_its_own_room_is_left_out_of_the_all_domains_split(self):
+        """Otherwise Techies show up twice for one date - once in their own
+        room, once inside the All Domains breakdown."""
         pod_rows = ["Techies"] * 4 + ["Finance"] * 6
         whole = ["Present"] * 4 + ["Present"] * 3 + ["Absent"] * 3
         techies = ["Present"] * 4 + [""] * 6
         rows = _pod_tab(pod_rows, [whole, techies],
                         ["2026_08_15", "2026_08_15 | Techies"])
         b = data.build_batch(rows, "B35", {})
-        for s in b["sessions"]:
-            if s.get("mm") and not s.get("excl"):
-                self.assertEqual(s.get("pod_split"), {}, s)
+        whole_sx = next(s for s in b["sessions"] if s.get("mm") and not s.get("pod"))
+        self.assertIn("Finance", whole_sx["pod_split"])
+        self.assertNotIn("Techies", whole_sx["pod_split"])
+
+    def test_a_single_pods_own_room_needs_no_split(self):
+        pod_rows = ["Techies"] * 4 + ["Finance"] * 6
+        techies = ["Present"] * 3 + ["Absent"] + [""] * 6
+        rows = _pod_tab(pod_rows, [techies], ["2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        sx = next(s for s in b["sessions"] if s.get("mm"))
+        self.assertEqual(sx["pod_split"], {})
