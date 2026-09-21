@@ -626,3 +626,55 @@ class TestCommonIsSelectable(unittest.TestCase):
         self.assertFalse([s for s in b["sessions"] if s.get("pod") == _p.COMMON])
         v = dash_view.pod_view(b, _p.COMMON)
         self.assertEqual(v["sessions"], [])
+
+
+class TestDomainSplitInsideTheComplement(unittest.TestCase):
+    """From B35 a batch's first two weekends run only Techies + everybody else,
+    so Finance never gets a room of its own until week three and its view was
+    simply empty for those dates. The roster still knows who is Finance, so the
+    complement room's Finance share is recoverable."""
+
+    def _batch(self):
+        pod_rows = (["Techies"] * 4 + ["Finance"] * 3 + ["AI Generalist"] * 3)
+        # Techies sat out the main room; of the others, 2 Finance + 1 Generalist came
+        common = ["Absent"] * 4 + ["Present", "Present", "Absent"] + ["Present", "Absent", "Absent"]
+        techies = ["Present"] * 3 + ["Absent"] + [""] * 6
+        rows = _pod_tab(pod_rows, [common, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        return data.build_batch(rows, "B35", {})
+
+    def test_the_complement_session_carries_a_per_domain_split(self):
+        b = self._batch()
+        comp = next(s for s in b["sessions"] if s.get("pod") == "Common")
+        self.assertEqual(comp["pod_split"]["Finance"], {"present": 2, "total": 3, "pct": 66.7})
+        self.assertEqual(comp["pod_split"]["Generalist"]["total"], 3)
+        self.assertNotIn("Techies", comp["pod_split"])   # they were not invited
+
+    def test_the_domain_view_shows_its_share_of_that_session(self):
+        import dash_view
+        v = dash_view.pod_view(self._batch(), "Finance")
+        self.assertEqual(len(v["sessions"]), 1)
+        self.assertEqual(v["sessions"][0]["present"], 2)
+        self.assertEqual(v["sessions"][0]["total"], 3)      # Finance, not the room's 6
+        self.assertTrue(v["sessions"][0]["within_common"])
+
+    def test_a_domain_with_its_own_room_that_day_is_not_counted_twice(self):
+        """Techies met separately, so they are excluded from the complement and
+        must appear exactly once."""
+        import dash_view
+        v = dash_view.pod_view(self._batch(), "Techies")
+        self.assertEqual(len(v["sessions"]), 1)
+        self.assertFalse(v["sessions"][0].get("within_common"))
+
+    def test_a_genuine_whole_batch_session_carries_no_split(self):
+        """Everyone was invited, so there is no complement to break down and no
+        domain may claim a slice of it."""
+        pod_rows = ["Techies"] * 4 + ["Finance"] * 6
+        whole = ["Present"] * 4 + ["Present"] * 3 + ["Absent"] * 3
+        techies = ["Present"] * 4 + [""] * 6
+        rows = _pod_tab(pod_rows, [whole, techies],
+                        ["2026_08_15", "2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        for s in b["sessions"]:
+            if s.get("mm") and not s.get("excl"):
+                self.assertEqual(s.get("pod_split"), {}, s)

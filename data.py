@@ -324,10 +324,23 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         # Count over the SAME population the denominator uses. Counting every
         # marked row against a POD-sized denominator is how B37's 22 Aug came to
         # report 1,631 present out of 571 - 285%.
+        # A complement room mixes every domain that did not have its own room
+        # that day. The roster still knows which domain each of those people
+        # belongs to, so the breakdown is recoverable even though L2 called the
+        # whole thing one session - which is what lets the first two weekends
+        # report Finance or Data at all, instead of a single "Common" number.
+        split: dict = defaultdict(lambda: {"present": 0, "total": 0})
+
         present = absent = 0
         for r in enrolled:
-            if not _invited(row_pod.get(id(r), ""), pod, excl):
+            rp_ = row_pod.get(id(r), "")
+            if not _invited(rp_, pod, excl):
                 continue
+            if excl:
+                v_ = str(_cell(r, c) or "").strip().lower()
+                split[rp_]["total"] += 1
+                if v_ == "present":
+                    split[rp_]["present"] += 1
             v = str(_cell(r, c) or "").strip().lower()
             if v == "present":
                 present += 1
@@ -370,6 +383,9 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             # the three places that decide "was this student invited" all read
             # it through _invited so they cannot drift apart.
             "excl": sorted(excl),
+            # {domain: {present, total, pct}} for a complement room, {} otherwise.
+            "pod_split": {k: dict(v, pct=round(v["present"] / v["total"] * 100, 1))
+                          for k, v in sorted(split.items()) if v["total"]},
             "mentor": mentor,
             # The session's own feedback poll, joined on Webinar ID like the topic.
             # For a shared webinar these are THIS batch's students' answers only

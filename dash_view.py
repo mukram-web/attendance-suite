@@ -219,7 +219,21 @@ def pod_view(d: dict, pod: str | None) -> dict:
                     avg_pct=round(sum(pcts) / len(pcts), 1),
                     peak=max(pcts), low=min(pcts))
 
+    # A domain's own rooms, PLUS its slice of any complement room it sat in.
+    # On the first two weekends a batch runs only Techies + everybody else, so
+    # Finance never gets a room of its own and this view used to be empty for
+    # those dates - the batch looked like it had no Finance sessions until week
+    # three. The roster knows who is Finance, so the complement room's Finance
+    # share is recoverable: `pod_split`, computed where the marks are read.
     sess = [s for s in d["sessions"] if s.get("pod") == pod]
+    for s in d["sessions"]:
+        part = (s.get("pod_split") or {}).get(pod)
+        if part and s.get("pod") != pod:
+            sess.append(dict(s, pod=pod, present=part["present"],
+                             total=part["total"], pct=part["pct"],
+                             absent=part["total"] - part["present"],
+                             within_common=True))
+    sess.sort(key=lambda x: (x.get("mm") or "", x.get("col") or 0))
     if not sess:
         return dict(d, sessions=[], n_sessions=0, avg_pct=0.0, peak=0.0, low=0.0)
     pcts = [s["pct"] for s in sess]
