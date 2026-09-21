@@ -472,8 +472,9 @@ def lookup_by_session_rows(rows, l2_bytes) -> tuple[dict, dict]:
     the same answer, as long as it keeps them in listing order.
 
     Keyed exactly like the topic lookup, so a dashboard session finds its own
-    poll. The by-webinar-id map is returned alongside it, for the callers that
-    work from a webinar id (the pipeline's own rating log, sessionmeta).
+    poll. The by-webinar-id map is returned alongside it so the caller can
+    recover WHICH parsed copy won a duplicate tie-break by identity - see
+    pipeline's shared-poll split. (sessionmeta builds its own, separately.)
     The join is Webinar ID - the same key the marker and the topic lookup use -
     so a rating can never drift onto the wrong session.
 
