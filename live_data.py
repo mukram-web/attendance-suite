@@ -478,40 +478,60 @@ def _existing_sessions(roster_bytes: bytes) -> dict:
 _ATTENDEE_NAME = re.compile(r"attendee_(\d+)_((?:20\d\d)_\d{2}_\d{2})", re.I)
 
 
-def dedupe_by_webinar(entries, sizes):
-    """One webinar, several folders -> keep the BIGGEST copy of each.
+def dedupe_by_webinar(files):
+    """One webinar, several folders -> keep the copy with the MOST attendees.
 
     The two Shared Drives name the same session differently - webinar
     91641846331 on 23 Aug sits in '...B35 - Educators - Blueprint to Launch...'
     on one and '...B35 - Blueprint to Launch: Designing Courses with AI' on the
-    other - so the same attendee export arrives twice, and the copies are not
-    identical: 18,371 bytes against 17,580. The marker processes both and the
-    LAST one wins, so which copy became the published column depended on
-    listing order. That is how B35's 23 Aug Educators column read 62 present in
-    one run and 59 in the next, and GATE 6 - rightly - refused to publish the
-    drop, which wedges every later run until the count comes back.
+    other - so the same export arrives twice and the copies are not identical.
+    `attendance_core.process_files` marks both and the LAST one wins, so which
+    copy became the published column depended on Drive's listing order: B35's
+    23 Aug Educators read 62 present in one run and 59 in the next, and GATE 6
+    refused the drop - correctly, but the gate compares against the PUBLISHED
+    store, so an unstable column wedges every later run.
 
-    Biggest wins, which is the rule `sessionmeta.by_webinar` and
-    `bsiai.sessions_from_files` already apply to the same duplication. Ties keep
-    the incumbent, so a genuine tie resolves the same way every week.
+    The tie-break is the PARSED ATTENDEE COUNT, which is what
+    `bsiai.sessions_from_files` already uses for this same duplication. Byte
+    size was tried and is a bad proxy: B26's 22 Aug had a bigger file with 22
+    FEWER people present, so ranking on size moved three sessions the wrong way
+    while fixing one.
 
-    A file whose name carries no webinar id, and any .zip, is passed through
-    untouched: there is no id to group on, and a zip's size says nothing about
-    how many attendees are inside it.
+    Ties keep the incumbent, so a genuine tie resolves identically week to
+    week. A name carrying no webinar id is passed through - there is nothing to
+    group it with.
     """
-    best, out, order = {}, [], []
-    for e in entries:
-        path, fid, is_zip = e[0], e[1], e[2]
+    import attendance_core as ac
+
+    def n_people(data):
+        try:
+            txt = None
+            for enc in ("utf-8-sig", "utf-16", "cp1252"):
+                try:
+                    txt = data.decode(enc)
+                    break
+                except Exception:
+                    continue
+            if txt is None:
+                return -1
+            emails, _pf, ph = ac.parse_attendees(txt)
+            return len(emails) + len(ph)
+        except Exception:
+            return -1          # unparseable: never beats a readable copy
+
+    best, out, order, counts = {}, [], [], {}
+    for path, data in files:
         m = _ATTENDEE_NAME.match(path.rsplit("/", 1)[-1])
-        if is_zip or not m:
-            out.append(e)
+        if not m:
+            out.append((path, data))
             continue
         key = (m.group(1), m.group(2))
+        n = n_people(data)
         if key not in best:
-            best[key] = e
+            best[key], counts[key] = (path, data), n
             order.append(key)
-        elif int(sizes.get(fid) or 0) > int(sizes.get(best[key][1]) or 0):
-            best[key] = e
+        elif n > counts[key]:
+            best[key], counts[key] = (path, data), n
     return out + [best[k] for k in order]
 
 
@@ -572,7 +592,6 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     #    call per folder, and at 200+ unmarked folders doing them sequentially
     #    dominates cold-start time
     entries = []  # (path, file_id, is_zip)
-    sizes: dict = {}          # file_id -> bytes, for the duplicate tie-break
     listing_errors = []
     if to_fetch:
         def _kids(item):
@@ -592,10 +611,6 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                     if f["mimeType"] != _FOLDER_MIME and keep(f["name"]):
                         entries.append((f"{name}/{f['name']}", f["id"],
                                         f["name"].lower().endswith(".zip")))
-                        sizes[f["id"]] = f.get("size")
-    n_raw = len(entries)
-    entries = dedupe_by_webinar(entries, sizes)
-    dropped_dupes = n_raw - len(entries)
 
     # 3) download (parallel, but resilient — one slow/failed file can't hang or
     #    sink the whole batch; the 60s socket timeout caps any single request).
@@ -657,6 +672,13 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                     out.extend(expanded)
                 else:
                     out.append((path, data))
+
+    # Both copies of a duplicated webinar have been downloaded by now; keep the
+    # fuller one. Done HERE rather than at the listing, because the only honest
+    # tie-break is how many people each copy actually names.
+    _n_raw = len(out)
+    out = dedupe_by_webinar(out)
+    dropped_dupes = _n_raw - len(out)
 
     info = dict(new_folders=len(to_fetch), files=len(out), failed=failed,
                 skipped_already_marked=skipped_done, skipped_no_sheet=skipped_nosheet,
