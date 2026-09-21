@@ -475,6 +475,46 @@ def _existing_sessions(roster_bytes: bytes) -> dict:
     return out
 
 
+_ATTENDEE_NAME = re.compile(r"attendee_(\d+)_((?:20\d\d)_\d{2}_\d{2})", re.I)
+
+
+def dedupe_by_webinar(entries, sizes):
+    """One webinar, several folders -> keep the BIGGEST copy of each.
+
+    The two Shared Drives name the same session differently - webinar
+    91641846331 on 23 Aug sits in '...B35 - Educators - Blueprint to Launch...'
+    on one and '...B35 - Blueprint to Launch: Designing Courses with AI' on the
+    other - so the same attendee export arrives twice, and the copies are not
+    identical: 18,371 bytes against 17,580. The marker processes both and the
+    LAST one wins, so which copy became the published column depended on
+    listing order. That is how B35's 23 Aug Educators column read 62 present in
+    one run and 59 in the next, and GATE 6 - rightly - refused to publish the
+    drop, which wedges every later run until the count comes back.
+
+    Biggest wins, which is the rule `sessionmeta.by_webinar` and
+    `bsiai.sessions_from_files` already apply to the same duplication. Ties keep
+    the incumbent, so a genuine tie resolves the same way every week.
+
+    A file whose name carries no webinar id, and any .zip, is passed through
+    untouched: there is no id to group on, and a zip's size says nothing about
+    how many attendees are inside it.
+    """
+    best, out, order = {}, [], []
+    for e in entries:
+        path, fid, is_zip = e[0], e[1], e[2]
+        m = _ATTENDEE_NAME.match(path.rsplit("/", 1)[-1])
+        if is_zip or not m:
+            out.append(e)
+            continue
+        key = (m.group(1), m.group(2))
+        if key not in best:
+            best[key] = e
+            order.append(key)
+        elif int(sizes.get(fid) or 0) > int(sizes.get(best[key][1]) or 0):
+            best[key] = e
+    return out + [best[k] for k in order]
+
+
 def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                         mark_all: bool = False, max_workers: int = 8):
     """Download attendee files only for sessions NOT already marked in the roster.
@@ -532,6 +572,7 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     #    call per folder, and at 200+ unmarked folders doing them sequentially
     #    dominates cold-start time
     entries = []  # (path, file_id, is_zip)
+    sizes: dict = {}          # file_id -> bytes, for the duplicate tie-break
     listing_errors = []
     if to_fetch:
         def _kids(item):
@@ -551,6 +592,10 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                     if f["mimeType"] != _FOLDER_MIME and keep(f["name"]):
                         entries.append((f"{name}/{f['name']}", f["id"],
                                         f["name"].lower().endswith(".zip")))
+                        sizes[f["id"]] = f.get("size")
+    n_raw = len(entries)
+    entries = dedupe_by_webinar(entries, sizes)
+    dropped_dupes = n_raw - len(entries)
 
     # 3) download (parallel, but resilient — one slow/failed file can't hang or
     #    sink the whole batch; the 60s socket timeout caps any single request).
@@ -616,7 +661,7 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     info = dict(new_folders=len(to_fetch), files=len(out), failed=failed,
                 skipped_already_marked=skipped_done, skipped_no_sheet=skipped_nosheet,
                 listing_errors=listing_errors, bad_zips=bad_zips,
-                download_errors=download_errors)
+                download_errors=download_errors, duplicate_copies=dropped_dupes)
     return out, info
 
 

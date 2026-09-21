@@ -110,6 +110,22 @@ def pct_cell(ws, r, c, present, total):
         cell.fill = f
 
 
+def _as_date(v):
+    """ISO string -> date, so Sheets sorts and filters it as a date."""
+    try:
+        return datetime.date.fromisoformat(str(v))
+    except Exception:
+        return None
+
+
+def _frac(ws, r, c, pct100):
+    """A 0-100 percentage from the store, written as a real fraction."""
+    if pct100 is None:
+        return
+    cell = ws.cell(row=r, column=c, value=pct100 / 100)
+    cell.number_format = PCT
+
+
 def room_of(s):
     """What this row actually is, in words rather than a blank."""
     if s.get("is_intro"):
@@ -167,66 +183,98 @@ def tab_summary(wb, DATA, summary, generated):
     return r
 
 
-def tab_sessions(wb, DATA):
+def tab_sessions(wb, SESS):
+    """One row per room that ran, from meta['sessions'] - the flat 629-row table
+    the store already publishes, which carries the resolved date, trainer,
+    forecast index and the Zoom room facts. DATA[b]["sessions"] is the same
+    data plus 15 intro-call rows that are not sessions (no mm, and a total that
+    is the whole cohort), so this uses the flat one.
+
+    Columns 18-20 are prefixed "Room" on purpose. They are Zoom-room figures
+    and can exceed the population invited: B41's 19 Sep Techies room reports
+    869 unique viewers against 483 invited, because the room covered more than
+    that POD. Sitting unlabelled next to Present, they invite a wrong reading.
+    """
     ws = wb.create_sheet("Sessions")
-    head(ws, ["Batch", "Date", "Room", "Topic", "Trainer",
-              "Present", "Absent", "Invited", "Attendance", "Rating", "NPS"])
+    head(ws, ["Cohort", "Date", "Week", "Weekend of", "Room", "Topic",
+              "Trainer", "Invited", "Present", "Absent", "Attendance",
+              "Expected", "Index vs curve", "Rating", "Responses", "NPS",
+              "Room hours", "Room peak", "Room unique viewers",
+              "Stayed 10 min", "Stayed 30 min", "Shared with"])
     r = 2
-    for code in sorted(DATA, key=bnum):
-        for s in DATA[code]["sessions"]:
-            if not s.get("mm"):
-                continue                      # intro rows measure something else
-            ws.cell(row=r, column=1, value=code)
-            ws.cell(row=r, column=2, value=s["date_lbl"])
-            ws.cell(row=r, column=3, value=room_of(s))
-            ws.cell(row=r, column=4, value=s.get("topic") or "")
-            ws.cell(row=r, column=5, value=s.get("mentor") or s.get("trainer") or "")
-            ws.cell(row=r, column=6, value=s["present"]).number_format = "#,##0"
-            ws.cell(row=r, column=7, value=s.get("absent")).number_format = "#,##0"
-            ws.cell(row=r, column=8, value=s["total"]).number_format = "#,##0"
-            pct_cell(ws, r, 9, s["present"], s["total"])
-            if s.get("rating") is not None:
-                ws.cell(row=r, column=10, value=s["rating"]).number_format = "0.00"
-            if s.get("rating_nps") is not None:
-                ws.cell(row=r, column=11, value=s["rating_nps"])
-            r += 1
-    widths(ws, {"A": 8, "B": 10, "C": 20, "D": 46, "E": 20, "F": 10, "G": 10,
-                "H": 10, "I": 12, "J": 8, "K": 7})
-    ws.auto_filter.ref = f"A1:K{max(1, r - 1)}"
+    for x in sorted(SESS, key=lambda v: (bnum(v.get("batch")), v.get("date") or "",
+                                         v.get("pod") or "")):
+        ws.cell(row=r, column=1, value=x.get("batch"))
+        d = x.get("date")
+        c = ws.cell(row=r, column=2, value=_as_date(d) or x.get("date_lbl"))
+        if isinstance(c.value, datetime.date):
+            c.number_format = "ddd d mmm"
+        ws.cell(row=r, column=3, value=x.get("wk"))
+        ws.cell(row=r, column=4, value=x.get("week"))
+        ws.cell(row=r, column=5, value=room_of(x))
+        ws.cell(row=r, column=6, value=x.get("topic") or "")
+        ws.cell(row=r, column=7, value=x.get("trainer") or x.get("mentor") or "")
+        ws.cell(row=r, column=8, value=x.get("total")).number_format = "#,##0"
+        ws.cell(row=r, column=9, value=x.get("present")).number_format = "#,##0"
+        ws.cell(row=r, column=10, value=x.get("absent")).number_format = "#,##0"
+        pct_cell(ws, r, 11, x.get("present"), x.get("total"))
+        _frac(ws, r, 12, x.get("expected_pct"))
+        if x.get("index") is not None:
+            ws.cell(row=r, column=13, value=x["index"]).number_format = "0.00"
+        if x.get("rating") is not None:
+            ws.cell(row=r, column=14, value=x["rating"]).number_format = "0.00"
+        ws.cell(row=r, column=15, value=x.get("rating_n") or None).number_format = "#,##0"
+        if x.get("rating_nps") is not None:
+            ws.cell(row=r, column=16, value=x["rating_nps"]).number_format = "+0;-0;0"
+        if x.get("duration_hrs") is not None:
+            ws.cell(row=r, column=17, value=x["duration_hrs"]).number_format = "0.0"
+        ws.cell(row=r, column=18, value=x.get("peak")).number_format = "#,##0"
+        ws.cell(row=r, column=19, value=x.get("unique_viewers")).number_format = "#,##0"
+        _frac(ws, r, 20, x.get("stick10"))
+        _frac(ws, r, 21, x.get("stick30"))
+        ws.cell(row=r, column=22, value=", ".join(x.get("shared_batches") or ()))
+        r += 1
+    widths(ws, {"A": 8, "B": 12, "C": 6, "D": 12, "E": 18, "F": 44, "G": 20,
+                "H": 9, "I": 9, "J": 9, "K": 11, "L": 10, "M": 13, "N": 8,
+                "O": 10, "P": 7, "Q": 11, "R": 10, "S": 18, "T": 12, "U": 12,
+                "V": 16})
+    ws.auto_filter.ref = f"A1:V{max(1, r - 1)}"
+    ws.freeze_panes = "F2"
     return r
 
 
-def tab_by_domain(wb, DATA):
-    """One row per session x domain, from the split computed in data.py.
+def tab_by_domain(wb, SESS):
+    """One row per session x domain. L2 records an All Domains day or a shared
+    room as ONE session, so eleven very different turnouts arrived as a single
+    number - B39's 5 Sep averaged 61.2% while Content Creators came in at 69.7%
+    and Students at 50.8%.
 
-    This is the tab that did not exist before: L2 records an All Domains day or
-    a shared room as ONE session, so eleven very different turnouts arrived as
-    a single number - B39's 5 Sep averaged 61.2% while Content Creators came in
-    at 69.7% and Students at 50.8%.
+    Long format rather than a domain x date matrix: a matrix suits a web page
+    of fixed width, while a spreadsheet has pivot tables and wants rows.
     """
     ws = wb.create_sheet("By domain")
-    head(ws, ["Batch", "Date", "Room", "Topic", "Domain",
+    head(ws, ["Cohort", "Date", "Weekend of", "Room", "Topic", "Domain",
               "Present", "Invited", "Attendance"])
     r = 2
-    for code in sorted(DATA, key=bnum):
-        for s in DATA[code]["sessions"]:
-            split = s.get("pod_split") or {}
-            if not split:
-                continue
-            for dom in sorted(split):
-                part = split[dom]
-                ws.cell(row=r, column=1, value=code)
-                ws.cell(row=r, column=2, value=s["date_lbl"])
-                ws.cell(row=r, column=3, value=room_of(s))
-                ws.cell(row=r, column=4, value=s.get("topic") or "")
-                ws.cell(row=r, column=5, value=dom)
-                ws.cell(row=r, column=6, value=part["present"]).number_format = "#,##0"
-                ws.cell(row=r, column=7, value=part["total"]).number_format = "#,##0"
-                pct_cell(ws, r, 8, part["present"], part["total"])
-                r += 1
-    widths(ws, {"A": 8, "B": 10, "C": 20, "D": 46, "E": 22, "F": 10, "G": 10,
-                "H": 12})
-    ws.auto_filter.ref = f"A1:H{max(1, r - 1)}"
+    for x in sorted(SESS, key=lambda v: (bnum(v.get("batch")), v.get("date") or "")):
+        split = x.get("pod_split") or {}
+        for dom in sorted(split):
+            part = split[dom]
+            ws.cell(row=r, column=1, value=x.get("batch"))
+            c = ws.cell(row=r, column=2, value=_as_date(x.get("date")) or x.get("date_lbl"))
+            if isinstance(c.value, datetime.date):
+                c.number_format = "ddd d mmm"
+            ws.cell(row=r, column=3, value=x.get("week"))
+            ws.cell(row=r, column=4, value=room_of(x))
+            ws.cell(row=r, column=5, value=x.get("topic") or "")
+            ws.cell(row=r, column=6, value=dom)
+            ws.cell(row=r, column=7, value=part["present"]).number_format = "#,##0"
+            ws.cell(row=r, column=8, value=part["total"]).number_format = "#,##0"
+            pct_cell(ws, r, 9, part["present"], part["total"])
+            r += 1
+    widths(ws, {"A": 8, "B": 12, "C": 12, "D": 18, "E": 44, "F": 22, "G": 10,
+                "H": 10, "I": 12})
+    ws.auto_filter.ref = f"A1:I{max(1, r - 1)}"
     return r
 
 
@@ -264,6 +312,60 @@ def tab_weekend_reach(wb, DATA):
     return r
 
 
+def tab_readme(wb, meta, counts):
+    """Definitions, because half the confusion is vocabulary not numbers."""
+    ws = wb.create_sheet("Read me", 0)
+    ws.cell(row=1, column=1, value="How to read this file").font = TITLE
+    lines = [
+        "",
+        f"Generated from the published store of {meta['generated_at']}.",
+        f"Source: {meta.get('source', '')}",
+        "",
+        "REGENERATED WHOLESALE. Every tab here is rebuilt each run, so anything "
+        "you add by hand will be destroyed. Keep working notes elsewhere.",
+        "",
+        "DEFINITIONS",
+        "Invited is not the same as Enrolled. A domain POD's room invites only "
+        "that POD; a shared room invites everyone the day's POD rooms did not. "
+        "B40 is 3,708 enrolled, but its Common room invites 3,708 - 561 "
+        "Techies = 3,147, and that is what its percentage divides by.",
+        "All Domains means one room the whole cohort was invited to.",
+        "Common means the room for everyone outside the PODs that met that day. "
+        "It has no name in the roster or in L2 - it is a property of the "
+        "session, so the same person is Common one weekend and Generalist once "
+        "the cohort moves to eleven domain PODs.",
+        "A blank attendance cell means there was no session of that kind, not "
+        "missing data.",
+        "",
+        "Room hours, Room peak and Room unique viewers are ZOOM-ROOM facts and "
+        "can exceed the people invited. B41's 19 Sep Techies room reports 869 "
+        "unique viewers against 483 invited, because the room covered more "
+        "than that POD. Do not read them as attendance.",
+        "",
+        "Index vs curve compares a session to the forecast's expected decay: "
+        "1.00 is on the curve, above is better than expected.",
+        "",
+        "Sessions L2 has no row for are excluded, so a session that ran but was "
+        "never scheduled will not appear here.",
+        "",
+        "WHAT IS NOT HERE",
+        "Per-student Present/Absent. That is the roster workbook's job, and it "
+        "is what makes the roster 64,069 rows by 673 columns and unreadable. "
+        "Ask if you want a per-student tab for the newest cohorts.",
+        "",
+        f"This build: {counts['batches']} cohorts, {counts['sessions']} "
+        f"sessions, {counts['domain_rows']} domain rows, "
+        f"{counts['day_rows']} day rows.",
+    ]
+    for i, text in enumerate(lines, start=2):
+        c = ws.cell(row=i, column=1, value=text)
+        c.alignment = Alignment(wrap_text=True, vertical="top")
+        if text.isupper() or text in ("How to read this file",):
+            c.font = BOLD
+    ws.column_dimensions["A"].width = 110
+    return ws
+
+
 def build(store_path):
     con = duckdb.connect(store_path, read_only=True)
     try:
@@ -271,17 +373,19 @@ def build(store_path):
                 con.execute("SELECT key, value FROM meta").fetchall()}
     finally:
         con.close()
-    DATA, summary = meta["DATA"], meta["summary"]
+    DATA, summary, SESS = meta["DATA"], meta["summary"], meta["sessions"]
     wb = openpyxl.Workbook()
     n_sum = tab_summary(wb, DATA, summary, meta["generated_at"])
-    n_ses = tab_sessions(wb, DATA)
-    n_dom = tab_by_domain(wb, DATA)
+    n_ses = tab_sessions(wb, SESS)
+    n_dom = tab_by_domain(wb, SESS)
     n_wk = tab_weekend_reach(wb, DATA)
+    counts = {"batches": n_sum - 5, "sessions": n_ses - 2,
+              "domain_rows": n_dom - 2, "day_rows": n_wk - 4,
+              "generated_at": meta["generated_at"]}
+    tab_readme(wb, meta, counts)
     buf = io.BytesIO()
     wb.save(buf)
-    return buf.getvalue(), {"batches": n_sum - 5, "sessions": n_ses - 2,
-                            "domain_rows": n_dom - 2, "day_rows": n_wk - 4,
-                            "generated_at": meta["generated_at"]}
+    return buf.getvalue(), counts
 
 
 def main():
