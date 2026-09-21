@@ -699,3 +699,36 @@ class TestDomainSplitInsideTheComplement(unittest.TestCase):
         b = data.build_batch(rows, "B35", {})
         sx = next(s for s in b["sessions"] if s.get("mm"))
         self.assertEqual(sx["pod_split"], {})
+
+
+class TestDomainMatrixHtml(unittest.TestCase):
+    """The split is only useful if it is on screen. `domain_matrix_html` is pure
+    so the static site can reuse it, and it must stay silent for the batches
+    that have no domains at all rather than rendering an empty table."""
+
+    def test_it_lays_out_domain_by_date(self):
+        import dash_view
+        pod_rows = ["Finance"] * 4 + ["Data"] * 6
+        whole = ["Present"] * 3 + ["Absent"] + ["Present"] * 2 + ["Absent"] * 4
+        rows = _pod_tab(pod_rows, [whole], ["2026_08_15"])
+        b = data.build_batch(rows, "B35", {})
+        html = dash_view.domain_matrix_html(b)
+        self.assertIn("Finance", html)
+        self.assertIn("Data", html)
+        self.assertIn("3/4", html)        # Finance present/total
+        self.assertIn("2/6", html)        # Data present/total
+
+    def test_a_batch_with_no_domains_renders_nothing(self):
+        import dash_view
+        rows = _pod_tab([""] * 10, [["Present"] * 6 + ["Absent"] * 4],
+                        ["2026_08_15"])
+        b = data.build_batch(rows, "B20", {})
+        self.assertEqual(dash_view.domain_matrix_html(b), "")
+
+    def test_a_single_pods_own_room_renders_nothing(self):
+        import dash_view
+        pod_rows = ["Techies"] * 4 + ["Finance"] * 6
+        rows = _pod_tab(pod_rows, [["Present"] * 3 + ["Absent"] + [""] * 6],
+                        ["2026_08_15 | Techies"])
+        b = data.build_batch(rows, "B35", {})
+        self.assertEqual(dash_view.domain_matrix_html(b), "")

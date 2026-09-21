@@ -315,6 +315,45 @@ def _rating(s: dict) -> str:
             f'<span style="color:#9aa3b2;font-size:11px"> /5 ({n})</span>')
 
 
+def domain_matrix_html(d: dict) -> str:
+    """Per-domain attendance inside the sessions that mixed several domains.
+
+    A batch's first two or three sessions are All Domains, and its early
+    weekends put everyone except Techies in one room. L2 calls each of those a
+    single session, so the table above shows one number for eleven very
+    different turnouts - B39's 5 Sep averaged 61.2% while Content Creators came
+    in at 69.7% and Students at 50.8%. The roster knows who belongs to which
+    domain, so the split is recoverable; `data.build_batch` computes it and this
+    lays it out as domain x date.
+
+    Returns "" when nothing in view carries a split - a single POD's own room
+    has one domain by construction, and B17-B34 have no domains at all.
+    """
+    cols = [s for s in d["sessions"] if s.get("pod_split")]
+    if not cols:
+        return ""
+    names = sorted({p for s in cols for p in s["pod_split"]})
+    if len(names) < 2:
+        # One bucket is not a breakdown. B17-B34 have no POD column at all, so
+        # every student falls into the same "Unassigned" bin and the table would
+        # restate the session's own percentage under a heading promising more.
+        return ""
+    head = "".join(f'<th class="num">{s["date_lbl"]}'
+                   f'{"" if s.get("pod") else ""}</th>' for s in cols)
+    trs = []
+    for p in names:
+        tds = []
+        for s in cols:
+            part = s["pod_split"].get(p)
+            tds.append(f'<td class="num">{_pill(part["pct"])}'
+                       f'<div style="font-size:10px;color:#6b7785">'
+                       f'{part["present"]:,}/{part["total"]:,}</div></td>'
+                       if part else '<td class="num">—</td>')
+        trs.append(f'<tr><td>{p}</td>{"".join(tds)}</tr>')
+    return ('<table class="sess"><thead><tr><th>Domain</th>' + head +
+            "</tr></thead><tbody>" + "".join(trs) + "</tbody></table>")
+
+
 def sessions_table_html(d: dict) -> str:
     """The all-sessions table — shared verbatim by the app and the site."""
     trs = []
@@ -487,5 +526,14 @@ def render(DATA: dict, summary: dict, source_note: str = "", *,
     st.markdown(f'<div class="panel-title">All sessions{sessions_subtitle(d)}</div>',
                 unsafe_allow_html=True)
     st.markdown(sessions_table_html(d), unsafe_allow_html=True)
+
+    # ── who actually came, inside the sessions that mixed domains ──
+    matrix = domain_matrix_html(d)
+    if matrix:
+        st.markdown('<div class="panel-title">By domain '
+                    '<span class="dh-sub">· inside the All Domains and shared '
+                    'rooms above, which L2 records as one session each</span>'
+                    '</div>', unsafe_allow_html=True)
+        st.markdown(matrix, unsafe_allow_html=True)
 
     st.markdown("</div>", unsafe_allow_html=True)
