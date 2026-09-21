@@ -114,16 +114,23 @@ it, but to keep it OUT of AI CAP's numbers. Do not "simplify" any of this away:
    `bsi b2`, `BSIAI B1`; L2 reads `BSIAI B1`. Without the BSIAI branch every one
    of them parses to `('CAP', 1)` — the same key as AI CAP B1. Verified: adding
    the track moved exactly 25 of 1,188 L2 webinars, all to BSIAI, none away.
-   `tests/test_extract_batches.py` and `test_lms_roster.test_bsiai_tabs_are_not_cap`
-   are the guarantees. A roster tab whose track is unrecognised defaults to CAP,
-   so dropping the branch would invent phantom AI CAP batches.
+   `tests/test_extract_batches.py` is the guarantee, and it covers BOTH paths:
+   `TestProgrammes` pins the L2/folder label, and `TestTrackNamed` pins
+   `_track_named` itself, which is what `lms_roster` reads a roster TAB with.
+   Delete the branch and three of those fail. (`test_lms_roster.
+   test_bsiai_tabs_are_not_cap` does NOT guard it - measured 2026-09-22, it
+   passes with the branch removed.) A tab whose track is unrecognised defaults
+   to CAP, so dropping the branch would invent phantom AI CAP batches.
 2. **One label can name two programmes.** `AI CAP B40 - Common + BSIAI
    Accelerator B1` is an AI CAP session sharing a room with a BSIAI batch.
    `extract_batches` reads each item separately and returns BOTH `('CAP', 40)`
    and `('BSIAI', 1)`; folding them together put the whole segment under BSIAI,
    invented a `BSIAI B40` that does not exist and lost AI CAP B40.
    `polls.batch_label` is what names the other room `BSIAI B1` on the shared
-   -session view, and `pods` treats the unlabelled remainder as the complement.
+   -session view. (The COMPLEMENT rule - an unlabelled room being the batch
+   minus that day's PODs rather than the whole batch - is a different thing
+   entirely, lives in `data.build_batch`, and is about POD rooms inside ONE
+   AI CAP batch, not about sharing with another programme.)
 3. **Folder names are lowercase on one drive.** The word-boundary batch-number
    pattern was case-sensitive in both `extract_batches` and `_folder_batches`;
    both now pass `re.I`. Verified across all 1,048 top-level folders: exactly 7

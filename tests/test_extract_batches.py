@@ -71,6 +71,34 @@ class TestProgrammes(unittest.TestCase):
         self.assertEqual(ac.extract_batches("B35 , B36"), {("CAP", 35), ("CAP", 36)})
 
 
+class TestTrackNamed(unittest.TestCase):
+    """`_track_named` reads a bare NAME - a roster tab or a Drive folder - with
+    no batch number to lean on. `lms_roster` uses it to decide whether a tab in
+    the roster workbook belongs to AI CAP at all, so the BSIAI branch here is
+    what keeps a `BSIAI B1` tab from being carried as AI CAP B1. Nothing else
+    pinned it: test_lms_roster.test_bsiai_tabs_are_not_cap passes with the
+    branch deleted (measured 2026-09-22)."""
+
+    def test_bsiai_spellings_name_bsiai_not_cap(self):
+        for name in ("BSIAI B1", "BSI B2", "bsi b2", "BSI AI B3",
+                     "BSIAI Accelerator B1"):
+            self.assertEqual(ac._track_named(name), "BSIAI", name)
+
+    def test_a_cap_tab_is_still_cap(self):
+        for name in ("AI CAP B41", "AICAP B17", "ai cap b35"):
+            self.assertEqual(ac._track_named(name), "CAP", name)
+
+    def test_bsi_must_not_match_inside_a_longer_word(self):
+        # The guard is `(?<![a-z])bsi`: a word CONTAINING 'bsi' is not BSIAI.
+        self.assertNotEqual(ac._track_named("absinthe CAP B1"), "BSIAI")
+
+    def test_an_unnamed_track_is_None_not_CAP(self):
+        # _track() defaults to CAP; _track_named must NOT, or a stray tab like
+        # `Sheet1` would silently become a batch.
+        for name in ("Sheet1", "MM-AI B1", "NEXT BATCH 15K"):
+            self.assertIsNone(ac._track_named(name), name)
+
+
 class TestUnchanged(unittest.TestCase):
     """Shapes that already worked and must keep working."""
 
