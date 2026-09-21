@@ -697,6 +697,17 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     return out, info
 
 
+# Fields every whole-drive listing asks for. md5Checksum and modifiedTime are
+# what let a cross-run cache tell a REPLACED file from an unchanged one — Drive's
+# "Manage versions → Upload new version" keeps the id, and that is the documented
+# remedy for a bad Zoom export. They are free: the listing already runs, and
+# these are two more fields on a response we already page through.
+_LIST_FIELDS = "nextPageToken, files(id, name, md5Checksum, modifiedTime)"
+
+_ATTENDEE_Q = "name contains 'attendee_' and trashed = false"
+# both conventions — see polls.name_key
+_POLL_Q = ("(name contains 'poll_' or name contains 'Poll Report') "
+           "and trashed = false")
 
 
 def _list_by_query(svc, folder_id, q) -> list[dict]:

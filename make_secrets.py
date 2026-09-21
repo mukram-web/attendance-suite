@@ -14,7 +14,10 @@ import os
 import sys
 
 # ── Drive items (pre-filled) ─────────────────────────────────────────────────
-ROSTER_ID = "1CzASgM5yrbASE5vIxSrKBB-yQSRtQxh_iCVS9GTpfgg"
+# The roster Sheet. Since 2026-09-22 this is "LMS Attendance Roaster ",
+# built from the 10xstats API - NOT the old hand-maintained Master Batch
+# Rosters, which is no longer read by anything.
+ROSTER_ID = "1_zkHVSKy_F-I6dNlswUbYgSwVXQXM5Tr9UMs93X_wG4"
 L2_ID = "1nlQPkg1l_cNHMtN2HKvqinmU_n0bLsC9RkkMfeqvPlM"
 ATTENDEE_FOLDER_ID = "0ADZkkxHLwZa9Uk9PVA"   # Shared Drive / folder of Zoom exports
 ATTENDEE_ZIP_ID = ""                          # leave "" when using a folder
