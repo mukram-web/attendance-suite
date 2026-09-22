@@ -314,6 +314,12 @@ def _rating(s: dict) -> str:
             f'<span style="color:#9aa3b2;font-size:11px"> /5 ({n})</span>')
 
 
+# Below this many answers a domain's rating is not shown. A 5-response 5.00
+# moves a full point on one more answer; the count is shown instead, so the
+# thin sample is visible rather than quietly missing.
+_MIN_RATING_N = 10
+
+
 def domain_matrix_html(d: dict) -> str:
     """Per-domain attendance inside the sessions that mixed several domains.
 
@@ -324,6 +330,14 @@ def domain_matrix_html(d: dict) -> str:
     in at 69.7% and Students at 50.8%. The roster knows who belongs to which
     domain, so the split is recoverable; `data.build_batch` computes it and this
     lays it out as domain x date.
+
+    Where the room's feedback poll named its respondents, each cell also
+    carries that domain's own rating - so "Finance rated it 4.62" sits on the
+    same row as "Finance attended 55%". A rating from fewer than
+    `_MIN_RATING_N` answers is NOT shown: Content Creators returning 5.00 off
+    five responses is noise presented as a perfect score, and one more answer
+    moves it a full point. The response count is shown instead, so a thin
+    sample is visible rather than silently absent.
 
     Returns "" when nothing in view carries a split - a single POD's own room
     has one domain by construction, and B17-B34 have no domains at all.
@@ -337,17 +351,29 @@ def domain_matrix_html(d: dict) -> str:
         # every student falls into the same "Unassigned" bin and the table would
         # restate the session's own percentage under a heading promising more.
         return ""
-    head = "".join(f'<th class="num">{s["date_lbl"]}'
-                   f'{"" if s.get("pod") else ""}</th>' for s in cols)
+    head = "".join(f'<th class="num">{s["date_lbl"]}</th>' for s in cols)
     trs = []
     for p in names:
         tds = []
         for s in cols:
             part = s["pod_split"].get(p)
+            if not part:
+                tds.append('<td class="num">—</td>')
+                continue
+            rt = (s.get("pod_ratings") or {}).get(p) or {}
+            n = rt.get("responses") or 0
+            if rt.get("session") is not None and n >= _MIN_RATING_N:
+                extra = (f'<div style="font-size:10px;color:#6b7785">'
+                         f'★ {rt["session"]:.2f} · n={n}</div>')
+            elif n:
+                extra = (f'<div style="font-size:10px;color:#9aa4b2">'
+                         f'n={n}</div>')
+            else:
+                extra = ""
             tds.append(f'<td class="num">{_pill(part["pct"])}'
                        f'<div style="font-size:10px;color:#6b7785">'
-                       f'{part["present"]:,}/{part["total"]:,}</div></td>'
-                       if part else '<td class="num">—</td>')
+                       f'{part["present"]:,}/{part["total"]:,}</div>'
+                       f'{extra}</td>')
         trs.append(f'<tr><td>{p}</td>{"".join(tds)}</tr>')
     return ('<table class="sess"><thead><tr><th>Domain</th>' + head +
             "</tr></thead><tbody>" + "".join(trs) + "</tbody></table>")

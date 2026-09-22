@@ -126,10 +126,21 @@ def from_l2_label(label) -> str | None:
     'AI CAP B35 - Techies'      -> 'Techies'
     'AICAPB35, B36-Techies'     -> 'Techies'   (no-space form, real)
     'AI CAP B35'                -> WHOLE_BATCH (no domain named)
+    'AI CAP B40 - Common , BSIAI Accelerator B1'
+                                -> WHOLE_BATCH (see below)
     'AI CAP B35 - Nonsense'     -> None        (caller warns)
 
     Only the tail after the LAST '-' is considered: everything before it is the
     batch part, which may itself contain hyphens ('B37-42').
+
+    ONE WEBINAR CAN HOST TWO SESSIONS from different programmes, and the tail
+    then names both: `Common , BSIAI Accelerator B1` is AI CAP's Common room
+    sharing a Zoom room with BSIAI Accelerator B1 (a different programme, whose
+    B1 and B2 are different batches). So each comma-separated item is tried and
+    the first that names a domain wins - this function answers for AI CAP, and
+    `extract_batches` separately returns both programmes from the same cell.
+    Reading the whole tail as one name found nothing and warned on three real,
+    correctly-labelled sessions every run.
     """
     s = re.sub(r"\s+", " ", str(label or "")).strip()
     if not s:
@@ -143,7 +154,15 @@ def from_l2_label(label) -> str | None:
     # A tail that is just batch numbering ('B37-42' -> '42') names no domain.
     if re.fullmatch(r"[Bb]?\d{1,3}", tail):
         return WHOLE_BATCH
-    return canon(tail)
+    hit = canon(tail)
+    if hit:
+        return hit
+    # Two sessions in one room: try each item on its own.
+    for item in tail.split(","):
+        hit = canon(item.strip())
+        if hit:
+            return hit
+    return None
 
 
 def from_folder(folder_name) -> str | None:

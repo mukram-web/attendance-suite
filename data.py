@@ -180,6 +180,46 @@ def roster_emails(tabs: dict) -> dict:
     return out
 
 
+def roster_pod_emails(tabs: dict) -> dict:
+    """{batch: {pod: frozenset(emails)}} from the roster workbook's tabs.
+
+    `roster_emails` one level down, for dividing a multi-domain room's poll
+    between the domains sitting in it. Same mail column, same `_cell_email`
+    normalisation, so a respondent found here is the same person the marker
+    would have matched; the pod cell goes through `pods.from_roster_cell`
+    because the header says `Techies` while the cell says `Techies - Ai Career
+    Accelerator Program B35`.
+
+    A student with no pod is omitted entirely rather than bucketed: they belong
+    to the room but to no domain, so counting them in one would be an invention
+    and counting them in all of them would double-count.
+    """
+    out = {}
+    for tab, rows in (tabs or {}).items():
+        code = batch_label(tab)
+        if not code or not rows:
+            continue
+        hr = _find_header_row(rows)
+        mail_col = _find_col(rows[hr], "registered", "mail")
+        pod_col = _find_col(rows[hr], "pod")
+        if mail_col is None or pod_col is None:
+            continue
+        per: dict = {}
+        for r in rows[hr + 1:]:
+            e = _cell_email(_cell(r, mail_col))
+            if not e:
+                continue
+            p, _multi = pods.from_roster_cell(_cell(r, pod_col))
+            # from_roster_cell answers UNKNOWN ('Unassigned') for a blank cell,
+            # which is truthy - so this has to name the sentinel explicitly or
+            # every student with no POD silently becomes a domain of their own.
+            if p and p != pods.UNKNOWN:
+                per.setdefault(p, set()).add(e)
+        if per:
+            out[code] = {k: frozenset(v) for k, v in per.items()}
+    return out
+
+
 def clean_l2_label(raw) -> str:
     """Tidy L2's raw 'Batch Name' cell for display without rewording it.
 
@@ -339,6 +379,14 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         pod = _col_pod(_cell(date_row, c)) or _col_pod(hraw)
         mm = _mmdd(_cell(date_row, c)) or _mmdd(_cell(header, c))
         excl = frozenset(date_pods.get(mm, ())) if not pod else frozenset()
+        # The key every (batch, date, pod) lookup below must use. `pod` is about
+        # to become a DISPLAY name for the complement room, but polls, topics,
+        # labels and mentors were all filed under the pod L2 named - which for
+        # an unlabelled or "Common" room is "". Looking them up under the
+        # display name missed every time: the rating has no fallback so it went
+        # blank ("no poll conducted" over a poll with 424 answers), while the
+        # topic/label/mentor fallbacks quietly served the OTHER room's values.
+        join_pod = pod
         if excl:
             # The complement room: everyone the day's POD rooms did not invite.
             pod = pods.COMMON
@@ -385,19 +433,24 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         roster_topic = None if (hraw is None or _mmdd(hraw)) else str(hraw).strip()
         # POD-specific topic first: on a domain date the eleven sessions differ,
         # and (batch, date) would give them all the same name.
-        l2_topic = (l2_lookup.get((batch, mm, pod))
+        l2_topic = (l2_lookup.get((batch, mm, join_pod))
                     or l2_lookup.get((batch, mm)) or l2_lookup.get(mm))
         topic = l2_topic or roster_topic or (f"Session on {date_label(mm)}" if mm else "Live session")
         # How L2 names this session's batch ("AI CAP B35 - Techies", "AI CAP B8 + B22").
         # The same topic runs across many batches, so the label is what tells two
         # otherwise identical session names apart. Batch-specific match only —
         # the date-only fallback would borrow another batch's label.
-        raw_label = l2_labels.get((batch, mm, pod)) or l2_labels.get((batch, mm))
+        raw_label = (l2_labels.get((batch, mm, join_pod))
+                     or l2_labels.get((batch, mm)))
         l2_batch = clean_l2_label(raw_label)
-        # Who taught it, from L2's Mentor column. Batch-specific only, matching
-        # l2_batch: a date-only fallback would credit the wrong person.
-        mentor = str(mentors.get((batch, mm, pod))
-                     or mentors.get((batch, mm)) or "").strip()
+        # Who taught it, from L2's Mentor column. EXACT match only - no date-only
+        # fallback. On a two-room day that fallback returned whichever room L2
+        # listed first, so seven complement rooms across B35-B41 were published
+        # under the Techies trainer's name (B39 12 Sep read Priyanshu Jaiswal;
+        # L2 says Swapnil Narayan). Blank is the honest answer when the exact
+        # row is missing - a real person's name against a session they did not
+        # teach is worse than an empty cell.
+        mentor = str(mentors.get((batch, mm, join_pod)) or "").strip()
 
         sessions.append({
             "col": c, "mm": mm,
@@ -428,11 +481,15 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             # For a shared webinar these are THIS batch's students' answers only
             # (pipeline [5a] splits the poll by roster); `rating_shared` then
             # carries the whole room's figures and how the split went.
-            "rating": (rt := ratings.get((batch, mm, pod)) or {}).get("session"),
+            "rating": (rt := ratings.get((batch, mm, join_pod)) or {}).get("session"),
             "rating_shared": rt.get("shared"),
             "rating_trainer": rt.get("trainer"),
             "rating_recommend": rt.get("recommend"),
             "rating_n": rt.get("responses", 0),
+            # Per-domain ratings for a room holding several domains, keyed the
+            # same way `pod_split` keys attendance - so the By-domain table can
+            # put "Finance rated it 4.62" beside "Finance attended 55%".
+            "pod_ratings": rt.get("pod_ratings"),
             # NPS and the 1-5 histograms come from the same poll payload. Both
             # are aggregates - counts, never a respondent - so they are safe in
             # the store and safe on the public static site.
