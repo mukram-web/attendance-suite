@@ -61,6 +61,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `derived_cache.py` | the per-file parse memo that makes the weekly run incremental. Pure, unit-tested. See §4f. |
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
+| `ffa.py` | the FFA register: which hand-supplied (webinar, date) exports count, and for which batches. Data, not logic — see §4i. |
 | `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. `parse_responses` + `split_by_roster` divide a shared webinar's poll between its batches (§4e). |
 | `sessionmeta.py` | duration, peak, the per-minute retention curve and stickiness, swept from the attendee report's own join/leave times. Pure, unit-tested. See §4e. |
 | `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
@@ -693,6 +694,53 @@ publishing 3 for a session where 385 attended.** The Sheet path hides this becau
 its fresh export still carries both columns. **Swept 2026-09-17: this is the ONLY
 duplicate session key in the whole marked workbook** — one column, one batch, one
 date. Fix the grid before switching sources.
+
+### 4i. FFA — the one session type L2 does not register (added 2026-09-23)
+
+FFA (the 4-Day Financial Freedom Accelerator) is a separate programme every AI
+CAP cohort attends once, at 2-5 weeks old. L2 records it by writing `FFA` in
+Topic Name for that weekend — and **never a Webinar ID**: 0 of 104 FFA rows
+carry one, across 20 monthly tabs. The Webinar-ID join therefore has nothing to
+join on, and under §4g's "L2 is the register" rule the export is skipped as
+unregistered. That is why `ffa.py` exists: it is the register for FFA and
+nothing else.
+
+**Two owner rules (2026-09-23), both enforced by the shape of `ffa.py`:**
+
+1. **Only what is handed over gets marked.** Nothing is inferred from a date, a
+   folder name or an L2 row. The registry is keyed on **(webinar, date)**, not
+   webinar — which is the whole point, because one FFA webinar spans the entire
+   event. FFA B20's days 1-4 are four dates on id `91643507137`, and only the
+   two that fall on AI CAP's own Sat/Sun slots are registered. Days 1-2 and the
+   2 Sep invitation call (a different id) stay unmarked even if their exports
+   reach the drive.
+2. **Whole batch, never domain-wise.** FFA is one room for everyone, so
+   `process_files` forces `pod = ''` for anything the registry claims, before
+   `pods.from_folder` can read a domain out of the folder name. This is not
+   cosmetic: a POD column's denominator is a fraction of the batch, so a room
+   the whole batch attended would publish several hundred percent.
+
+**It has to be wired in two places, not one.** `attendance_core.process_files`
+marks it; `sheets.webinar_topic_lookup` gives it a topic and a label. Miss the
+second and the marks are written but `data.REQUIRE_L2` hides every one of them —
+a column with no topic is, by that rule, a session L2 never scheduled.
+
+**The label is deliberately domain-free.** `ffa.batch_label` emits L2's own comma
+form (`AI CAP B33 , B34 , …`) with no ` - <domain>` tail, so `pods.from_l2_label`
+reads WHOLE_BATCH and `extract_batches` reads all six batches, exactly as they
+read a real shared session.
+
+**The room is not ours.** An FFA webinar holds the whole FFA funnel — 8,000 to
+11,000 people, of whom the AI CAP students are a minority. Do not sanity-check
+one against batch strength. What identifies the cohort is the overlap: measured
+2026-09-23, B33-B38 matched 26-39% of their rosters and every other batch
+0.0-0.2%, which is how the six batches in the registry were established rather
+than taken on trust. `outside` does not fire here because it is gated on `pod`,
+and FFA has none.
+
+**To add an FFA weekend:** one entry per DATE in `ffa._SESSIONS`, upload the
+exports as `attendee_<wid>_<YYYY>_<MM>_<DD>.csv`, run the pipeline. A day that
+is not an AI CAP slot simply gets no entry. `tests/test_ffa.py` holds both rules.
 
 ## 5. Invariants — break these and the numbers go silently wrong
 
