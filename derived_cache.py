@@ -116,7 +116,6 @@ from __future__ import annotations
 import gzip
 import hashlib
 import inspect
-import io
 import json
 
 CACHE_NAME = "derived_facts.json.gz"

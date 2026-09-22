@@ -34,7 +34,6 @@ from __future__ import annotations
 
 import re
 
-import attendance_core as ac
 import pods as _pods
 
 # Zoom's two exports, as the pipeline's own parsers expect them. `attendee_` is

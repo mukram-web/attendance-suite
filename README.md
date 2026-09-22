@@ -82,7 +82,6 @@ refund / unidentified / blank. Toggle **Active only ↔ All enrolled** in the si
 | `attendance_core.py` | marking engine — `process()` (zip) and `process_files()` (any source) |
 | `dashboard_core.py` | per-student `roster_grid()` for the Roster tab |
 | `live_data.py` | reads roster / L2 / attendee zip from Google Drive (marker live mode) |
-| `app.py`, `dashboard.py` | the original standalone marker / dashboard (still work) |
 | `.streamlit/secrets.toml.example` | template for the Google credentials (live mode) |
 | `SETUP_LIVE.md`, `GO_LIVE_GUIDE.html` | how to turn on live Google mode |
 | `requirements.txt`, `Dockerfile` | deps / container build |
