@@ -374,3 +374,64 @@ class TestPhoneMatchesOnLast10(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestL2IsTheRegister(unittest.TestCase):
+    """A webinar with no L2 row is not marked at all (owner's rule, 2026-09-22).
+
+    It used to be marked from the Drive folder name and then hidden by
+    data.REQUIRE_L2 - 44 dead columns and 33 warnings on the 2026-09-22 corpus.
+    """
+
+    WID = "91695866411"
+    OTHER = "99999999999"
+
+    def _roster(self):
+        from openpyxl import Workbook
+        wb = Workbook(); wb.remove(wb.active)
+        ws = wb.create_sheet("AI CAP B17")
+        ws.append(["Country", "Registered Number", "Registered Mail", "WhatsApp",
+                   "Broadcast", "Batch", "Amount", "Payment", "Close Type", "POD"])
+        ws.append([91, "919000000001", "a@x.com", "", "", "B17", 0,
+                   "Full Paid", "BDA Closing", ""])
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    def _l2(self, wid):
+        from openpyxl import Workbook
+        wb = Workbook(); wb.remove(wb.active)
+        ws = wb.create_sheet("Sep 2026")
+        ws.append(["Date", "Webinar ID", "Batch Name", "Topic"])
+        ws.append(["09/09/2026", wid, "AI CAP B17", "Some Session"])
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    def _run(self, l2):
+        name = (f"2026-09-09 - AI CAP B17 - Some Session/"
+                f"attendee_{self.WID}_2026_09_09.csv")
+        return ac.process_files(self._roster(), l2,
+                                [(name, report_csv().encode())],
+                                values_only=True)
+
+    def test_a_webinar_in_L2_is_marked(self):
+        _, report, _ = self._run(self._l2(self.WID))
+        self.assertEqual(len(report), 1)
+        self.assertEqual(report[0]["present"], 1)
+
+    def test_a_webinar_NOT_in_L2_is_not_marked_even_though_the_folder_names_it(self):
+        # The folder says "AI CAP B17" and the batch tab exists, so the old
+        # fallback would happily have created the column.
+        _, report, warns = self._run(self._l2(self.OTHER))
+        self.assertEqual(report, [], "no column may be created")
+        self.assertTrue(any("not in the L2 schedule were NOT marked" in w
+                            for w in warns), warns)
+
+    def test_the_skips_are_ONE_warning_not_one_each(self):
+        _, _, warns = self._run(self._l2(self.OTHER))
+        self.assertEqual(sum(1 for w in warns if "L2 schedule were NOT marked" in w), 1)
+
+    def test_with_NO_L2_AT_ALL_everything_is_still_marked(self):
+        # The load-bearing guard. An absent schedule means "cannot tell", not
+        # "nothing ran" - without this, one failed L2 fetch marks nothing and
+        # the dashboard goes blank.
+        _, report, _ = self._run(None)
+        self.assertEqual(len(report), 1, "folder-name fallback must still apply")
+        self.assertEqual(report[0]["present"], 1)

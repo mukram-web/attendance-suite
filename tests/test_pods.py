@@ -755,3 +755,48 @@ class TestSplitDropsNonBreakdowns(unittest.TestCase):
         b = data.build_batch(rows, "B35", {})
         sx = next(s for s in b["sessions"] if s.get("mm"))
         self.assertEqual(sorted(sx["pod_split"]), ["Data", "Finance"])
+
+
+class TestTwoSessionsInOneWebinar(unittest.TestCase):
+    """One Zoom room, two sessions from different programmes.
+
+    Owner's explanation, 2026-09-22: `AI CAP B40 - Common , BSIAI Accelerator B1`
+    means that room hosted AI CAP B40's Common session AND BSIAI Accelerator B1's
+    (B1 and B2 being different BSIAI batches). The label is deliberate.
+
+    Reading only the tail after the last hyphen saw `Common , BSIAI Accelerator
+    B1` as one domain name, found nothing, and warned "POD not recognised -
+    counted against the whole batch. Add it to pods._ALIASES." on three real,
+    correctly-labelled sessions every run - and every clause of that was wrong.
+    """
+
+    REAL = ["AI CAP B40 - Common , BSIAI Accelerator B1",
+            "AI CAP B40 - Common , BSIAI Accelerator  B1",
+            "AI CAP B41 - Common , BSIAI Accelerator B2"]
+
+    def test_the_ai_cap_side_is_read_as_the_whole_batch_marker(self):
+        for label in self.REAL:
+            self.assertEqual(pods.from_l2_label(label), pods.WHOLE_BATCH, label)
+
+    def test_it_no_longer_looks_unrecognised(self):
+        # None is what made the pipeline warn.
+        for label in self.REAL:
+            self.assertIsNotNone(pods.from_l2_label(label), label)
+
+    def test_both_programmes_still_come_out_of_the_same_cell(self):
+        # The POD side answering for AI CAP must not change the batch side.
+        import attendance_core as ac
+        self.assertEqual(ac.extract_batches(self.REAL[0]),
+                         {("CAP", 40), ("BSIAI", 1)})
+        self.assertEqual(ac.extract_batches(self.REAL[2]),
+                         {("CAP", 41), ("BSIAI", 2)})
+
+    def test_a_named_domain_sharing_a_room_still_wins(self):
+        self.assertEqual(
+            pods.from_l2_label("AI CAP B40 - Techies , BSIAI Accelerator B1"),
+            "Techies")
+
+    def test_a_genuinely_unknown_tail_still_returns_None(self):
+        # The warning must keep firing for something nobody has taught it.
+        self.assertIsNone(pods.from_l2_label("AI CAP B35 - Nonsense"))
+        self.assertIsNone(pods.from_l2_label("AI CAP B35 - Nonsense , Drivel"))

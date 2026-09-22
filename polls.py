@@ -383,6 +383,84 @@ def split_by_roster(responses, rosters: dict) -> dict:
     return out
 
 
+def apply_pod_split(ratings: dict, texts_by_wid: dict, pod_emails: dict) -> tuple:
+    """Attach a per-DOMAIN rating breakdown to every multi-domain room.
+
+    A room with no pod of its own - an All Domains session, or the complement
+    room everyone outside the day's PODs sits in - holds several domains at
+    once, and its poll is one file. This divides that file by the roster's POD
+    column, so Finance's rating is Finance's students' answers.
+
+    `ratings` is `apply_roster_split`'s output; `texts_by_wid` maps a webinar id
+    to its poll text; `pod_emails` is `data.roster_pod_emails`. Returns
+    (ratings, stats). Only entries whose pod key is empty are touched - a named
+    POD's own room is one domain by construction and needs no split.
+
+    Each touched entry gains `pod_ratings`:
+
+        {pod: {session, trainer, recommend, responses, dist, nps}, ...}
+        _unmatched  respondents on no roster row of this batch
+        _multi      respondents the roster lists under more than one pod
+
+    Never raises for one bad entry: a poll it cannot divide simply gains
+    nothing, and the room keeps the single figure it already had.
+    """
+    stats = {"rooms": 0, "split": 0, "kept": {}}
+    per_wid: dict = {}
+    for key, rt in (ratings or {}).items():
+        if key[2]:
+            continue                      # a named POD's room: one domain already
+        stats["rooms"] += 1
+        label = key[0]
+        reason = "error"
+        try:
+            wid = rt.get("_wid")
+            text = (texts_by_wid or {}).get(wid)
+            pods_for_batch = (pod_emails or {}).get(label)
+            if text is None:
+                reason = "no-bytes"
+            elif not pods_for_batch:
+                reason = "no-pods"         # B17-B34: the pod era starts at B35
+            else:
+                ck = (wid, label)
+                if ck not in per_wid:
+                    resp = parse_responses(text)
+                    per_wid[ck] = (split_by_pod(resp, pods_for_batch)
+                                   if any(r.get("email") for r in resp) else None)
+                parts = per_wid[ck]
+                if parts is None:
+                    reason = "no-emails"   # an anonymous poll names nobody
+                else:
+                    rt["pod_ratings"] = parts
+                    stats["split"] += 1
+                    continue
+        except Exception:
+            reason = "error"
+        stats["kept"][reason] = stats["kept"].get(reason, 0) + 1
+    return ratings, stats
+
+
+def split_by_pod(responses, pod_emails: dict) -> dict:
+    """Divide one poll's respondents between the PODs its roster puts them in.
+
+    `pod_emails` is {pod name: set-of-emails} for ONE batch. Returns the same
+    shape `split_by_roster` does - one ratings dict per pod plus `_unmatched`
+    and `_multi` - because it IS `split_by_roster`: that function groups by
+    whatever keys it is handed, and a POD is just a narrower grouping than a
+    batch.
+
+    Why membership and not the label: the room's rating used to be found by
+    the pod name L2 wrote, which meant a room spelled "Common", "Common ,
+    BSIAI Accelerator B1" or left blank each landed somewhere different, and a
+    complement room's rating was lost entirely. A student's POD comes from the
+    roster, so nothing here depends on how the schedule spells a room.
+
+    A Techie who sat in the Common session therefore has their answer counted
+    under Techies, which is the same rule the marker applies to attendance.
+    """
+    return split_by_roster(responses, pod_emails)
+
+
 def name_key(name) -> tuple[str, str] | None:
     """Poll filename -> (webinar_id, mm_dd). Two conventions are in use:
 

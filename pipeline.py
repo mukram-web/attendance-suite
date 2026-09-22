@@ -1124,6 +1124,10 @@ def main() -> None:
                 _win.setdefault(_k[0], _fid)
         _need = {rt.get("_wid") for rt in ratings.values()
                  if len(rt.get("_batches") or ()) > 1}
+        # [5a.2] and every MULTI-DOMAIN room - an All Domains session or the
+        # complement room - so its poll can be divided by the roster's POD
+        # column. Those are exactly the entries with an empty pod key.
+        _need |= {rt.get("_wid") for k, rt in ratings.items() if not k[2]}
         _want = {_win[w] for w in _need if w in _win}
         _texts = {}
 
@@ -1136,6 +1140,12 @@ def main() -> None:
                                      _poll_text)
         ratings, _sstat = polls.apply_roster_split(
             ratings, _texts, ddata.roster_emails(roster_tabs))
+        ratings, _pdstat = polls.apply_pod_split(
+            ratings, _texts, ddata.roster_pod_emails(roster_tabs))
+        print(f"   per-domain poll split: {_pdstat['split']} of "
+              f"{_pdstat['rooms']} multi-domain room(s)"
+              + (f" · kept whole: {_pdstat['kept']}" if _pdstat["kept"] else ""),
+              flush=True)
         del _texts
         cache_stats["polls"] = dict(
             _pstat, listed=len(_pl), failed=_pi["failed"],

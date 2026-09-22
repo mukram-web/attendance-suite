@@ -16,7 +16,7 @@ Matching rule (default 'exact', per the auditing guide):
   last 10 digits); blanks never match.
 Optional 'inclusive' mode also uses the WhatsApp / broadcast columns.
 """
-import re, csv, io, zipfile, datetime
+import re, csv, io, datetime
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 
@@ -480,15 +480,7 @@ def _cell_phone(v):
     return _digits(s)
 
 # ---------------- main entry ----------------
-def process(roster_bytes, l2_bytes, zip_bytes, mode='exact', values_only=False):
-    """Mark attendance from an uploaded ZIP of Zoom attendee CSVs.
-
-    Thin wrapper: unpacks the ZIP into (name, raw_bytes) pairs and hands them to
-    process_files(). Returns (output_xlsx_bytes, report_rows, warnings).
-    """
-    z = zipfile.ZipFile(io.BytesIO(zip_bytes))
-    files = [(info, z.read(info)) for info in z.namelist() if not info.endswith('/')]
-    return process_files(roster_bytes, l2_bytes, files, mode=mode, values_only=values_only)
+CROSS_ROOM_BATCHES = frozenset({('CAP', 41)})
 
 
 def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_only=False,
@@ -572,10 +564,23 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
     # accumulate attendee sets per (sheet_name, mmdd, POD), merging multiple files
     acc, warnings = {}, []
     unknown_pods = set()
+    skipped_no_l2 = []
     for (wid, ymd), ranked in chosen.items():
         info = ranked[0][0]
         keys, topic = wid_map.get(wid, (None, ''))
-        if keys is None:                                 # not in L2 -> recover from folder
+        if keys is None and wid_map:
+            # L2 is the register of what ran (owner's rule, 2026-09-22). A
+            # webinar it does not list is not marked at all - the folder-name
+            # fallback used to create the column and `data.REQUIRE_L2` then
+            # hid it, which cost 44 dead columns and 33 warnings a run.
+            #
+            # `and wid_map` is load-bearing: with NO schedule loaded every
+            # webinar looks unregistered, and skipping them all would mark
+            # nothing. An absent L2 means "cannot tell", never "nothing
+            # ran" - the same distinction REQUIRE_L2 makes.
+            skipped_no_l2.append(wid)
+            continue
+        if keys is None:                                 # no L2 at all -> recover from folder
             for cand, _data in ranked:                   # drives may name folders differently
                 keys = _folder_batches(cand)
                 if keys:
@@ -639,9 +644,28 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
             continue
         for sheet in targets:
             a = acc.setdefault((sheet, mm, pod), dict(ymd=ymd, topic=topic, pod=pod,
-                                                      em=set(), pf=set(), p10=set()))
+                                                      em=set(), pf=set(), p10=set(),
+                                                      own_em=set(), own_p10=set()))
             a['em'] |= em; a['pf'] |= pf; a['p10'] |= p10
+            # What THIS room's own export named, kept so a student counted only
+            # because of the union can be reported as having crossed rooms.
+            a['own_em'] |= em; a['own_p10'] |= p10
             if not a['topic']: a['topic'] = topic
+
+    # Cross-room union - see CROSS_ROOM_BATCHES above. Done after every file is
+    # accumulated, so it sees all of a date's rooms whatever order they arrived.
+    for _key in {k[:2] for k in acc}:
+        _sheet, _mm = _key
+        if (_sheet_key(_sheet) or ('', 0)) not in CROSS_ROOM_BATCHES:
+            continue
+        _rooms = [acc[k] for k in acc if k[0] == _sheet and k[1] == _mm]
+        if len(_rooms) < 2:
+            continue                      # one room that day - nothing to share
+        _em = set().union(*(r['em'] for r in _rooms))
+        _pf = set().union(*(r['pf'] for r in _rooms))
+        _p10 = set().union(*(r['p10'] for r in _rooms))
+        for r in _rooms:
+            r['em'], r['pf'], r['p10'] = _em, _pf, _p10
 
     # write per sheet
     report = []
@@ -694,19 +718,38 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
                 if hr == 2 and a['topic']: ws.cell(2, ci).value = a['topic']
                 dmap[(a['ymd'], pod)] = ci
             em, pf, p10 = a['em'], a['pf'], a['p10']
-            pres = tot = outside = 0
+            pres = tot = outside = crossed = 0
+            own_em = a.get('own_em') or em
+            own_p10 = a.get('own_p10') or p10
+            # The PODs that ran their own room this date. On a complement
+            # column (pod='') the marker marks the whole batch and data.py
+            # narrows it to everyone those rooms did not invite, so their
+            # members are not this room's and must not count as crossed.
+            day_pods = {k[2] for k in acc if k[0] == sheet and k[1] == mm and k[2]}
             for r in range(hr + 1, (ws.max_row or hr) + 1):
                 # A POD session is only for that POD. Marking everyone else
                 # 'Absent' is simply false - they were never invited - and it put
                 # ten wrong Absents against every student in the downloadable
                 # roster the moment a batch ran eleven PODs in a day.
+                _row_pod = ''
+                if pc:
+                    _row_pod, _ = pods.from_roster_cell(ws.cell(r, pc).value)
+                    _row_pod = _row_pod or pods.UNKNOWN
                 if pod and pc:
-                    rp, _multi = pods.from_roster_cell(ws.cell(r, pc).value)
-                    if (rp or pods.UNKNOWN) != pod:
+                    rp = _row_pod
+                    if rp != pod:
                         # still worth knowing if they turned up
                         e0 = _cell_email(ws.cell(r, rm).value) if rm else ''
                         p0 = _cell_phone(ws.cell(r, rn).value) if rn else ''
-                        if (e0 and e0 in em) or _phone_hit(p0, pf, p10):
+                        # Against this room's OWN export, never the
+                        # cross-room union: `outside` is the mislabelled-
+                        # session detector ("most of the batch attended a
+                        # POD room"), and under the union every other
+                        # room's attendees would land in it and fire the
+                        # warning on a perfectly clean session.
+                        if ((e0 and e0 in own_em)
+                                or (p0 and len(p0) >= 10
+                                    and p0[-10:] in own_p10)):
                             outside += 1
                         continue
                 if mode == 'exact':
@@ -719,9 +762,29 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
                     ps = [x for x in (_cell_phone(ws.cell(r, c).value) for c in (rn, wa) if c) if x]
                     if not es and not ps: continue
                     hit = any(x in em for x in es) or any(len(x) >= 10 and x[-10:] in p10 for x in ps)
+                _e = e if mode == 'exact' else (es[0] if es else '')
+                _ps = [p] if mode == 'exact' else ps
+                _own_hit = ((_e and _e in own_em)
+                            or any(len(x) >= 10 and x[-10:] in own_p10
+                                   for x in _ps))
+                # This room's own members: on a POD column, that POD; on the
+                # complement column, everyone whose POD did NOT run its own room
+                # today. A student outside that set can only be marked here by
+                # their own presence in THIS room's export - never by the
+                # cross-room union, which would both double-count them and
+                # destroy the signal `data.build_batch` uses to recognise a
+                # complement room ("the day's PODs are absent from this column").
+                _mine = bool(pod) or (_row_pod not in day_pods)
+                if hit and not _mine and not _own_hit:
+                    hit = False
                 tot += 1
                 ws.cell(r, ci).value = 'Present' if hit else 'Absent'
-                if hit: pres += 1
+                if hit:
+                    pres += 1
+                    # Present, but this room's own export never named them: they
+                    # sat in another of the day's rooms. Reported, not hidden.
+                    if _mine and not _own_hit:
+                        crossed += 1
             # A "POD" session most of the batch attended is not a POD session -
             # either L2 mislabels a whole-batch session, or the domain is wrong.
             # Loudly, because the numbers look plausible either way.
@@ -733,6 +796,17 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
                     f'domain?')
             report.append(dict(batch=sheet, date=a['ymd'], col=get_column_letter(ci),
                                kind=kind, topic=a['topic'], pod=pod,
-                               present=pres, total=tot, outside=outside))
+                               present=pres, total=tot, outside=outside,
+                               crossed=crossed))
+    # One line, not one per webinar: these are EXPECTED under the L2 rule,
+    # and 33 of them a run buried the warnings that are not expected.
+    if skipped_no_l2:
+        warnings.append(
+            f'{len(skipped_no_l2)} webinar(s) not in the L2 schedule were NOT '
+            f'marked (L2 is the register of what ran): '
+            + ', '.join(sorted(skipped_no_l2)[:8])
+            + (f' ... and {len(skipped_no_l2) - 8} more'
+               if len(skipped_no_l2) > 8 else ''))
+
     out = io.BytesIO(); wb.save(out)
     return out.getvalue(), report, warnings
