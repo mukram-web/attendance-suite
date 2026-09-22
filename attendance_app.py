@@ -229,19 +229,6 @@ def _prepend_intro_sessions(DATA: dict) -> None:
 # ─────────────────────── prebuilt store (pipeline.py) ────────────────────────
 _STORE_PATH = _DISK_CACHE / "attendance.duckdb"
 
-# The PARALLEL dataset: the same pipeline run with the roster built from the LMS
-# API alone and every session re-marked from the Zoom exports, rather than
-# carried forward. Written by
-#   STORE_OUT=attendance_lms.duckdb ROSTER_SOURCE=lms LMS_PURE=1 \n#     python pipeline.py --no-upload --no-site --allow-partial
-# Swap --no-upload for --publish-parallel to put it in the Drive store
-# folder under this same name. That is what makes the control appear on
-# the DEPLOYED app, where nothing is ever on local disk — see
-# _lms_available below.
-# It is a SEPARATE FILE on purpose: the published weekly numbers are frozen and
-# must not move, so the two datasets sit side by side and the sidebar chooses.
-_LMS_STORE_NAME = "attendance_lms.duckdb"
-_LMS_STORE_PATH = _DISK_CACHE / _LMS_STORE_NAME
-
 
 def _store_folder_id() -> str:
     try:
@@ -321,17 +308,6 @@ def _snapshot_list(nonce):
         return live_data.list_store_snapshots(fid)
     except Exception:
         return []
-
-
-@st.cache_data(show_spinner=False, ttl=_STORE_TTL_SECONDS)
-def _lms_store_published(nonce) -> bool:
-    """Has the parallel LMS store been uploaded to the Drive store folder?
-
-    Same TTL as the store itself, so publishing one makes the control appear
-    within the refresh window instead of needing a restart. Never raises —
-    `store_exists` already answers False on any Drive error."""
-    fid = _store_folder_id()
-    return bool(fid) and live_data.store_exists(fid, _LMS_STORE_NAME)
 
 
 @st.cache_data(show_spinner=False)
@@ -496,15 +472,6 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    st.header("② Count basis")
-    basis = st.radio(
-        "Who counts as batch strength?",
-        ["Active only (exclude refunds)", "All enrolled"],
-        index=0,
-        help="Sets the default for the Roster tab’s ‘Active learners only’ filter. "
-             "Dashboard percentages are always measured against total strength.",
-    )
-
     # The matching rule only means something when THIS server does the marking.
     # With prebuilt data the marking already happened in the pipeline, so showing
     # a live-looking radio here would be a lie.
@@ -552,35 +519,14 @@ if _snapshots:
         if _pick_week != "Latest (live)":
             _viewing = _snapshots[_labels.index(_pick_week) - 1]
 
-# Offer the parallel LMS dataset only when its file can ACTUALLY BE FETCHED —
-# and the two deployments answer that differently. Locally the store folder is
-# unset and the file is an artefact on disk, so the disk is the truth. On
-# Streamlit Cloud nothing is on disk (.cache/ and *.duckdb are both gitignored),
-# and the truth is whether `pipeline.py --publish-parallel` has uploaded it.
-# Asking the disk in both places is why this control was missing on the deployed
-# app entirely. The Drive answer is a metadata probe, never a download.
-_lms_available = (_lms_store_published(st.session_state.nonce)
-                  if _store_configured else _LMS_STORE_PATH.exists())
-
 # ── which DATA SET? ──────────────────────────────────────────────────────────
-# Two rosters exist side by side. "Weekly" is the published record: marks frozen
-# once written, enrolment as the roster Sheet had it. "LMS API matched data" is
-# the same Zoom exports re-marked from scratch against enrolment taken from the
-# LMS API alone. They disagree — the API has never heard of ~9,000 people the
-# Sheet lists, and knows ~5,000 it does not — which is exactly why both are kept
-# rather than one being corrected into the other.
-_STORE_CHOICES = {"Weekly": "attendance.duckdb",
-                  "LMS API matched data": _LMS_STORE_NAME}
+# One published data set. The sidebar used to offer a second, "LMS API matched
+# data", so Sheet-sourced enrolment could be compared against the LMS API - but
+# since 2026-09-22 the roster Sheet IS the API-built one ("LMS Attendance
+# Roaster"), so both sides are LMS-derived and the toggle only offered a staler
+# rebuild of the same thing. pipeline.py keeps --publish-parallel and STORE_OUT,
+# so a side-by-side can be rebuilt whenever a roster question needs one.
 _store_name = "attendance.duckdb"
-if _lms_available and not _viewing:
-    with st.sidebar:
-        _pick_set = st.radio(
-            "Data set", list(_STORE_CHOICES), index=0, key="store_pick",
-            help="Weekly is the published record — every session marked once "
-                 "and frozen, enrolment from the roster sheet. LMS API matched "
-                 "data rebuilds the same weeks from the LMS API roster and "
-                 "re-marks every session from the Zoom reports.")
-        _store_name = _STORE_CHOICES[_pick_set]
 
 if _viewing:
     loaded = _load_snapshot(_viewing["id"], _viewing["name"])
@@ -610,19 +556,6 @@ if not _viewing and _store_available:
         store_mode = True
         report, warnings = store["report"], store["warnings"]
         source_label = store["source"]
-        if _store_name == _LMS_STORE_NAME:
-            # On the PAGE, for the same reason the archived-week banner is: a
-            # screenshot of these numbers must not read as the published ones.
-            _lms = (store.get("stamps") or {}).get("lms") or {}
-            st.warning(
-                "🧪 **Viewing the LMS API data set** — enrolment comes from the "
-                "LMS API alone and every session was re-marked from the Zoom "
-                "reports, so these numbers are **not** the published weekly "
-                f"figures (built {store['generated_at']}). "
-                + (f"Batches rebuilt: {len(_lms.get('seeded') or [])}. "
-                   if _lms else "")
-                + "Switch **Data set** back to “Weekly” in the sidebar for the "
-                "record of truth.")
         if store.get("drive_error"):
             st.sidebar.warning("Drive unreachable — showing the last downloaded "
                                f"data.\n\n{store['drive_error']}")
@@ -707,12 +640,6 @@ if marked.empty:
     st.warning("No sessions have attendance marked yet in this roster.")
     st.stop()
 
-# basis-driven column names
-active_mode = basis.startswith("Active")
-PCT = "PctActive" if active_mode else "PctAll"
-PRES = "PresentActive" if active_mode else "PresentAll"
-DEN = "Active" if active_mode else "Total"
-den_label = "active learners" if active_mode else "enrolled"
 
 # status line
 if store_mode:
@@ -853,7 +780,13 @@ with tab_roster:
         st.info("No roster rows to show for this batch — try 🔄 Refresh from Google."
                 if pick else "No batch sheets to show.")
     else:
-        active_only = st.checkbox("Active learners only", value=active_mode, key="roster_active")
+        # Defaults ON, which is what the removed "Count basis" radio did (it
+        # defaulted to "Active only"). Behaviour here is deliberately unchanged.
+        # Note it drops refunds AND blank-payment rows, and only ~1/3 of those
+        # are actual refunds - 1,033 of 3,030 on the 2026-09-22 roster, the rest
+        # are simply missing a Payment value. Dashboard percentages are not
+        # affected either way: they always use total strength (data.py).
+        active_only = st.checkbox("Active learners only", value=True, key="roster_active")
         if active_only:
             g = g[g["Active"].astype(bool)]
         sess_cols = [c for c in g.columns if c not in ("Email", "Phone", "Active", "Present")]

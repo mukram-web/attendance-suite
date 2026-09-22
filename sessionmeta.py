@@ -44,7 +44,6 @@ absent — a webinar run without registration cannot produce a usable report.
 from __future__ import annotations
 
 import csv
-import io
 import re
 
 # The header labels we want, matched case-insensitively on a substring so a
