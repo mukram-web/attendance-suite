@@ -517,6 +517,7 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
 
     Returns (output_xlsx_bytes, report_rows, warnings).
     """
+    import ffa
     import pods
 
     wb = load_workbook(io.BytesIO(roster_bytes), data_only=values_only)
@@ -568,6 +569,14 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
     for (wid, ymd), ranked in chosen.items():
         info = ranked[0][0]
         keys, topic = wid_map.get(wid, (None, ''))
+        # FFA is registered BY HAND, per (webinar, date), in ffa.py - the owner
+        # hands over the exports and only those are marked. Checked before the
+        # L2 rule below because L2 never carries an FFA webinar id (0 of 104
+        # rows, measured over 20 monthly tabs), so that rule would drop every
+        # FFA export as unregistered.
+        _ffa = ffa.lookup(wid, ymd)
+        if _ffa is not None:
+            keys, topic, _ = _ffa
         if keys is None and wid_map:
             # L2 is the register of what ran (owner's rule, 2026-09-22). A
             # webinar it does not list is not marked at all - the folder-name
@@ -627,15 +636,25 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
         # folder name is the fallback, exactly as it is for the batch itself.
         # An unrecognised domain becomes a whole-batch session AND warns - it
         # must never be silently folded into another POD's denominator.
-        pod = pods.from_l2_label(l2_labels.get(wid)) if l2_labels.get(wid) else None
-        if pod is None:
-            pod = pods.from_folder(info)
-        if pod is None and l2_labels.get(wid):
-            tail = str(l2_labels.get(wid)).split('-')[-1].strip()
-            if tail and tail not in unknown_pods:
-                unknown_pods.add(tail)
-                warnings.append(f'Webinar {wid}: POD "{tail}" not recognised - '
-                                f'counted against the whole batch. Add it to pods._ALIASES.')
+        if _ffa is not None:
+            # Whole batch, never domain-wise (owner's rule, 2026-09-23): FFA is
+            # ONE room for everyone, so there is no domain to divide it by. Set
+            # here rather than left to the lookups below so a folder name like
+            # '... - Techies' can never put an FFA session into a POD's
+            # denominator - that denominator is a fraction of the batch, and a
+            # room the whole batch attended would read as several hundred
+            # percent.
+            pod = None
+        else:
+            pod = pods.from_l2_label(l2_labels.get(wid)) if l2_labels.get(wid) else None
+            if pod is None:
+                pod = pods.from_folder(info)
+            if pod is None and l2_labels.get(wid):
+                tail = str(l2_labels.get(wid)).split('-')[-1].strip()
+                if tail and tail not in unknown_pods:
+                    unknown_pods.add(tail)
+                    warnings.append(f'Webinar {wid}: POD "{tail}" not recognised - '
+                                    f'counted against the whole batch. Add it to pods._ALIASES.')
         pod = '' if pod in (None, pods.WHOLE_BATCH) else pod
         targets = [key_sheet[k] for k in keys if k in key_sheet]
         if not targets:

@@ -58,6 +58,7 @@ def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False,
     if there are no attendee files or no L2 (e.g. upload mode without a zip).
     """
     import attendance_core as ac
+    import ffa
     import pods
     if not l2_bytes or not attendee_files:
         if with_labels and with_mentors: return {}, {}, {}
@@ -74,16 +75,26 @@ def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False,
         if not pf:
             continue
         wid, ymd = pf
-        info = wid_map.get(wid)
-        if not info:
-            continue
-        _keys, topic = info
+        # FFA is hand-registered per (webinar, date) in ffa.py and is never in
+        # L2's Webinar ID column, so the join below finds nothing for it. That
+        # is not cosmetic: a marked column with no topic is a column L2 never
+        # scheduled, and `data.REQUIRE_L2` HIDES those - the marks would sit in
+        # the workbook and never reach the dashboard.
+        _ffa = ffa.lookup(wid, ymd)
+        if _ffa is not None:
+            _keys, topic, raw = _ffa
+            who = ""              # FFA is not taught by an AI CAP mentor
+        else:
+            info = wid_map.get(wid)
+            if not info:
+                continue
+            _keys, topic = info
+            raw = (wid_labels.get(wid) or "").strip()
+            who = (wid_mentors.get(wid) or "").strip()
         topic = (topic or "").strip()
         if not topic:
             continue
         mm = f"{int(ymd[5:7]):02d}_{int(ymd[8:10]):02d}"
-        raw = (wid_labels.get(wid) or "").strip()
-        who = (wid_mentors.get(wid) or "").strip()
         # From B35 a date carries up to eleven sessions, one per domain POD, each
         # with its own topic. Keying on (batch, date) alone hands all eleven the
         # first topic it happens to meet - every POD row on B35's 23 Aug read
