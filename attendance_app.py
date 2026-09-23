@@ -1227,16 +1227,74 @@ with sub_browse:
             .bw span{font-variant-numeric:tabular-nums;color:#4a5568}
             .anon{color:#9aa4b5;font-size:11px;font-style:italic;white-space:nowrap}
             </style>""", unsafe_allow_html=True)
-        st.markdown(
-            '<div class="sess-wrap"><table class="sess"><tr>'
-            '<th>Date</th><th>Title</th><th>Trainer</th><th>Type</th><th>POD</th>'
-            '<th>Batch</th><th>Att %</th><th>Present</th><th>Absent</th>'
-            '<th>Trainer ★</th><th>Overall</th><th>NPS</th><th>Resp</th>'
-            '<th>Dur (h)</th><th>Peak</th>'
-            '<th>Joint ★</th><th>Joint overall</th><th>Joint NPS</th><th>Joint resp</th>'
-            '</tr>'
-            + "".join(_rows_html) + '</table></div>',
-            unsafe_allow_html=True)
+        # ── MARK A ROW, GET ITS BREAKDOWN ────────────────────────────────
+        # Streamlit's row selection only exists on a real dataframe; the merged
+        # table below is raw HTML and carries no click events, which is why the
+        # drill-down used to need a separate dropdown nobody scrolled to. This
+        # is the surface people click; the merged view is kept as the compact
+        # read, one row per session instead of one per batch.
+        _order = sorted(_groups, key=_gsort, reverse=True)
+        _flat = [(k, x) for k in _order
+                 for x in sorted(_groups[k], key=lambda y: dc.batch_key(y["batch"]))]
+        _dfrows = []
+        for _k, _s in _flat:
+            _G2 = _gof[_k]
+            _u2 = _unsplit(_s, len(_groups[_k]))
+            _p2, _t2 = _s.get("present"), _s.get("total")
+            _dfrows.append({
+                "Date": _s["date"], "Title": _s.get("topic") or "",
+                "Trainer": _G2.get("trainer") or "", "Type": _G2.get("trainer_type") or "",
+                "POD": _s.get("pod") or "", "Batch": _s["batch"],
+                "Att %": _s.get("pct"), "Present": _p2,
+                "Absent": (_t2 - _p2 if isinstance(_p2, (int, float))
+                           and isinstance(_t2, (int, float)) else None),
+                # None, never the room's figure, when a shared poll could not be
+                # divided - the same rule the merged table uses.
+                "Trainer ★": None if _u2 else _s.get("rating_trainer"),
+                "Overall": None if _u2 else _s.get("rating"),
+                "NPS": None if _u2 else _s.get("nps"),
+                "Resp": None if _u2 else (_s.get("rating_n") or 0),
+                "Dur (h)": _G2.get("duration_hrs"), "Peak": _G2.get("peak"),
+                "Joint ★": _G2.get("rating_trainer"),
+                "Joint overall": _G2.get("rating"), "Joint NPS": _G2.get("nps"),
+                "Joint resp": _G2.get("rating_n") or 0,
+            })
+        _num = st.column_config.NumberColumn
+        _sel = st.dataframe(
+            _pd.DataFrame(_dfrows), hide_index=True, height=430, width="stretch",
+            on_select="rerun", selection_mode="single-row", key="ss_rows",
+            column_config={
+                "Att %": _num(format="%.1f%%"),
+                "Present": _num(format="%d"), "Absent": _num(format="%d"),
+                "Trainer ★": _num(format="%.2f"),
+                "Overall": st.column_config.ProgressColumn(
+                    format="%.2f", min_value=0, max_value=5),
+                "NPS": _num(format="%+d"), "Resp": _num(format="%d"),
+                "Dur (h)": _num(format="%.1f"), "Peak": _num(format="%d"),
+                "Joint ★": _num(format="%.2f"),
+                "Joint overall": st.column_config.ProgressColumn(
+                    format="%.2f", min_value=0, max_value=5),
+                "Joint NPS": _num(format="%+d"), "Joint resp": _num(format="%d"),
+            })
+        try:
+            _selrows = list((_sel.selection or {}).get("rows") or [])
+        except Exception:
+            _selrows = []          # an older Streamlit without row selection
+        st.caption("⬜ Tick a row to open its full breakdown below — "
+                   "retention curve, stickiness, ratings and the per-batch split.")
+
+        with st.expander(f"Compact view — {len(_groups):,} sessions, "
+                         "one row each (merged cells)", expanded=False):
+            st.markdown(
+                '<div class="sess-wrap"><table class="sess"><tr>'
+                '<th>Date</th><th>Title</th><th>Trainer</th><th>Type</th><th>POD</th>'
+                '<th>Batch</th><th>Att %</th><th>Present</th><th>Absent</th>'
+                '<th>Trainer ★</th><th>Overall</th><th>NPS</th><th>Resp</th>'
+                '<th>Dur (h)</th><th>Peak</th>'
+                '<th>Joint ★</th><th>Joint overall</th><th>Joint NPS</th><th>Joint resp</th>'
+                '</tr>'
+                + "".join(_rows_html) + '</table></div>',
+                unsafe_allow_html=True)
         st.caption(f"{len(_groups):,} sessions · {len(_v):,} batch rows. "
                    "Title, trainer, duration and peak are one session's facts, so "
                    "they span its batches. **Att %**, **Present**, **Absent** and the "
@@ -1305,48 +1363,160 @@ with sub_browse:
             "recorded*, never *Live*."
         )
 
-        # An HTML table cannot carry Streamlit's row selection, so the drill-down
-        # gets its own picker. Options are SESSIONS, not batch rows, matching the
-        # merge above.
         st.divider()
-        _opts = sorted(_groups, key=_gsort, reverse=True)
-
-        def _opt_label(i):
-            G = _gof[_opts[i]]
-            return (f"{G.get('date')} · {(G.get('topic') or 'Session')[:52]}"
-                    + (f" · {G['pod']}" if G.get("pod") else "")
-                    + f" · {G.get('l2_batch') or G.get('batch')}")
-
-        _pick = st.selectbox(
-            "Session breakdown",
-            options=range(len(_opts)),
-            format_func=_opt_label,
-            index=None, placeholder="Pick a session to see its breakdown",
-            key="ss_pick")
-        if _pick is not None:
-            _grp = sorted(_groups[_opts[_pick]],
-                          key=lambda s: dc.batch_key(s["batch"]))
-            s = _grp[0]
-            _Gp = _gof[_opts[_pick]]
+        if not _selrows:
+            st.caption("Tick a row in the table above to see that session's full "
+                       "breakdown here — attendance, retention curve, "
+                       "stickiness and how the room rated it.")
+        else:
+            # The TICKED ROW is one batch of one session. Room facts (duration,
+            # peak, the curve) belong to the whole room and are shown as such;
+            # attendance and ratings are that batch's own, because those are the
+            # numbers measured against its roster and answered by its students.
+            _k0, s = _flat[_selrows[0]]
+            _grp = sorted(_groups[_k0], key=lambda x: dc.batch_key(x["batch"]))
+            _Gp = _gof[_k0]
             st.subheader(s["topic"] or "Session")
             st.caption(f"{s.get('l2_batch') or s['batch']} · {s['date_lbl']} "
                        f"({s['date']})"
                        + (f" · {s['pod']}" if s["pod"] else "")
                        + (f" · {s['trainer']}" if s.get("trainer") else "")
                        + (f" ({s['trainer_type']})" if s.get("trainer_type") else ""))
-            # Pooled across every batch that sat in this session, because the
-            # room was one room. The per-batch split is right below.
-            _p = sum(x["present"] for x in _grp)
-            _t = sum(x["total"] for x in _grp)
-            d1, d2, d3, d4, d5 = st.columns(5)
-            d1.metric("Present", f"{_p:,}",
-                      help="across all batches in this session" if len(_grp) > 1 else None)
-            d2.metric("Invited", f"{_t:,}")
-            d3.metric("Attendance", f"{_p / _t * 100:.1f}%" if _t else "—")
-            d4.metric("Duration", f"{s['duration_hrs']:.1f} h"
-                      if s.get("duration_hrs") else "—")
-            d5.metric("Peak", f"{s['peak']:,}" if s.get("peak") else "—",
-                      help="most people in the room at once")
+
+            _curve = _Gp.get("retention") or s.get("retention")
+            # END COUNT is the MEAN over the closing ten minutes, never the
+            # final minute. Two reasons, and they agree: it is what the
+            # weekly-sessions-analysis app means by the words ("Average
+            # attendee count over the last 10 minutes"), so the two dashboards
+            # can be read against each other - and the final minute of a Zoom
+            # export is frequently one person who never clicked Leave. Scored
+            # on that, 74 of this store's 536 rated sessions read 0.00,
+            # including a 1,698-strong room rated 4.45.
+            _end = (round(sum(_curve[-10:]) / len(_curve[-10:]))
+                    if _curve else None)
+            _sh0 = s.get("rating_shared") or {}
+            _mine = {} if (_sh0 and not _sh0.get("split")) else s
+
+            def _m(col, label, val, fmt="{:,}", help=None):
+                col.metric(label, fmt.format(val) if isinstance(val, (int, float))
+                           else "—", help=help)
+
+            # RETENTION SCORE - did they stay AND did they like it, in one
+            # number out of 5. Deliberately the same formula the
+            # weekly-sessions-analysis app uses on its own session card
+            # (end / peak x overall rating), so the two dashboards can be read
+            # against each other.
+            #
+            # ONE CHANGE: no poll means NO SCORE. Theirs multiplies by a rating
+            # of 0 and prints 0.00, so a full room nobody happened to survey
+            # reads as the worst session on record. 79 of 640 sessions here have
+            # no rating, so that is not a hypothetical.
+            #
+            # The rating is THIS BATCH'S own (the same figure the Overall tile
+            # below shows), while end and peak are the whole room's - so the
+            # score is checkable by eye against the tiles beside it. For a
+            # single-batch session, which is most of them, the two are the same
+            # thing anyway.
+            _peak0 = _Gp.get("peak") or s.get("peak")
+            _ov0 = _mine.get("rating")
+            _ret = ((_end / _peak0) * _ov0
+                    if _end and _peak0 and _ov0 is not None else None)
+            a0, a1, a2, a3 = st.columns(4)
+            _m(a0, "Retention score", _ret, "{:.2f}",
+               help=("End count ÷ peak × overall rating, out of 5"
+                     + (f" — {_end:,} ÷ {_peak0:,} × {_ov0:.2f}"
+                        if _ret is not None else "")
+                     + ". Rewards a session that both holds the room and rates "
+                       "well. Blank when no poll was run: a session nobody was "
+                       "asked about has no score, which is not the same as a "
+                       "bad one."))
+            _m(a1, "vs curve", s.get("index"), "{:.2f}x",
+               help="What this batch actually drew over what the decay curve "
+                    "says a cohort of its age, level and POD should draw. "
+                    "1.00 is exactly on curve. Ranking on raw attendance just "
+                    "crowns the youngest cohort every week.")
+            _m(a2, "Stickiness (10 min)", _Gp.get("stick10") or s.get("stick10"),
+               "{:.0f}%", help="Mean concurrency over the closing 10 minutes as "
+                               "a share of the session's peak — the end "
+                               "count above, over the peak beside it.")
+            _m(a3, "Stickiness (30 min)", _Gp.get("stick30") or s.get("stick30"),
+               "{:.0f}%")
+
+            b1, b2, b3, b4, b5, b6 = st.columns(6)
+            _m(b1, "Overall", _mine.get("rating"), "{:.2f}",
+               help=("This batch's own students. The whole room's poll is in "
+                     "the table below.") if len(_grp) > 1 else None)
+            _m(b2, "Trainer", _mine.get("rating_trainer"), "{:.2f}")
+            _m(b3, "NPS", _mine.get("nps"), "{:+d}",
+               help="Promoter 5, passive 4, detractor 1-3 on the recommend "
+                    "question.")
+            _m(b4, "Peak", _Gp.get("peak") or s.get("peak"),
+               help="Most people in the room at once, swept from the join and "
+                    "leave times — the whole room, every batch in it.")
+            _m(b5, "Duration", _Gp.get("duration_hrs") or s.get("duration_hrs"),
+               "{:.1f} h", help="First join to last leave, not Zoom's Actual "
+                                "Duration — that runs from the host starting "
+                                "to the host leaving.")
+            _m(b6, "End count", _end,
+               help="Mean people in the room over the closing ten minutes — "
+                    "not the last minute, which is often a single person who "
+                    "never clicked Leave.")
+
+            # Attendance last, because it is the one figure that is ALWAYS this
+            # batch's own and never the room's - a room three batches sat in has
+            # three different attendance rates and no single correct one.
+            _p, _t = s.get("present"), s.get("total")
+            c1, c2, c3 = st.columns(3)
+            _m(c1, f"Present · {s['batch']}", _p)
+            _m(c2, "Invited", _t)
+            _m(c3, "Attendance", s.get("pct"), "{:.1f}%")
+            if len(_grp) > 1:
+                _pp = sum(x["present"] for x in _grp)
+                _tt = sum(x["total"] for x in _grp)
+                st.caption(f"Pooled over the {len(_grp)} batches in this room: "
+                           f"{_pp:,} of {_tt:,}"
+                           + (f" ({_pp / _tt * 100:.1f}%)" if _tt else ""))
+
+            if _curve:
+                st.markdown("**Retention curve**")
+                st.caption("People in the room, minute by minute, from the first "
+                           "join to the last leave — swept from the Zoom "
+                           "report's own join/leave times, the same pass that "
+                           "gives the peak. The whole room, not one batch.")
+                import plotly.graph_objects as _go2
+                _f2 = _go2.Figure(_go2.Scatter(
+                    x=list(range(len(_curve))), y=_curve, mode="lines",
+                    line=dict(color="#2a5bd7", width=2), fill="tozeroy",
+                    fillcolor="rgba(42,91,215,0.10)",
+                    hovertemplate="minute %{x}<br>%{y:,} in the room<extra></extra>"))
+                _pm2 = _Gp.get("poll_at_min", s.get("poll_at_min"))
+                if _pm2 is not None:
+                    _f2.add_vline(x=_pm2, line_width=1, line_dash="dash",
+                                  line_color="#c0392b")
+                    _f2.add_annotation(x=_pm2, y=max(_curve), yshift=12,
+                                       text="poll", showarrow=False,
+                                       font=dict(size=11, color="#c0392b"))
+                _f2.update_layout(
+                    height=280, margin=dict(l=10, r=10, t=24, b=10),
+                    xaxis=dict(title="Time (min)", showgrid=False),
+                    yaxis=dict(title="Attendees", gridcolor="#eef1f6",
+                               rangemode="tozero"),
+                    plot_bgcolor="white", paper_bgcolor="white",
+                    font=dict(family="Inter, system-ui, sans-serif",
+                              color="#5a6573", size=12))
+                st.plotly_chart(_f2, width="stretch",
+                                config={"displayModeBar": False})
+                st.download_button(
+                    "Download retention data (CSV)",
+                    _pd.DataFrame({"minute": range(len(_curve)),
+                                   "attendees": _curve}).to_csv(index=False).encode(),
+                    file_name=f"retention_{s['date']}_{s['batch']}.csv",
+                    mime="text/csv", key="ss_dl_curve")
+            else:
+                st.caption("No Zoom report for this session, so no retention "
+                           "curve, peak or stickiness. Nothing is inferred from "
+                           "attendance — that would be a different metric "
+                           "wearing the same name.")
             if len(_grp) > 1:
                 # Per batch: attendance against its own roster, and its own
                 # students' answers. The room's whole poll is the chart below.
