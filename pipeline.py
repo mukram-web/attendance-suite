@@ -50,6 +50,7 @@ import carryforward                   # noqa: E402
 import dashboard_core as dc           # noqa: E402
 import data as ddata                  # noqa: E402
 import derived_cache                  # noqa: E402
+import ecap                           # noqa: E402
 import polls                          # noqa: E402
 import forecast                       # noqa: E402
 import archive                        # noqa: E402
@@ -140,6 +141,10 @@ def load_config() -> dict:
         # this Sheet is owned outside the team that owns the roster, so sharing
         # it with the service account is a separate step that is easy to forget.
         "curriculum_id": pick("CURRICULUM_ID", "curriculum_id"),
+        # Optional: a workbook of "AI ECAP B<n>" roster tabs, grafted onto
+        # the CAP roster before marking (see ecap.py). Absent -> no ECAP
+        # batches, and everything else behaves exactly as before.
+        "ecap_roster_id": pick("ECAP_ROSTER_ID", "ecap_roster_id"),
         # Where the roster comes from: "sheet" (Google Sheet, the original) or
         # "lms" (the 10xstats API — see lms_roster.py). Defaults to "sheet" so
         # the swap is opt-in and reverting is one environment variable, not a
@@ -557,7 +562,7 @@ def build_store(path: str, marked_bytes: bytes, report, warnings, source: str,
     # only real batch tabs — helper tabs like 'l2 cx data' or 'Auto pay' pass
     # dashboard_core's loose sheet filter but are not batches
     batches = sorted((b for b in df["Batch"].unique()
-                      if b in smap and re.fullmatch(r"B\d+", str(b))),
+                      if b in smap and re.fullmatch(r"(ECAP )?B\d+", str(b))),
                      key=dc.batch_key)
     df = df[df["Batch"].isin(batches)].reset_index(drop=True)
 
@@ -926,6 +931,39 @@ def main() -> None:
                     f"   Run tools/lms_cutover_diff.py to see which batches, or "
                     f"set ROSTER_SOURCE=sheet to fall back to the Google Sheet.")
 
+    # [1d] ECAP — a second programme, rostered from a snapshot (see ecap.py).
+    #
+    # It has to happen HERE, before [2/8], not later. `fetch_new_attendees`
+    # decides which session folders to download by checking each folder's
+    # batches against the TABS IN THIS WORKBOOK: with no ECAP tab, all 69 ECAP
+    # folders are counted "without a roster tab" and never fetched, so the
+    # marking below would have nothing to mark even though the rest of the
+    # stack understands ECAP perfectly well.
+    #
+    # Never fatal. ECAP is an addition; a Drive hiccup fetching its snapshot
+    # must not cost the CAP dashboard its weekly refresh.
+    # `warnings` does not exist yet - [3/8] creates it from the marker - so
+    # these are stashed and merged in there.
+    _ecap_warn: list = []
+    if cfg.get("ecap_roster_id"):
+        print("[1d] Grafting the ECAP roster tabs …", flush=True)
+        try:
+            _eb = live_data.fetch_file_bytes(svc, cfg["ecap_roster_id"])
+            base_bytes, _er = ecap.graft(base_bytes, _eb)
+            print(f"   {len(_er['added'])} tab(s) added"
+                  + (f" ({', '.join(_er['added'])}, {_er['rows']:,} students)"
+                     if _er["added"] else "")
+                  + (f" · {len(_er['skipped'])} already in the workbook"
+                     if _er["skipped"] else ""), flush=True)
+            for _w in _er.get("warnings") or ():
+                _ecap_warn.append(f"ECAP: {_w}")
+                print(f"   WARNING: {_w}", flush=True)
+        except Exception as e:
+            _ecap_warn.append(
+                f"ECAP roster could not be grafted ({e}) — its batches are "
+                f"missing from this build.")
+            print(f"   WARNING: {e} — continuing without ECAP.", flush=True)
+
     print("[2/8] Fetching attendee reports (new sessions only) …", flush=True)
     attendee_files, info = live_data.fetch_new_attendees(
         svc, cfg["attendee_folder_id"], base_bytes)
@@ -966,6 +1004,7 @@ def main() -> None:
         # mid-week upload of one session, or a re-run of a week already loaded.
         # It publishes the carried history unchanged rather than failing.
         marked_bytes, report, warnings = base_bytes, [], []
+    warnings = list(warnings) + _ecap_warn
     if args.marked_out:
         with open(args.marked_out, "wb") as _fh:
             _fh.write(marked_bytes)
@@ -1006,9 +1045,13 @@ def main() -> None:
     tab_err = ""
     try:
         wb_r = load_workbook(io.BytesIO(marked_bytes), read_only=True, data_only=True)
+        # ECAP tabs belong here too: a room shared by CAP and ECAP
+        # ("AI CAP B30 , ECAP B1 & B2") can only have its poll divided per
+        # batch if every sharing batch's roster is in this map.
         roster_tabs = {ws.title: [list(r) for r in ws.iter_rows(values_only=True)]
                        for ws in wb_r.worksheets
-                       if re.fullmatch(r"\s*AI\s*CAP\s*B\d+\s*", ws.title, re.I)}
+                       if re.fullmatch(r"\s*AI\s*(E\s*-?\s*)?CAP\s*B\d+\s*",
+                                       ws.title, re.I)}
         wb_r.close()
     except Exception as e:
         tab_err = str(e)

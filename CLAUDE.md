@@ -61,6 +61,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `derived_cache.py` | the per-file parse memo that makes the weekly run incremental. Pure, unit-tested. See §4f. |
 | `live_data.py` | all Google Drive I/O + the disk caches. |
 | `sheets.py` | L2 webinar→topic lookup. |
+| `ecap.py` | the ECAP roster graft: which tabs of the snapshot workbook join the CAP roster, and why an existing tab is never overwritten. See §4j. |
 | `ffa.py` | the FFA register: which hand-supplied (webinar, date) exports count, and for which batches. Data, not logic — see §4i. |
 | `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. `parse_responses` + `split_by_roster` divide a shared webinar's poll between its batches (§4e). |
 | `sessionmeta.py` | duration, peak, the per-minute retention curve and stickiness, swept from the attendee report's own join/leave times. Pure, unit-tested. See §4e. |
@@ -741,6 +742,72 @@ and FFA has none.
 **To add an FFA weekend:** one entry per DATE in `ffa._SESSIONS`, upload the
 exports as `attendee_<wid>_<YYYY>_<MM>_<DD>.csv`, run the pipeline. A day that
 is not an AI CAP slot simply gets no entry. `tests/test_ffa.py` holds both rules.
+
+### 4j. ECAP — a second programme in the same dashboard (added 2026-09-23)
+
+ECAP ("AI Engineering Career Accelerator Program") is a different programme
+that shares this pipeline's L2 schedule and its attendee Shared Drives. Most of
+the stack already knew about it before any of this was written:
+`attendance_core._sheet_key` keys an `AI ECAP B1` tab to `('ECAP', 1)`,
+`extract_batches` reads ECAP out of an L2 label, 47 of L2's webinars are ECAP
+sessions carrying real webinar ids, and 69 session folders sit on the drives
+(B1 x46, B2 x38, B3 x33). What was missing was a roster and the dashboard
+layer.
+
+**The roster is a SNAPSHOT, by the owner's choice.** `ECAP_ROSTER_ID` points at
+one workbook exported 2026-09-23 — B1 206 people / B2 232 / B3 95, 507 distinct,
+active 172 / 181 / 65. `ecap.graft` copies its `AI ECAP B<n>` tabs onto the CAP
+roster at step `[1d]`. **Enrolment therefore does not refresh**: anyone who
+joins or refunds after that date never appears, so ECAP's denominators go stale
+from the day it shipped. The fix, when wanted, is to teach
+`tools/make_lms_sheet.py` to write those tabs into the main roster sheet — then
+`ecap.py` has no job left.
+
+**`[1d]` runs before `[2/8]`, and the order is load-bearing.**
+`live_data.fetch_new_attendees` decides which session folders to download by
+checking each folder's batches against the TABS IN THE WORKBOOK. Graft after
+the fetch and all 69 ECAP folders are counted "without a roster tab", never
+downloaded, and the marking has nothing to mark — a green run with a silently
+absent programme.
+
+**An existing tab is SKIPPED, never replaced**, and that is what makes the
+graft safe under `--incremental` (§4g). From the second run on, the base IS
+last week's marked workbook with ECAP's Present/Absent columns in it; copying
+the pristine snapshot over that would wipe every mark the freeze exists to
+protect. `tests/test_ecap.py` pins it.
+
+**Batch codes carry the programme.** ECAP B1 is 206 people; CAP B1 is 3,985.
+They are different cohorts of different programmes that happen to share a
+number, so `data.batch_label` returns `ECAP B1` where CAP keeps its bare `B29`,
+and `dashboard_core._clean_batch_name` must return the SAME string — when those
+two drift the store writes `grid_<one>` and the dashboard looks up `<the
+other>`. A test compares them directly. Every CAP label is unchanged, so
+nothing published before today changes name and GATE 6 still compares like with
+like.
+
+**`dashboard_core.batch_key` offsets ECAP by 10,000** rather than returning a
+tuple: every caller treats it as an int, including
+`DataFrame.sort_values(key=...)`, where a tuple would change the dtype. The
+effect is that ECAP sorts after every CAP batch instead of ECAP B1 filing next
+to CAP B1 as though they were a week apart.
+
+**Shared rooms already work.** `2026-09-20 - AI CAP B30 , ECAP B1 & B2` is one
+webinar two programmes sat in; `extract_batches` has always returned both. The
+one addition is that `[4/8]`'s `roster_tabs` now matches ECAP tabs too, so
+`polls.apply_roster_split` can divide that room's poll across all three
+rosters instead of handing each the joint figure (§4e).
+
+**Known and deliberate:**
+
+- **No POD breakdown.** ECAP has no POD prefixes in the LMS, so the tabs carry
+  no `POD Prefrence` column and the By-domain table stays empty for them —
+  exactly as B17-B34 behave.
+- **ECAP B4 is excluded** (26 people). It starts 2026-06-26, a day BEFORE B3:
+  ECAP batch numbers are NOT in start-date order, so anything keyed on "higher
+  number = younger cohort" — `forecast`'s decay curve, `recap`'s residual —
+  would read it wrong. Adding it is one more tab plus that question answered.
+- **12 people are enrolled in all three ECAP batches** and are counted in each,
+  the same treatment a CAP student enrolled twice already gets.
 
 ## 5. Invariants — break these and the numbers go silently wrong
 

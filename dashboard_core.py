@@ -34,9 +34,17 @@ def _is_active(payment) -> bool:
 
 
 def batch_key(name: str) -> int:
-    """Natural sort key: 'B17' -> 17, 'AI CAP B7' -> 7."""
-    m = re.sub(r"\D", "", str(name))
-    return int(m) if m else 0
+    """Natural sort key: 'B17' -> 17, 'AI CAP B7' -> 7, 'ECAP B1' -> 10001.
+
+    ECAP is offset past every CAP batch instead of interleaving with it: the
+    two programmes number their cohorts independently, so ECAP B1 is not a
+    sibling of CAP B1. An OFFSET rather than a tuple because every caller -
+    including `DataFrame.sort_values(key=...)` - treats this as an int.
+    """
+    n = re.sub(r"\D", "", str(name))
+    n = int(n) if n else 0
+    s = str(name).lower()
+    return n + 10000 if ("ecap" in s or "e-cap" in s) else n
 
 
 # How wide these readers look. Kept as named constants because they are a real
@@ -200,7 +208,7 @@ def compute(roster_bytes: bytes, tabs: dict | None = None) -> pd.DataFrame:
                     if act:
                         p_active[k] += 1
 
-        bn = sh.replace("AI CAP", "").replace("AICAP", "").strip()
+        bn = _clean_batch_name(sh)
         for k, (c, lbl, topic) in enumerate(sess_cols):
             has_data = p_all[k] > 0
             records.append(
@@ -229,7 +237,14 @@ def compute(roster_bytes: bytes, tabs: dict | None = None) -> pd.DataFrame:
 
 
 def _clean_batch_name(sheet_name: str) -> str:
-    return sheet_name.replace("AI CAP", "").replace("AICAP", "").strip()
+    """'AI CAP B17' -> 'B17'; 'AI ECAP B1' -> 'ECAP B1'.
+
+    Must agree with `data.batch_label`, or the store's grid tables and the
+    dashboard's batch codes disagree about the same tab.
+    """
+    s = re.sub(r"^\s*ai\s*", "", str(sheet_name), flags=re.I)
+    s = re.sub(r"^\s*cap\s*", "", s, flags=re.I)
+    return s.strip()
 
 
 def batch_sheet_map(roster_bytes: bytes) -> dict:
