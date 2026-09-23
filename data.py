@@ -54,7 +54,12 @@ _MIN_PRESENT_FRAC = 0.01  # …and present > 1% of strength (drops broken near-e
 
 _MONTHS = ["", "Jan", "Feb", "Mar", "Apr", "May", "Jun",
            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
-_BATCH_RE = re.compile(r"^\s*ai\s*cap\s*(b\d+)\s*$", re.I)
+# Group 1 is the PROGRAMME marker: present for ECAP, absent for CAP. ECAP
+# ("AI Engineering Career Accelerator Program") is a different programme
+# sharing this pipeline's L2 and Drives, and its B1 is 206 people where
+# CAP's B1 is 3,985 - so the code carries the programme and the two can
+# never collide on a bare number. See ecap.py.
+_BATCH_RE = re.compile(r"^\s*ai\s*(e\s*-?\s*)?cap\s*(b\d+)\s*$", re.I)
 
 
 # ── tiny helpers ──────────────────────────────────────────────────────────────
@@ -93,12 +98,21 @@ def normalize_closing(raw) -> str:
 
 
 def batch_label(tab: str) -> str | None:
-    """Roster tab name -> batch label ('AI CAP B17' -> 'B17'); None for non-batch
-    tabs and the Zoom '*Att' helper tabs."""
+    """Roster tab name -> batch label; None for non-batch and '*Att' helper tabs.
+
+        'AI CAP B17'  -> 'B17'
+        'AI ECAP B1'  -> 'ECAP B1'
+
+    CAP keeps the bare number it has always had, so nothing published before
+    today changes name. ECAP carries its programme, because the two number
+    their cohorts independently.
+    """
     if "att" in tab.lower():
         return None
     m = _BATCH_RE.match(tab)
-    return m.group(1).upper() if m else None
+    if not m:
+        return None
+    return ("ECAP " if m.group(1) else "") + m.group(2).upper()
 
 
 def date_label(mm: str | None) -> str | None:
@@ -631,7 +645,10 @@ def build(sheets: dict[str, list[list]], l2_lookup: dict | None = None,
         if bd:
             data[b] = bd
 
-    order = sorted(data, key=lambda b: int(re.sub(r"\D", "", b) or 0))
+    # ECAP after every CAP batch rather than interleaved: two programmes
+    # numbering from 1 would otherwise put ECAP B1 next to CAP B1.
+    order = sorted(data, key=lambda b: ("ecap" in b.lower(),
+                                        int(re.sub(r"\D", "", b) or 0)))
     data = {b: data[b] for b in order}
     summary = {
         "batches": len(data),

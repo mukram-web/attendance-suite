@@ -85,8 +85,8 @@ HEADERS = ["Contry code", "Registered Number", "Registered mail", "Contry code",
 
 N_FIXED = len(HEADERS)
 
-# API value -> the spelling the roster uses, validated against B38 by the parent
-# folder's cmp_values.py. 'none' maps to blank deliberately: `data.is_active`
+# API value -> the spelling the roster uses, validated cell by cell against
+# B38, 2026-09-11. 'none' maps to blank deliberately: `data.is_active`
 # already treats blank as inactive, and inventing a value would be worse than an
 # empty cell. Both independent active-vocabularies (data._REFUND_TOKENS and
 # dashboard_core._REFUND_HINTS) classify these the same way —
@@ -185,8 +185,8 @@ def customer_row(c: dict, code: str, pod_name: str) -> list:
 def api_rows(code: str, records) -> tuple[list[list], list[str]]:
     """[(batch record, [customer, ...])] -> deduped roster rows + warnings.
 
-    One person can sit in two POD records; the first wins, exactly as the
-    parent folder's build_b40.py established.
+    One person can sit in two POD records; the first wins, as the B40
+    hand-build established on 2026-09-14.
     """
     rows: list[list] = []
     seen: dict[str, int] = {}

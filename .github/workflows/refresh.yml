@@ -15,6 +15,7 @@
 #   ROSTER_ID                    Master Batch Rosters sheet id
 #   L2_ID                        L2 schedule sheet id
 #   ATTENDEE_FOLDER_ID           Weekly Sessions shared-drive id
+#   ECAP_ROSTER_ID               optional - ECAP roster snapshot (ecap.py)
 #   STORE_FOLDER_ID              private Drive folder the store is uploaded to
 #                                (shared with the service account as Editor).
 #                                Also holds derived_facts.json.gz, the per-file
@@ -106,6 +107,10 @@ jobs:
           # owned outside the roster team, so it needs sharing with the service
           # account separately - a 403 here only disables the forecast.
           CURRICULUM_ID: ${{ secrets.CURRICULUM_ID }}
+          # Optional: a workbook of 'AI ECAP B<n>' roster tabs, grafted onto
+          # the CAP roster at step [1d] (ecap.py). Unset -> no ECAP batches,
+          # and every other number is byte-identical to before.
+          ECAP_ROSTER_ID: ${{ secrets.ECAP_ROSTER_ID }}
           # Off by default: the site carries NO student contact details until the
           # /roster login gate has been verified on a real deploy (SETUP_PIPELINE.md).
           PUBLISH_ROSTER: ${{ secrets.PUBLISH_ROSTER }}
