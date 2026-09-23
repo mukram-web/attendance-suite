@@ -60,6 +60,7 @@ def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False,
     import attendance_core as ac
     import ffa
     import pods
+    import polls as _polls
     if not l2_bytes or not attendee_files:
         if with_labels and with_mentors: return {}, {}, {}
         if with_mentors: return {}, {}
@@ -103,22 +104,38 @@ def webinar_topic_lookup(attendee_files, l2_bytes, with_labels=False,
         pod = pods.from_l2_label(raw) if raw else None
         pod = "" if pod in (None, pods.WHOLE_BATCH) else pod
         for _track, num in _keys:
+            # THE PROGRAMME IS PART OF THE KEY. This used to build a bare
+            # `f"B{num}"`, which is right for AI CAP and wrong for every other
+            # programme: an ECAP webinar filed its topic, label and mentor under
+            # "B1" while `data.batch_label` looked them up under "ECAP B1".
+            #
+            # It hid well. The date-only fallback below still found A topic, so
+            # `REQUIRE_L2` kept the sessions and the dashboard looked populated
+            # - with whichever CAP session happened to share that date. Measured
+            # 2026-09-23 on the first ECAP build: 62 of 72 ECAP sessions showed
+            # another batch's title. The Trainer column was the tell, because
+            # the mentor has NO date-only fallback and so went honestly blank.
+            #
+            # `polls.batch_label` is the one definition of this label, and it is
+            # what `data.batch_label`, `data.shared_batches` and
+            # `sessionmeta.lookup_by_session` already agree with.
+            _lbl = _polls.batch_label(_track, num)
             # Key on the POD ALWAYS, '' included. A whole-batch session sharing a
             # date with a domain session would otherwise take whichever topic was
             # seen first: B35's 16 Aug whole-batch row displayed the Techies
             # session's name and label.
-            lookup[(f"B{num}", mm, pod)] = topic
+            lookup[(_lbl, mm, pod)] = topic
             if raw:
-                labels[(f"B{num}", mm, pod)] = raw
+                labels[(_lbl, mm, pod)] = raw
             # Mentors key exactly like labels so a POD session shows ITS trainer,
             # not whichever of the day's eleven sessions was seen first.
             if who:
-                mentors[(f"B{num}", mm, pod)] = who
-            lookup.setdefault((f"B{num}", mm), topic)   # batch-specific fallback
+                mentors[(_lbl, mm, pod)] = who
+            lookup.setdefault((_lbl, mm), topic)   # batch-specific fallback
             if raw:
-                labels.setdefault((f"B{num}", mm), raw)
+                labels.setdefault((_lbl, mm), raw)
             if who:
-                mentors.setdefault((f"B{num}", mm), who)
+                mentors.setdefault((_lbl, mm), who)
         lookup.setdefault(mm, topic)                 # date-only fallback
         if raw:
             labels.setdefault(mm, raw)
