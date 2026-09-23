@@ -164,5 +164,64 @@ class TestOrdering(unittest.TestCase):
         self.assertEqual(list(DATA), ["B29", "ECAP B1"])
 
 
+class TestTopicAndTrainerLookup(unittest.TestCase):
+    """The programme has to be part of the topic/label/mentor key.
+
+    It was not, and the failure was almost invisible: the date-only fallback
+    still found A topic, so `REQUIRE_L2` kept every ECAP session and the page
+    looked full - of whichever CAP session shared that date. 62 of 72 ECAP
+    sessions carried another batch's title on the first build. Only the Trainer
+    column told the truth, because the mentor has no date-only fallback.
+    """
+
+    def _l2(self):
+        from openpyxl import Workbook
+        wb = Workbook()
+        wb.remove(wb.active)
+        ws = wb.create_sheet("Sep 2026")
+        ws.append(["Date", "Webinar ID", "Batch Name", "Topic Name", "Mentor"])
+        ws.append(["09/12/2026", "81489430961", "ECAP B1", "Cursor AI", "Rajat"])
+        ws.append(["09/12/2026", "91695866411", "AI CAP B29", "RAG beginner", "Amit"])
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def _files(self):
+        return [("2026-09-12 - ECAP B1/attendee_81489430961_2026_09_12.csv", b""),
+                ("2026-09-12 - AI CAP B29/attendee_91695866411_2026_09_12.csv", b"")]
+
+    def test_ecap_is_keyed_under_its_own_programme(self):
+        import sheets as dsheets
+        lookup, _labels, mentors = dsheets.webinar_topic_lookup(
+            self._files(), self._l2(), with_labels=True, with_mentors=True)
+        self.assertEqual(lookup.get(("ECAP B1", "09_12", "")), "Cursor AI")
+        self.assertEqual(mentors.get(("ECAP B1", "09_12", "")), "Rajat")
+
+    def test_it_does_NOT_leak_onto_cap_B1(self):
+        # The original bug: ECAP B1's row filed itself under "B1", which is AI
+        # CAP B1 - a different programme's 3,985-person cohort.
+        import sheets as dsheets
+        lookup, _labels, mentors = dsheets.webinar_topic_lookup(
+            self._files(), self._l2(), with_labels=True, with_mentors=True)
+        self.assertNotIn(("B1", "09_12", ""), lookup)
+        self.assertNotIn(("B1", "09_12", ""), mentors)
+
+    def test_cap_keys_are_unchanged(self):
+        import sheets as dsheets
+        lookup, _labels, mentors = dsheets.webinar_topic_lookup(
+            self._files(), self._l2(), with_labels=True, with_mentors=True)
+        self.assertEqual(lookup.get(("B29", "09_12", "")), "RAG beginner")
+        self.assertEqual(mentors.get(("B29", "09_12", "")), "Amit")
+
+    def test_the_key_matches_what_data_looks_up_with(self):
+        # The two sides of the same join, compared directly - this is the
+        # assertion that would have failed on the first ECAP build.
+        import sheets as dsheets
+        lookup = dsheets.webinar_topic_lookup(self._files(), self._l2())
+        for tab in ("AI ECAP B1", "AI CAP B29"):
+            code = ddata.batch_label(tab)
+            self.assertIn((code, "09_12", ""), lookup, tab)
+
+
 if __name__ == "__main__":
     unittest.main()
