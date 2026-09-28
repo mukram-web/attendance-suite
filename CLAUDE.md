@@ -825,6 +825,66 @@ rosters instead of handing each the joint figure (§4e).
 - **12 people are enrolled in all three ECAP batches** and are counted in each,
   the same treatment a CAP student enrolled twice already gets.
 
+### 4k. The L2 gate — a session is added only on the date L2 registers it (added 2026-09-28)
+
+**Owner's rule (2026-09-28, verbatim): "only add sessions which are in L2 sheet"
+and "leave 25th sept".** §5.6 already drops a webinar L2 does not list — by
+webinar id. This adds the DATE, and it is needed because the "Zoom extracts"
+drive sometimes exports a session into a folder AND filename dated one day
+early. On the 26-27 Sep 2026 weekend 14 files were named
+`attendee_<wid>_2026_09_25.csv`: 11 were day-early twins of a webinar whose
+correct `_2026_09_26` export also exists, 3 were rooms L2 never registered (a
+walkthrough, a Telegram broadcast, a BSI room). `_parse_filename` takes the
+session date from the FILENAME, so an unfiltered run mints a phantom Friday
+column beside the real Saturday one — and the poll and duration passes, which
+tie-break on webinar id alone, let a twin hijack the real session's rating and
+duration.
+
+**One register, one predicate, four choke points, new sessions only.**
+
+- **Register:** `attendance_core.l2_dates(l2_bytes)` → `{webinar id: {'YYYY_MM_DD', …}}`,
+  the sibling of `parse_l2` for the one column it ignores, plus `ffa.py`'s
+  hand-kept (webinar, date) entries (L2 never carries an FFA id, §4i — without
+  them the gate would drop every FFA export). The date column is **column A on
+  every tab** whatever its header says (`Date`, ` `, `[`, nothing); September
+  2026 carries a SECOND unrelated `Date` header at column 32, so a `Date`
+  header binds on first match only and only left of `Batch Name`. Dates are
+  **forward-filled** (blank = the row above's date); any other non-blank cell
+  that is not a date — `1st Week.`, `US`, `Mid Week session`, a bare `23rd` —
+  ends the block and the rows under it have no date until the next real one.
+  Forms parsed: real datetimes, `2026-09-26`, `9/26/2026`, `26th September`,
+  `27 September`, `23rd Feb, Sunday`, `September 26`; the year of a word form
+  is the tab's (`Sep 2025`), with the Dec/Jan wrap. **Anything else is "no
+  date", never a guess** — a webinar with no parseable date is still in the
+  register (empty set) and passes, because "in L2" is the rule and the date is
+  the tightening.
+- **Predicate:** `live_data.l2_gate_reason(name, l2_dates, exempt_dates)` reads
+  (wid, date) from the filename with the two regexes that already exist
+  (`attendance_core._parse_filename`, `polls.name_key`) and answers None
+  (pass) or why: `not in L2`, or `L2 has it on 2026_09_26` (the twin). A name
+  with no webinar id passes — there is nothing to judge.
+- **Scope = NEW SESSIONS ONLY.** `live_data.marked_dates(base_bytes)` is every
+  date already a marked column anywhere in the base workbook; a file dated
+  inside it is exempt, so no historical column, rating, duration or topic can
+  move. Under `--incremental` that is all of history. Under a full rebuild only
+  the legacy hand-typed B17–B28 columns are exempt, so the gate then applies
+  to every export — which is what a rebuild from L2's register should do, but
+  it means a historical session whose L2 date is wrong loses its column there.
+- **Choke points:** `fetch_new_attendees` (over the returned files AND
+  `download_errors` / `bad_zips`, so a failure on a dropped file cannot trip the
+  refuse-to-publish gate; `listing_errors` stay fatal), `list_attendees`,
+  `list_polls`, `list_attendee_names`. `pipeline.py` builds the register once
+  before `[2/8]` and threads it to `[5a]`, `[5a2]` and `[6/8]`. Every one of
+  these defaults to **no gate** (`l2_dates=None`), which is what the app's
+  legacy live-fetch path still passes.
+- **Every drop is logged by name**, per stage:
+  `[L2 gate: fetch] 14 file(s) not registered on their date, dropped:
+  attendee_91441005879_2026_09_25.csv (L2 has it on 2026_09_26); …`. Silent
+  dropping is the failure mode this repository refuses (§5.10).
+
+`tests/test_l2_gate.py` pins all four, and a regression over the real L2
+workbook: 24 webinars registered on 2026_09_26, 29 on 2026_09_27.
+
 ## 5. Invariants — break these and the numbers go silently wrong
 
 1. **Locate roster columns by HEADER TEXT, never by fixed letter** (see §4).

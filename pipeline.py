@@ -964,11 +964,31 @@ def main() -> None:
                 f"missing from this build.")
             print(f"   WARNING: {e} — continuing without ECAP.", flush=True)
 
+    # THE L2 GATE (owner, 2026-09-28: "only add sessions which are in L2
+    # sheet", "leave 25th sept"). The Zoom extracts drive sometimes exports a
+    # session into a folder and filename dated one day early, and the filename
+    # is where the session date comes from, so an unfiltered run mints a
+    # phantom Friday column beside the real Saturday one (14 such files on the
+    # 26-27 Sep weekend, 11 of them twins of a webinar whose correct export
+    # also exists). One register - L2's own dates plus ffa.py's - and one
+    # predicate, live_data.l2_gate_reason, applied at every listing: the fetch
+    # here, the polls at [5a], the durations at [5a2], the topic names at
+    # [6/8]. NEW sessions only: a file dated on a day the base workbook already
+    # has a marked column for is exempt, so nothing published can move. The
+    # exemption set comes back from the fetch, which reads the base anyway.
+    l2_reg = ac.l2_dates(l2_bytes) if l2_bytes else None
+
     print("[2/8] Fetching attendee reports (new sessions only) …", flush=True)
+    if l2_reg is not None:
+        print(f"   L2 gate on: {sum(1 for v in l2_reg.values() if v)} webinar(s) "
+              f"registered with a date, {sum(1 for v in l2_reg.values() if not v)} "
+              "listed without one (those pass)", flush=True)
     attendee_files, info = live_data.fetch_new_attendees(
-        svc, cfg["attendee_folder_id"], base_bytes)
+        svc, cfg["attendee_folder_id"], base_bytes, l2_dates=l2_reg)
+    l2_exempt = info.get("marked_dates") or set()
     print(f"   {info['files']} file(s) from {info['new_folders']} folder(s), "
-          f"{info['failed']} failed, {info['skipped_no_sheet']} without a roster tab")
+          f"{info['failed']} failed, {info['skipped_no_sheet']} without a roster tab, "
+          f"{info.get('l2_gate_dropped', 0)} dropped by the L2 gate")
 
     # Publishing a store built from partial data would overwrite a COMPLETE one
     # and the job would still go green — so refuse. Re-running picks up whatever
@@ -1119,7 +1139,8 @@ def main() -> None:
     ratings, ratings_by_wid = {}, {}
     # The LISTING runs outside the try: it is the change detector, and a failure
     # to enumerate must not degrade quietly to "no polls this week".
-    _pl = live_data.list_polls(svc, cfg["attendee_folder_id"])
+    _pl = live_data.list_polls(svc, cfg["attendee_folder_id"],
+                               l2_dates=l2_reg, exempt_dates=l2_exempt)
     try:
         _prows, _pstat = [], {"hit": 0, "miss": 0}
         _pneed = []
@@ -1220,7 +1241,8 @@ def main() -> None:
     # blow up on a small instance.
     print("[5a2] Session duration & peak ...", flush=True)
     session_meta = {}
-    _al = live_data.list_attendees(svc, cfg["attendee_folder_id"])
+    _al = live_data.list_attendees(svc, cfg["attendee_folder_id"],
+                                   l2_dates=l2_reg, exempt_dates=l2_exempt)
     try:
         _mrows, _mstat = [], {"hit": 0, "miss": 0}
         _mneed = []
@@ -1306,7 +1328,8 @@ def main() -> None:
         print("[5c] Forecast skipped (no CURRICULUM_ID configured)", flush=True)
 
     print("[6/8] Building the DuckDB store …", flush=True)
-    names = live_data.list_attendee_names(cfg["attendee_folder_id"])
+    names = live_data.list_attendee_names(cfg["attendee_folder_id"],
+                                          l2_dates=l2_reg, exempt_dates=l2_exempt)
     source = (f"Google Drive — roster, {info['files']} file(s) from "
               f"{info['new_folders']} new session(s)")
     os.makedirs(os.path.join(HERE, ".cache"), exist_ok=True)

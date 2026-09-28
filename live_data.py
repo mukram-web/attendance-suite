@@ -261,13 +261,17 @@ def _list_children(svc, folder_id: str) -> list[dict]:
     return items
 
 
-def list_attendee_names(folder_id: str | None = None) -> list:
+def list_attendee_names(folder_id: str | None = None, l2_dates=None,
+                        exempt_dates=None) -> list:
     """All attendee filenames across the Shared Drive — names only, no downloads.
 
     One Drive query (`name contains 'attendee_'`) over the whole Shared Drive, so
     it's fast even with 500+ session folders. The filenames carry the Webinar ID
     and date, which is all the dashboard's topic join needs. Falls back to a
     recursive name-only walk for a plain (non-Shared-Drive) folder.
+
+    `l2_dates` / `exempt_dates` apply the L2 gate to the names (l2_gate_reason);
+    the default is no gate, which is what the app's legacy path passes.
     """
     fid = folder_id
     if fid is None:
@@ -299,7 +303,11 @@ def list_attendee_names(folder_id: str | None = None) -> list:
                     elif "attendee" in c["name"].lower():
                         names.append(c["name"])
             walk(one)
-    return names
+    # The topic join keys on webinar id alone, so a day-early twin here would
+    # only hand the real session its own topic - but a room L2 never
+    # registered would still be offered a name. Same gate, same scope.
+    return apply_l2_gate(names, l2_dates, exempt_dates, stage="attendee names",
+                         name_of=lambda n: n)[0]
 
 
 def find_in_folder(svc, folder_id: str, name: str) -> dict | None:
@@ -545,8 +553,149 @@ def dedupe_by_webinar(files):
     return out + [best[k] for k in order]
 
 
+# ---------------- The L2 gate ----------------
+# Owner's rule, 2026-09-28: "only add sessions which are in L2 sheet" and
+# "leave 25th sept". The "Zoom extracts" drive sometimes exports a session into
+# a folder AND filename dated one day early. On the 26-27 Sep 2026 weekend 14
+# files were named attendee_<wid>_2026_09_25.csv: 11 were day-early twins of a
+# webinar whose correct _2026_09_26 export also exists, 3 were rooms L2 never
+# registered (a walkthrough, a Telegram broadcast, a BSI room).
+# attendance_core._parse_filename takes the session DATE from the filename, so
+# an unfiltered run mints a phantom Friday column beside the real Saturday one;
+# and the poll and duration passes, which tie-break on webinar id alone, let a
+# twin hijack the real session's rating and duration.
+#
+# ONE register (attendance_core.l2_dates: L2's own dates plus ffa.py's), ONE
+# predicate (l2_gate_reason), applied at every listing choke point - the fetch,
+# list_attendees, list_polls, list_attendee_names - and scoped to NEW sessions
+# only: a file dated on a day the base workbook already has a marked column for
+# is exempt, so no historical column, rating, duration or topic can move. Every
+# drop is logged by name (apply_l2_gate); silent dropping is not acceptable.
+# Every entry point defaults to NO gate, so the Streamlit live-fetch path and
+# every caller that never learned the new arguments behave exactly as before.
+
+
+def _dates_of(existing: dict) -> set:
+    """{date} over every session key in an `_existing_sessions` map: the full
+    'YYYY_MM_DD' from marker-written headers and the year-blind 'MM_DD' from
+    legacy hand-typed ones, exactly as `folder_keys` matches them."""
+    return {sk[0] for keys in existing.values() for sk in keys if sk and sk[0]}
+
+
+def marked_dates(roster_bytes: bytes) -> set:
+    """Every session date already marked ANYWHERE in the workbook: the gate's
+    exemption set. Anywhere, not per batch, because the point is that nothing
+    already published may move, and a date one batch has a column for is a
+    weekend that has already been loaded."""
+    return _dates_of(_existing_sessions(roster_bytes))
+
+
+def _name_wid_date(name):
+    """(webinar id, date) a filename states, or None when it carries no webinar id.
+
+    The two conventions already in the codebase, REUSED rather than re-written:
+    `attendance_core._parse_filename` for attendee_<wid>_<YYYY>_<MM>_<DD>, and
+    `polls.name_key` for the two poll spellings. name_key returns a year-blind
+    'MM_DD', so the year is read back with `attendance_core._ymd`; a poll name
+    written without one is judged on 'MM_DD' alone.
+    """
+    import attendance_core as ac
+    import polls
+    base = str(name).rsplit("/", 1)[-1]
+    got = ac._parse_filename(base)
+    if got:
+        return got
+    k = polls.name_key(base)
+    if not k:
+        return None
+    wid, d = k[0], str(k[1])
+    ymd = ac._ymd(base)
+    return wid, (ymd if ymd and ymd.endswith(d[-5:]) else d)
+
+
+def _date_in(d: str, dates) -> bool:
+    """Is a file's date among these? Full dates compare exactly; a legacy
+    'MM_DD' on either side compares year-blind, as `session_key` does."""
+    if not dates:
+        return False
+    if d in dates:
+        return True
+    if len(d) == 5:                                    # 'MM_DD' from the file
+        return any(x.endswith(d) for x in dates)
+    return d[5:] in dates                              # 'MM_DD' in the workbook
+
+
+def l2_gate_reason(name, l2_dates, exempt_dates=None):
+    """Why the L2 gate drops this file, or None when it may be used.
+
+    Passes: a name with no webinar id (nothing to judge); a date already
+    marked in the base workbook (`exempt_dates` - history is never touched);
+    a webinar L2 registers ON that date; a webinar L2 registers with no
+    parseable date at all (in L2, nothing to judge it on).
+
+    Drops: a webinar L2 does not list ("not in L2"); a webinar L2 lists on a
+    DIFFERENT date only, the day-early twin ("L2 has it on 2026_09_26").
+
+    `l2_dates=None` means no gate at all, never "nothing is registered".
+    """
+    if l2_dates is None:
+        return None
+    got = _name_wid_date(name)
+    if got is None:
+        return None
+    wid, d = got
+    if _date_in(d, exempt_dates):
+        return None
+    dates = l2_dates.get(wid)
+    if dates is None:
+        return "not in L2"
+    if not dates or _date_in(d, dates):
+        return None
+    return "L2 has it on " + ", ".join(sorted(dates))
+
+
+def l2_registered(name, l2_dates, exempt_dates=None) -> bool:
+    """The gate as a predicate: True when the file may be used."""
+    return l2_gate_reason(name, l2_dates, exempt_dates) is None
+
+
+def _gate_log(msg):
+    print(msg, flush=True)
+
+
+def apply_l2_gate(items, l2_dates, exempt_dates=None, stage="", name_of=None,
+                  log=_gate_log):
+    """Filter `items` through the gate and LOG every drop by name.
+
+    `items` may be (path, bytes) tuples, listing dicts with a 'name', or bare
+    names; `name_of` overrides how the name is read. Returns
+    (kept, [(filename, reason), ...]). With `l2_dates=None` nothing is
+    filtered and nothing is printed."""
+    if l2_dates is None:
+        return list(items), []
+    if name_of is None:
+        def name_of(it):
+            return it["name"] if isinstance(it, dict) else (
+                it if isinstance(it, str) else it[0])
+    kept, dropped = [], []
+    for it in items:
+        n = name_of(it)
+        why = l2_gate_reason(n, l2_dates, exempt_dates)
+        if why is None:
+            kept.append(it)
+        else:
+            dropped.append((str(n).rsplit("/", 1)[-1], why))
+    if dropped and log:
+        log(f"[L2 gate{(': ' + stage) if stage else ''}] {len(dropped)} file(s) not "
+            f"registered on their date, dropped: "
+            + "; ".join(f"{n} ({why})" for n, why in dropped))
+    return kept, dropped
+
+
 def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
-                        mark_all: bool = False, max_workers: int = 8):
+                        mark_all: bool = False, max_workers: int = 8,
+                        l2_dates: dict | None = None,
+                        exempt_dates: set | None = None):
     """Download attendee files only for sessions NOT already marked in the roster.
 
     The Shared Drive holds the full history (hundreds of dated session folders),
@@ -559,6 +708,12 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     A session is identified by `attendance_core.session_key` — (date, POD) —
     because from B35 one date carries up to eleven sessions and keying on the
     date alone meant marking any one POD suppressed the other ten.
+
+    `l2_dates` (attendance_core.l2_dates) switches on the L2 gate - see
+    l2_gate_reason - over the returned files AND the failure lists, for new
+    sessions only: `exempt_dates` defaults to every date already marked in
+    this workbook, which `info['marked_dates']` also returns so later
+    listings can share the same scope. None (the default) means no gate.
     """
     import io as _io
     import zipfile
@@ -626,9 +781,8 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     #    sink the whole batch; the 60s socket timeout caps any single request).
     #    Bytes are disk-cached by file id, so only never-seen files hit the network.
     out: list[tuple[str, bytes]] = []
-    failed = 0
-    bad_zips: list[str] = []
-    download_errors: list[str] = []
+    _dl_failed: list[tuple[str, str]] = []    # (path, error); strings built after the gate
+    _zip_failed: list[tuple[str, str]] = []
     if entries:
         try:
             os.makedirs(_CACHE_DIR, exist_ok=True)
@@ -658,8 +812,7 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
         with ThreadPoolExecutor(max_workers=min(max_workers, len(entries))) as ex:
             for path, fid, is_zip, data, err in ex.map(_dl, entries):
                 if data is None:
-                    failed += 1
-                    download_errors.append(f"{path}: {err}")
+                    _dl_failed.append((path, err))
                     continue
                 if is_zip:
                     # A corrupt / password-protected / non-attendee .zip must not
@@ -672,8 +825,7 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
                                         for inner in z.namelist()
                                         if not inner.endswith("/")]
                     except Exception as e:
-                        failed += 1
-                        bad_zips.append(f"{path}: {e}")
+                        _zip_failed.append((path, str(e)))
                         try:
                             os.remove(os.path.join(_CACHE_DIR, fid))
                         except OSError:
@@ -690,10 +842,30 @@ def fetch_new_attendees(svc, folder_id: str, roster_bytes: bytes,
     out = dedupe_by_webinar(out)
     dropped_dupes = _n_raw - len(out)
 
-    info = dict(new_folders=len(to_fetch), files=len(out), failed=failed,
+    # THE L2 GATE - see l2_gate_reason. NEW sessions only: a file whose date is
+    # already a marked column anywhere in this workbook is exempt, so the gate
+    # can never move a published column. A download that failed on a file the
+    # gate would have dropped anyway must not trip the refuse-to-publish check
+    # in pipeline.py, so the failure lists go through the same gate. A folder
+    # that could not be LISTED stays fatal: nothing is known about what it held.
+    marked = _dates_of(existing)
+    if exempt_dates is None:
+        exempt_dates = marked
+    out, gated = apply_l2_gate(out, l2_dates, exempt_dates, stage="fetch")
+    _dl_failed, _g2 = apply_l2_gate(_dl_failed, l2_dates, exempt_dates,
+                                    stage="fetch, failed downloads")
+    _zip_failed, _g3 = apply_l2_gate(_zip_failed, l2_dates, exempt_dates,
+                                     stage="fetch, unreadable zips")
+    gated += _g2 + _g3
+    download_errors = [f"{p}: {e}" for p, e in _dl_failed]
+    bad_zips = [f"{p}: {e}" for p, e in _zip_failed]
+
+    info = dict(new_folders=len(to_fetch), files=len(out),
+                failed=len(download_errors) + len(bad_zips),
                 skipped_already_marked=skipped_done, skipped_no_sheet=skipped_nosheet,
                 listing_errors=listing_errors, bad_zips=bad_zips,
-                download_errors=download_errors, duplicate_copies=dropped_dupes)
+                download_errors=download_errors, duplicate_copies=dropped_dupes,
+                l2_gate=gated, l2_gate_dropped=len(gated), marked_dates=marked)
     return out, info
 
 
@@ -737,14 +909,22 @@ def _list_by_query(svc, folder_id, q) -> list[dict]:
     return files
 
 
-def list_attendees(svc, folder_id) -> list[dict]:
-    """Every attendee report on every configured drive (listing only)."""
-    return _list_by_query(svc, folder_id, _ATTENDEE_Q)
+def list_attendees(svc, folder_id, l2_dates=None, exempt_dates=None) -> list[dict]:
+    """Every attendee report on every configured drive (listing only).
+
+    With `l2_dates` the L2 gate is applied to the listing (l2_gate_reason):
+    these rows feed the duration/peak pass, which tie-breaks on webinar id
+    alone, so a day-early twin left in here hijacks the real session's
+    duration. Files dated inside `exempt_dates` pass untouched."""
+    files = _list_by_query(svc, folder_id, _ATTENDEE_Q)
+    return apply_l2_gate(files, l2_dates, exempt_dates, stage="attendee listing")[0]
 
 
-def list_polls(svc, folder_id) -> list[dict]:
-    """Every poll export on every configured drive (listing only)."""
-    return _list_by_query(svc, folder_id, _POLL_Q)
+def list_polls(svc, folder_id, l2_dates=None, exempt_dates=None) -> list[dict]:
+    """Every poll export on every configured drive (listing only). Gated like
+    list_attendees: the poll reader also tie-breaks on webinar id alone."""
+    files = _list_by_query(svc, folder_id, _POLL_Q)
+    return apply_l2_gate(files, l2_dates, exempt_dates, stage="poll listing")[0]
 
 
 def _sig_path(f: dict) -> tuple[str, bool]:

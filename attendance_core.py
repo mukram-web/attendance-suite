@@ -235,6 +235,156 @@ def parse_l2(l2_bytes, with_labels=False, with_mentors=False):
     return (out, labels) if with_labels else out
 
 
+# ---------------- L2 dates: the register, BY DATE ----------------
+# `parse_l2` deliberately ignores the date column. The gate in
+# `live_data.l2_gate_reason` cannot: the "Zoom extracts" drive sometimes exports
+# a session into a folder AND filename dated one day early, and
+# `_parse_filename` takes the session date from the filename, so a day-early
+# twin of a real Saturday export mints a phantom Friday column beside it. The
+# 26-27 Sep 2026 weekend had 14 such files: 11 twins of a webinar whose correct
+# export also exists, 3 rooms L2 never registered. Owner's rule, 2026-09-28:
+# "only add sessions which are in L2 sheet". Membership is therefore
+# (webinar, DATE), and this is where the date comes from.
+_MONTHS3 = dict(jan=1, feb=2, mar=3, apr=4, may=5, jun=6,
+                jul=7, aug=8, sep=9, oct=10, nov=11, dec=12)
+
+
+def _month_no(word):
+    """'September', 'Sept', 'sep' -> 9; a word that is not a month -> None."""
+    return _MONTHS3.get(str(word or '')[:3].lower())
+
+
+def _tab_year_month(title):
+    """'Sep 2025' | 'Feb2025' | ' June 2025' -> (2025, 9 | 2 | 6); no year -> (None, None)."""
+    s = str(title or '')
+    m = re.search(r'(20\d\d)', s)
+    if not m:
+        return None, None
+    mw = re.search(r'[A-Za-z]{3,}', s)
+    return int(m.group(1)), (_month_no(mw.group(0)) if mw else None)
+
+
+def _safe_ymd(y, mo, d):
+    try:
+        return _ymd(datetime.date(y, mo, d))
+    except (TypeError, ValueError):
+        return None
+
+
+def l2_cell_date(v, tab_year=None, tab_month=None):
+    """One L2 date cell -> 'YYYY_MM_DD', or None when it does not state a date.
+
+    Forms met across the 20 monthly tabs: a real datetime (Jun 2026 on); an
+    ISO-ish string; 'm/d/yyyy'; '26th September', '2nd  Aug', '23rd Feb,
+    Sunday', '18th April Saturday', '26th Oct Morning 11 AM', '27 September';
+    and 'September 26'. Month names match on their first three letters.
+
+    The word forms carry no year, so it is the TAB's ('Sep 2025'), with the one
+    wrap that is not a guess: a December date in a January tab is the year
+    before, a January date in a December tab the year after. Everything else
+    that is not a date - '1st Week.', 'US', 'Mid Week session', a bare '23rd',
+    a word date on a tab with no year in its name - is None. Nothing is
+    guessed, because a wrong date here drops a real session at the gate.
+    """
+    if v is None:
+        return None
+    if isinstance(v, (datetime.datetime, datetime.date)):
+        return _ymd(v)
+    s = str(v).strip()
+    if not s:
+        return None
+    got = _ymd(s)
+    if got:
+        return got
+    m = re.search(r'(?<!\d)(\d{1,2})/(\d{1,2})/(20\d\d)(?!\d)', s)
+    if m:
+        a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if a > 12 >= b:                      # '26/9/2026' can only be d/m/y
+            a, b = b, a
+        return _safe_ymd(y, a, b)
+    day = mon = None
+    for m in re.finditer(r'(?<!\d)(\d{1,2})\s*(?:st|nd|rd|th)?\s*([A-Za-z]{3,})', s, re.I):
+        if _month_no(m.group(2)):
+            day, mon = int(m.group(1)), _month_no(m.group(2))
+            break
+    if not day:
+        for m in re.finditer(r'([A-Za-z]{3,})\s*(\d{1,2})(?:st|nd|rd|th)?(?!\d)', s, re.I):
+            if _month_no(m.group(1)):
+                day, mon = int(m.group(2)), _month_no(m.group(1))
+                break
+    if not day or tab_year is None:
+        return None
+    year = tab_year
+    if tab_month == 1 and mon == 12:
+        year -= 1
+    elif tab_month == 12 and mon == 1:
+        year += 1
+    return _safe_ymd(year, mon, day)
+
+
+def l2_dates(l2_bytes, with_ffa=True) -> dict:
+    """webinar_id -> {'YYYY_MM_DD', ...}: every date L2 registers that webinar on.
+
+    The sibling of `parse_l2` for the one column it ignores. Same tabs, same
+    header search, same `_wid`; the addition is the date column, which is
+    COLUMN A on every tab since Feb 2025 whatever its header says ('Date',
+    ' ', '[' or nothing at all). A tab can also carry a SECOND, unrelated
+    'Date' header (September 2026: column 32), so a 'Date' header binds on its
+    FIRST match only, and only when it sits left of 'Batch Name'; otherwise
+    the date column is A.
+
+    Dates are forward-filled: written once at the top of a day's block, blank
+    on the rows below. Any other non-blank cell that is not a date - a section
+    header like '1st Week.', 'US', 'Mid Week session', a bare '23rd' - ENDS the
+    block: rows under it have no date until the next real one. A real date
+    always follows on the next row, and inheriting the block above would date
+    those rows a day wrong, which is exactly the error this exists to catch.
+
+    A webinar can legitimately sit on two dates (it gets both). A webinar
+    whose rows state no parseable date is still IN the register, with an
+    empty set: the gate then has nothing to judge it on and lets it through,
+    because "in L2" is the owner's rule and the date is the tightening.
+
+    `with_ffa` folds in ffa.py's hand-kept (webinar, date) register: L2 never
+    carries an FFA webinar id (0 of 104 rows, §4i), so without it the gate
+    would drop every FFA export as unregistered.
+    """
+    wb = load_workbook(io.BytesIO(l2_bytes), data_only=True)
+    out: dict = {}
+    for ws in wb.worksheets:
+        bcol = wcol = hrow = None
+        for r in range(1, min(ws.max_row or 1, 6) + 1):
+            for c in range(1, (ws.max_column or 1) + 1):
+                v = str(ws.cell(r, c).value or '').strip().lower()
+                if v == 'batch name' and not bcol:
+                    bcol, hrow = c, r
+                elif v == 'webinar id' and not wcol:
+                    wcol = c
+            if bcol and wcol:
+                break
+        if not (bcol and wcol and hrow):
+            continue
+        dcol = next((c for c in range(1, bcol)
+                     if str(ws.cell(hrow, c).value or '').strip().lower() == 'date'), 1)
+        year, month = _tab_year_month(ws.title)
+        current = None
+        for r in range(hrow + 1, (ws.max_row or hrow) + 1):
+            raw = ws.cell(r, dcol).value
+            if raw is not None and str(raw).strip():
+                current = l2_cell_date(raw, year, month)
+            wid = _wid(ws.cell(r, wcol).value)
+            if not wid:
+                continue
+            dates = out.setdefault(wid, set())
+            if current:
+                dates.add(current)
+    if with_ffa:
+        import ffa
+        for s in ffa.sessions():
+            out.setdefault(ffa._norm_wid(s['wid']), set()).add(ffa._norm_ymd(s['ymd']))
+    return out
+
+
 def l2_mentor_types(l2_bytes) -> tuple:
     """({mentor name -> 'In-house'|'Freelance'}, {name: {raw: n}} for conflicts).
 
