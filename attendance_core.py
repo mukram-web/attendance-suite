@@ -744,7 +744,8 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
             # column (pod='') the marker marks the whole batch and data.py
             # narrows it to everyone those rooms did not invite, so their
             # members are not this room's and must not count as crossed.
-            day_pods = {k[2] for k in acc if k[0] == sheet and k[1] == mm and k[2]}
+            day_pods = {m for k in acc if k[0] == sheet and k[1] == mm
+                        for m in pods.members(k[2])}
             for r in range(hr + 1, (ws.max_row or hr) + 1):
                 # A POD session is only for that POD. Marking everyone else
                 # 'Absent' is simply false - they were never invited - and it put
@@ -756,7 +757,9 @@ def process_files(roster_bytes, l2_bytes, attendee_files, mode='exact', values_o
                     _row_pod = _row_pod or pods.UNKNOWN
                 if pod and pc:
                     rp = _row_pod
-                    if rp != pod:
+                    # `members`: a compound room ('Sales/Marketing/HR +
+                    # Content Creators') is for BOTH its PODs.
+                    if rp not in pods.members(pod):
                         # still worth knowing if they turned up
                         e0 = _cell_email(ws.cell(r, rm).value) if rm else ''
                         p0 = _cell_phone(ws.cell(r, rn).value) if rn else ''

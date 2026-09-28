@@ -181,6 +181,18 @@ def wide_people(people, q_overall="What was your overall session feedback?",
     return "\n".join(out)
 
 
+def wide_full(people, q_overall="What was your overall session feedback?",
+              q_trainer="How would you rate the trainer?",
+              q_recommend="How likely would you recommend it to your friends?"):
+    """Wide export with all three questions: [(email, overall, trainer, recommend)]."""
+    out = ["Poll Report", "",
+           f"#,User Name,Email Address,Submitted Date and Time,"
+           f"{q_overall},{q_trainer},{q_recommend}"]
+    for i, (email, a, b, c) in enumerate(people, 1):
+        out.append(f"{i},Person {i},{email},08/30/2026 20:11:04,{a},{b},{c}")
+    return "\n".join(out)
+
+
 class TestPerRespondent(unittest.TestCase):
     """Reading a poll per PERSON, so a shared webinar's poll can be divided
     between the batches that sat in it."""
@@ -265,8 +277,12 @@ class TestPerRespondent(unittest.TestCase):
         self.assertEqual((b37["session"], b37["responses"]), (None, 0))
         for part in (b35, b36, b37):
             self.assertTrue(part["shared"]["split"])
-            self.assertEqual(part["shared"]["joint"]["responses"], 4)
-            self.assertEqual(part["shared"]["joint"]["session"], 3.25)
+            # joint = everyone on a sharing roster (a, b, c). The blank-email
+            # respondent is outside it and inside `room`, the whole poll.
+            self.assertEqual(part["shared"]["joint"]["responses"], 3)
+            self.assertEqual(part["shared"]["joint"]["session"], 4.0)
+            self.assertEqual(part["shared"]["room"]["responses"], 4)
+            self.assertEqual(part["shared"]["room"]["session"], 3.25)
             self.assertEqual(part["shared"]["unmatched"], 1)
             self.assertEqual(part["shared"]["batches"], ["B35", "B36", "B37"])
             self.assertEqual(part["submitted_first"], "2026-08-30T20:11:04")
@@ -319,6 +335,89 @@ class TestPerRespondent(unittest.TestCase):
         blank = wide_people([("", 5, 5), ("", 4, 4)])
         out, _ = polls.apply_roster_split(self._shared(blank), {"9": blank}, rosters)
         self.assertEqual(out[("B35", "09_06", "Finance")]["shared"]["reason"], "no-emails")
+
+    def test_joint_is_the_matched_respondents_not_the_whole_room(self):
+        """Owner's decision, 2026-09-28: a BSIAI attendee in a shared AI CAP
+        room is counted nowhere - stripped from the joint figure too. The
+        whole poll survives as `room`, so the "Unmatched respondents" line
+        still has something to be unmatched FROM.
+        """
+        text = wide_people([("a@x.com", 5, 5), ("b@x.com", 4, 4),
+                            ("c@x.com", 3, 3), ("bsiai@x.com", 1, 1)])
+        rosters = {"B35": {"a@x.com", "b@x.com"}, "B36": {"c@x.com"}, "B37": set()}
+        out, _ = polls.apply_roster_split(self._shared(text), {"9": text}, rosters)
+        for b in ("B35", "B36", "B37"):
+            sh = out[(b, "09_06", "Finance")]["shared"]
+            self.assertTrue(sh["split"])
+            self.assertEqual(sh["joint"]["responses"], 3)
+            self.assertEqual(sh["joint"]["session"], 4.0)         # (5+4+3)/3
+            self.assertEqual(sh["joint"]["trainer"], 4.0)
+            self.assertEqual(sh["room"]["responses"], 4)
+            self.assertEqual(sh["room"]["session"], 3.25)         # (5+4+3+1)/4
+            self.assertEqual(sh["unmatched"], 1)
+            self.assertEqual(sorted(sh["joint"]), sorted(sh["room"]))   # same keys
+        # the batches' own figures add up to exactly the joint, nobody else
+        own = sum(out[(b, "09_06", "Finance")]["responses"] for b in ("B35", "B36", "B37"))
+        self.assertEqual(own, 3)
+
+    def test_a_respondent_on_two_rosters_counts_once_in_joint(self):
+        text = wide_people([("a@x.com", 5, 5), ("d@x.com", 1, 1), ("c@x.com", 3, 3)])
+        rosters = {"B35": {"a@x.com", "d@x.com"},
+                   "B36": {"c@x.com", "d@x.com"}, "B37": set()}
+        out, _ = polls.apply_roster_split(self._shared(text), {"9": text}, rosters)
+        b35, b36, b37 = (out[(b, "09_06", "Finance")] for b in ("B35", "B36", "B37"))
+        self.assertEqual(b35["responses"], 2)                     # a, d
+        self.assertEqual(b36["responses"], 2)                     # c, d
+        sh = b35["shared"]
+        self.assertEqual(sh["multi"], 1)
+        self.assertEqual(sh["unmatched"], 0)
+        self.assertEqual(sh["joint"]["responses"], 3)             # d once, not twice
+        self.assertEqual(sh["joint"]["session"], 3.0)             # (5+1+3)/3, not (5+1+1+3)/4
+        self.assertEqual(sh["joint"], sh["room"])                 # nobody was a stranger
+        # the accounting identity, one level up from split_by_roster's
+        own = b35["responses"] + b36["responses"] + b37["responses"]
+        self.assertEqual(own - sh["multi"], sh["joint"]["responses"])
+        self.assertEqual(own - sh["multi"] + sh["unmatched"], sh["room"]["responses"])
+
+    def test_an_unsplittable_poll_keeps_the_whole_room_as_joint(self):
+        # Nothing to strip by: with no emails the joint is the whole poll,
+        # exactly as before, and there is no separate `room` - joint IS it.
+        text = wide_people([("", 5, 5), ("", 4, 4), ("", 3, 3), ("", 1, 1)])
+        rosters = {"B35": {"a@x.com"}, "B36": {"b@x.com"}, "B37": set()}
+        out, stats = polls.apply_roster_split(self._shared(text), {"9": text}, rosters)
+        for b in ("B35", "B36", "B37"):
+            sh = out[(b, "09_06", "Finance")]["shared"]
+            self.assertFalse(sh["split"])
+            self.assertEqual(sh["reason"], "no-emails")
+            self.assertEqual(sh["joint"]["responses"], 4)
+            self.assertEqual(sh["joint"]["session"], 3.25)
+            self.assertNotIn("room", sh)
+            self.assertNotIn("unmatched", sh)
+        self.assertEqual(stats["kept"], {"no-emails": 3})
+        # no bytes at all: the same
+        out, _ = polls.apply_roster_split(self._shared(text), {}, rosters)
+        sh = out[("B35", "09_06", "Finance")]["shared"]
+        self.assertEqual((sh["reason"], sh["joint"]["responses"]), ("no-bytes", 4))
+        self.assertNotIn("room", sh)
+
+    def test_joint_nps_and_dist_are_over_matched_respondents_only(self):
+        # a=5 (promoter) and b=4 (passive) are on rosters; the stranger's 1
+        # (detractor) is what would drag the room to NPS 0.
+        text = wide_full([("a@x.com", 5, 5, 5), ("b@x.com", 4, 4, 4),
+                          ("bsiai@x.com", 1, 1, 1)])
+        rosters = {"B35": {"a@x.com"}, "B36": {"b@x.com"}, "B37": set()}
+        out, _ = polls.apply_roster_split(self._shared(text), {"9": text}, rosters)
+        sh = out[("B35", "09_06", "Finance")]["shared"]
+        self.assertEqual(sh["joint"]["nps"], 50)                  # (1-0)/2
+        self.assertEqual(sh["room"]["nps"], 0)                    # (1-1)/3
+        self.assertEqual(sh["joint"]["dist"]["recommend"],
+                         {"1": 0, "2": 0, "3": 0, "4": 1, "5": 1})
+        self.assertEqual(sh["room"]["dist"]["recommend"],
+                         {"1": 1, "2": 0, "3": 0, "4": 1, "5": 1})
+        self.assertEqual(sh["joint"]["dist"]["session"]["1"], 0)
+        self.assertEqual(sh["room"]["dist"]["session"]["1"], 1)
+        self.assertEqual(sh["joint"]["recommend"], 4.5)
+        self.assertEqual(sh["room"]["recommend"], 3.33)
 
     def test_lookup_by_session_rows_stamps_every_batch_in_the_room(self):
         import io as _io

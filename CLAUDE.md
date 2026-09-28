@@ -142,6 +142,12 @@ it, but to keep it OUT of AI CAP's numbers. Do not "simplify" any of this away:
    `live_data.dedupe_by_webinar` keys on webinar id and keeps the copy naming the
    most people — the copies differ by a row or two.
 
+5. **A BSIAI answer in a shared room's poll is counted nowhere.** It matches
+   no AI CAP roster, so `polls.apply_roster_split` leaves it out of every
+   batch's own figure AND out of `rating_shared.joint` (owner's decision,
+   2026-09-28); it survives only in the whole-room count, `rating_shared.room`
+   (§4e.1).
+
 `MM-AI B1` is a third programme again, distinct from both; it has no session
 folders on Drive at all.
 
@@ -331,11 +337,20 @@ counted it three times (46 such groups on the live store, `rating_n` 6.6% high,
    re-reads each shared poll per respondent (`polls.parse_responses`) and
    divides it between the sharing batches by roster email
    (`polls.split_by_roster`, `data.roster_emails`; the same `_cell_email` rule
-   the marker uses). The row's `rating*` fields become that slice; the whole
-   room lives once in `rating_shared.joint`, with `unmatched` (an email on no
-   sharing roster — in the room's figure, in no batch's) and `multi` (enrolled
-   twice — counted in each). Measured 30 Aug: ~85-90% of respondents match a
-   roster. Polls carry email only, never phone. A long-form export names nobody,
+   the marker uses). The row's `rating*` fields become that slice;
+   `rating_shared.joint` is the poll over every respondent on AT LEAST ONE
+   sharing roster, each once; `rating_shared.room` is everyone who answered
+   (the same keys, present only when `split` is True — before 2026-09-28 there
+   was no `room` because `joint` WAS the room, so readers fall back to `joint`).
+   `unmatched` (an email on no sharing roster — a BSIAI student in a shared
+   AI CAP room, §4b) is inside `room` and in NEITHER `joint` nor any batch's
+   own: owner's decision, 2026-09-28, "no BSIAI attendees should be counted
+   anywhere … strip them from the joint figure too". `multi` (enrolled twice)
+   is counted in each batch's own and once in `joint`. Measured 30 Aug:
+   ~85-90% of respondents match a roster; on the 28 Sep store B40 12 Sep reads
+   own 866 / joint 866 / room 1,048 / unmatched 182. The app prints "Whole
+   room" from `room` and the Joint columns from `joint`; the CSV carries both.
+   Polls carry email only, never phone. A long-form export names nobody,
    and **an anonymous Zoom poll exports `anonymous` in every email cell** (the
    6 Sep 2026 Finance poll: 220 answers, not one identity) — both keep the joint
    figure on every batch with `split: False, reason: 'no-emails'`. Ask the hosts
@@ -349,7 +364,8 @@ counted it three times (46 such groups on the live store, `rating_n` 6.6% high,
    `recap._agg`, `_awards` (except Beat the curve, a per-batch claim),
    `trainers.build`, the Sessions→Browse headline and the Weekend Recap
    breakdown all count rooms and take the poll from `joint_rating` — the joint
-   figure when present, else the fullest identical copy, never a sum. Attendance
+   figure when present (so no BSIAI answer reaches a trainer's or a week's
+   rating either), else the fullest identical copy, never a sum. Attendance
    stays over the batch rows. Fixtures that mean "several sessions" must vary
    the date: two rows on one (date, pod) in one batch ARE one session.
 

@@ -32,6 +32,8 @@ import csv
 import io
 import re
 
+import pods as _pods            # pure: `members` decides which rooms are multi-domain
+
 # keyword -> which rating. Order matters: 'trainer' is checked before the
 # generic session match, because "How would you rate the trainer?" also contains
 # nothing session-specific but would fall through to a looser rule otherwise.
@@ -366,21 +368,62 @@ def split_by_roster(responses, rosters: dict) -> dict:
     So `sum(part responses) + _unmatched - _multi == len(responses)`, which is
     the check the tests pin: nobody is dropped silently and nobody is invented.
     """
+    return _divide(responses, rosters)[0]
+
+
+def _divide(responses, rosters: dict) -> tuple[dict, list]:
+    """`split_by_roster`'s parts, plus the respondents it matched — each ONCE.
+
+    The list holds every respondent found on at least one of the rosters; a
+    student on two rosters sits in two parts but appears here once. So
+    `aggregate_responses` over it is the poll with the strangers removed,
+    which is what `apply_roster_split` publishes as `joint`: a BSIAI student
+    in a shared AI CAP room is counted nowhere, the joint figure included
+    (owner's decision, 2026-09-28).
+
+    It is a second return value and not a key on the parts dict because
+    `split_by_pod` IS `split_by_roster`, and a `_matched` key there would
+    ride into every `pod_ratings` block in the store for nobody to read.
+    """
     parts = {b: [] for b in (rosters or {})}
+    matched: list = []
     unmatched = multi = 0
     for r in responses or ():
         e = (r.get("email") or "").strip().lower()
         hits = [b for b, s in (rosters or {}).items() if e and e in s]
         if not hits:
             unmatched += 1
-        elif len(hits) > 1:
-            multi += 1
+        else:
+            matched.append(r)
+            if len(hits) > 1:
+                multi += 1
         for b in hits:
             parts[b].append(r)
     out = {b: aggregate_responses(v) for b, v in parts.items()}
     out["_unmatched"] = unmatched
     out["_multi"] = multi
-    return out
+    return out, matched
+
+
+def multi_domain(pod) -> bool:
+    """Does the room keyed `pod` hold MORE THAN ONE domain?
+
+    True for an unlabelled room ('' - an All Domains session, or the complement
+    room everyone outside the day's PODs sits in) and for a compound room
+    ('Sales/Marketing/HR + Content Creators', 27 Sep 2026: one webinar, one
+    poll, two PODs). False for a named POD's own room, which is one domain by
+    construction. `data.build_batch` breaks the attendance of exactly these
+    rooms down by domain (`pod_split`), so these are the rooms whose poll is
+    worth dividing the same way.
+
+    ONE definition, read by `apply_pod_split` (which rooms to divide) and by
+    the pipeline (whose poll bytes to fetch so they CAN be divided). The two
+    once drifted: the compound room had a per-POD attendance split and its
+    poll bytes were fetched, but the split's filter said "any pod key means
+    one domain" and the By-domain table printed its two attendance rows with
+    no rating beneath them.
+    """
+    return not pod or len(_pods.members(pod)) > 1
 
 
 def apply_pod_split(ratings: dict, texts_by_wid: dict, pod_emails: dict) -> tuple:
@@ -388,13 +431,14 @@ def apply_pod_split(ratings: dict, texts_by_wid: dict, pod_emails: dict) -> tupl
 
     A room with no pod of its own - an All Domains session, or the complement
     room everyone outside the day's PODs sits in - holds several domains at
-    once, and its poll is one file. This divides that file by the roster's POD
-    column, so Finance's rating is Finance's students' answers.
+    once, and its poll is one file. So does a compound room that invited two
+    PODs. This divides that file by the roster's POD column, so Finance's
+    rating is Finance's students' answers.
 
     `ratings` is `apply_roster_split`'s output; `texts_by_wid` maps a webinar id
     to its poll text; `pod_emails` is `data.roster_pod_emails`. Returns
-    (ratings, stats). Only entries whose pod key is empty are touched - a named
-    POD's own room is one domain by construction and needs no split.
+    (ratings, stats). Only entries `multi_domain` says yes to are touched - a
+    named POD's own room is one domain by construction and needs no split.
 
     Each touched entry gains `pod_ratings`:
 
@@ -408,7 +452,7 @@ def apply_pod_split(ratings: dict, texts_by_wid: dict, pod_emails: dict) -> tupl
     stats = {"rooms": 0, "split": 0, "kept": {}}
     per_wid: dict = {}
     for key, rt in (ratings or {}).items():
-        if key[2]:
+        if not multi_domain(key[2]):
             continue                      # a named POD's room: one domain already
         stats["rooms"] += 1
         label = key[0]
@@ -562,7 +606,6 @@ def lookup_by_session_rows(rows, l2_bytes) -> tuple[dict, dict]:
     any memoised fact about them — are unchanged.
     """
     import attendance_core as ac
-    import pods as _pods
 
     by_wid = dedupe_rows(rows)
     if not by_wid or not l2_bytes:
@@ -604,8 +647,9 @@ def batch_label(track, num) -> str:
     return f"B{num}" if track == "CAP" else f"{track} B{num}"
 
 
-# The fields that describe the poll as a whole and survive onto a batch row's
-# `rating_shared.joint`. Aggregates only — never a respondent.
+# The fields that describe a poll as a whole and survive onto a batch row's
+# `rating_shared.joint` (the matched respondents) and `rating_shared.room`
+# (everyone who answered). Aggregates only — never a respondent.
 _JOINT_KEYS = ("session", "trainer", "recommend", "responses", "dist", "nps")
 
 
@@ -622,11 +666,21 @@ def apply_roster_split(ratings: dict, texts_by_wid: dict, rosters: dict) -> tupl
     found on its roster, and a `shared` block is attached:
 
         batches    every batch L2 puts in the webinar
-        joint      the whole poll's figures (what the trainer is judged on)
+        joint      what the trainer is judged on. When the division happened:
+                   the aggregate over every respondent on AT LEAST ONE sharing
+                   roster, each person once — a BSIAI student in a shared
+                   AI CAP room is counted nowhere, this figure included
+                   (owner's decision, 2026-09-28: "no BSIAI attendees should
+                   be counted anywhere … strip them from the joint figure
+                   too"). When it could not: the whole poll, exactly as
+                   before — there is nothing to strip by.
+        room       the whole poll's figures, the same keys as `joint`. Only
+                   present when split is True; otherwise `joint` IS the room.
         split      True when the division happened
         unmatched  respondents on none of the sharing rosters (excluded from
-                   every batch's own figure; still inside `joint`)
-        multi      respondents on more than one roster (counted in each)
+                   every batch's own figure AND from `joint`; inside `room`)
+        multi      respondents on more than one roster (counted in each
+                   batch's own figure, once in `joint`)
         reason     when split is False: 'no-bytes' (poll not fetched),
                    'no-emails' (a long-form export, or an ANONYMOUS poll -
                    nobody in it carries an email), 'no-roster' (this batch has
@@ -664,16 +718,25 @@ def apply_roster_split(ratings: dict, texts_by_wid: dict, rosters: dict) -> tupl
                     # answers, not one identity. Splitting it would hand every
                     # batch a blank and call all 220 "unmatched"; the truthful
                     # result is the joint figure, labelled as such.
-                    per_wid[wid] = (split_by_roster(
-                        resp, {b: rosters[b] for b in batches if b in rosters})
-                        if any(r.get("email") for r in resp) else None)
-                parts = per_wid[wid]
-                if parts is None:
+                    if any(r.get("email") for r in resp):
+                        parts, matched = _divide(
+                            resp, {b: rosters[b] for b in batches if b in rosters})
+                        # The matched aggregate is computed here, once per
+                        # webinar beside the parts, so `joint` costs the
+                        # second and third batch no further parse.
+                        per_wid[wid] = (parts, aggregate_responses(matched))
+                    else:
+                        per_wid[wid] = None
+                got = per_wid[wid]
+                if got is None:
                     reason = "no-emails"
                 else:
+                    parts, joint = got
                     new = dict(rt)
                     new.update(parts[label])
                     new["shared"] = dict(shared, split=True,
+                                         joint={k: joint.get(k) for k in _JOINT_KEYS},
+                                         room=shared["joint"],
                                          unmatched=parts["_unmatched"],
                                          multi=parts["_multi"])
                     out[key] = new

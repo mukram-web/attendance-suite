@@ -205,3 +205,107 @@ class TestRenderedTable(unittest.TestCase):
         html = dash_view.domain_matrix_html(d)
         self.assertIn("47/90", html)
         self.assertNotIn("n=", html)
+
+
+COMPOUND = "Sales/Marketing/HR + Content Creators"
+
+
+def compound_polls_text():
+    """The 27 Sep 2026 room in miniature: two S/M/HR respondents, one Content
+    Creator and one stranger - in the real Zoom shape (title row, blank line,
+    then the header), which `parse_responses` insists on."""
+    return "\n".join([
+        "Poll Report", "",
+        "#,User Name,Email Address,Submitted Date and Time,"
+        "What was your overall session feedback?,How would you rate the trainer?",
+        "1,Person 1,s1@x.com,09/27/2026 20:11:04,5,5",
+        "2,Person 2,s2@x.com,09/27/2026 20:11:06,3,3",
+        "3,Person 3,c1@x.com,09/27/2026 20:11:09,4,4",
+        "4,Person 4,nobody@x.com,09/27/2026 20:11:12,1,1",
+    ])
+
+
+class TestCompoundRoomPollSplit(unittest.TestCase):
+    """27 Sep 2026: 'AI CAP B35 , B36 , B37 , B38 - S/M/HR + Content Creators'
+    was ONE webinar, ONE poll, TWO PODs. Keyed under the compound string the
+    marker writes, its poll must still be divided by domain: the live store
+    already divides that day's poll (B35: S/M/HR 13 answers, Content Creators
+    9; B36 23/3; B37 26/10; B38 18/4) and the By-domain table prints the
+    rating beneath each attendance row. A filter reading "any pod key means
+    one domain" dropped the entry before looking at it, and the two rows came
+    back with no rating at all."""
+    PODS = {
+        "Sales/Marketing/HR": frozenset({"s1@x.com", "s2@x.com"}),
+        "Content Creators": frozenset({"c1@x.com"}),
+        "Techies": frozenset({"t1@x.com"}),
+    }
+
+    def _ratings(self, pod):
+        return {("B35", "09_27", pod): {"_wid": "555", "session": 3.25,
+                                        "responses": 4, "_batches": ["B35"]}}
+
+    def test_multi_domain_is_the_one_rule_for_the_split_and_the_fetch(self):
+        # pipeline [5a.2] fetches the poll bytes of exactly the rooms
+        # apply_pod_split will divide; both read this predicate.
+        self.assertTrue(polls.multi_domain(""))
+        self.assertTrue(polls.multi_domain(None))
+        self.assertTrue(polls.multi_domain(COMPOUND))
+        self.assertFalse(polls.multi_domain("Techies"))
+        self.assertFalse(polls.multi_domain("Sales/Marketing/HR"))
+
+    def test_the_compound_room_gains_a_per_pod_breakdown(self):
+        out, stats = polls.apply_pod_split(
+            self._ratings(COMPOUND), {"555": compound_polls_text()},
+            {"B35": self.PODS})
+        self.assertEqual(stats, {"rooms": 1, "split": 1, "kept": {}})
+        pr = out[("B35", "09_27", COMPOUND)]["pod_ratings"]
+        self.assertEqual(pr["Sales/Marketing/HR"]["responses"], 2)
+        self.assertEqual(pr["Sales/Marketing/HR"]["session"], 4.0)
+        self.assertEqual(pr["Content Creators"]["responses"], 1)
+        self.assertEqual(pr["Content Creators"]["session"], 4.0)
+        self.assertEqual(pr["_unmatched"], 1)          # the stranger
+        # the room's own headline is untouched
+        self.assertEqual(out[("B35", "09_27", COMPOUND)]["session"], 3.25)
+
+    def test_the_breakdown_is_keyed_like_pod_split_so_the_table_joins_them(self):
+        """domain_matrix_html looks up pod_ratings[p] for every p in
+        pod_split, so the keys are the canonical POD names - never the
+        compound string itself."""
+        out, _ = polls.apply_pod_split(
+            self._ratings(COMPOUND), {"555": compound_polls_text()},
+            {"B35": self.PODS})
+        pr = out[("B35", "09_27", COMPOUND)]["pod_ratings"]
+        self.assertNotIn(COMPOUND, pr)
+        self.assertTrue({"Sales/Marketing/HR", "Content Creators"} <= set(pr))
+
+    def test_a_single_named_room_is_still_left_alone(self):
+        out, stats = polls.apply_pod_split(
+            self._ratings("Sales/Marketing/HR"), {"555": compound_polls_text()},
+            {"B35": self.PODS})
+        self.assertEqual(stats["rooms"], 0)
+        self.assertNotIn("pod_ratings",
+                         out[("B35", "09_27", "Sales/Marketing/HR")])
+
+    def test_an_unlabelled_room_is_still_divided(self):
+        out, stats = polls.apply_pod_split(
+            self._ratings(""), {"555": compound_polls_text()}, {"B35": self.PODS})
+        self.assertEqual(stats["split"], 1)
+        self.assertIn("pod_ratings", out[("B35", "09_27", "")])
+
+    def test_the_rendered_table_prints_the_rating_under_each_attendance_row(self):
+        """The symptom, end to end: a compound session whose pod_ratings came
+        from apply_pod_split renders a per-POD count beneath each share."""
+        out, _ = polls.apply_pod_split(
+            self._ratings(COMPOUND), {"555": compound_polls_text()},
+            {"B35": self.PODS})
+        d = {"sessions": [{
+            "date_lbl": "27 Sep", "pod": COMPOUND,
+            "pod_split": {"Sales/Marketing/HR": {"present": 2, "total": 3, "pct": 66.7},
+                          "Content Creators": {"present": 1, "total": 2, "pct": 50.0}},
+            "pod_ratings": out[("B35", "09_27", COMPOUND)]["pod_ratings"],
+        }]}
+        html = dash_view.domain_matrix_html(d)
+        self.assertIn("2/3", html)
+        self.assertIn("1/2", html)
+        self.assertIn("n=2", html)      # S/M/HR answered twice
+        self.assertIn("n=1", html)      # Content Creators once

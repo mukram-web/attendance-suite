@@ -800,3 +800,359 @@ class TestTwoSessionsInOneWebinar(unittest.TestCase):
         # The warning must keep firing for something nobody has taught it.
         self.assertIsNone(pods.from_l2_label("AI CAP B35 - Nonsense"))
         self.assertIsNone(pods.from_l2_label("AI CAP B35 - Nonsense , Drivel"))
+
+
+class TestCompoundAndDashlessLabels(unittest.TestCase):
+    """Two L2 spellings from the 26-27 Sep 2026 weekend (B35-B38) that the
+    label reader could not see, and that between them put four batches'
+    weekend at 2-3%.
+
+    26 Sep, L2 row 235:  'AI CAP B35, B36, B37, B38 Finance'  - no dash before
+    the POD (every sibling row that weekend reads '..., B38 - Finance'). Read
+    as a whole-batch session, a ~300-person Finance room was scored against
+    3,260: B35 2.9%, B36 2.1%, B37 3.2%, B38 2.3%.
+
+    27 Sep, L2 row 267:  'AI CAP B35 , B36 , B37 , B38 - S/M/HR + Content
+    Creators'  - ONE room inviting TWO PODs. The tail resolved to nothing, the
+    marker wrote an unlabelled column, and data.py re-read it as the day's
+    Common complement (right number by luck, wrong name, and wrong the moment
+    a third POD lacks a room).
+
+    Measured over all 578 distinct Batch Name cells in L2's history, exactly
+    these two labels resolve differently after the fix.
+    """
+    COMPOUND = "Sales/Marketing/HR + Content Creators"
+
+    def test_a_dashless_trailing_pod_is_still_that_pod(self):
+        self.assertEqual(pods.from_l2_label("AI CAP B35, B36, B37, B38 Finance"),
+                         "Finance")
+
+    def test_a_dashless_label_naming_no_pod_is_still_the_whole_batch(self):
+        """Only a real POD name may change the answer: the batch token is
+        stripped and what is left has to canon()."""
+        for raw in ("AI CAP B35", "AI CAP B17 11AM", "AI CAP B17 + B21 11AM",
+                    "AI CAP B39, B40, B41 All Domains ", "B37-42",
+                    "ECAP B1 + B2 + B3 7:30 PM", "AI CAP 15+B17",
+                    "B 22 IC + B 23,24 IC"):
+            self.assertEqual(pods.from_l2_label(raw), pods.WHOLE_BATCH, raw)
+
+    def test_a_plus_tail_is_one_canonical_compound_in_a_fixed_order(self):
+        self.assertEqual(pods.from_l2_label(
+            "AI CAP B35 , B36 , B37 , B38 - S/M/HR + Content Creators"),
+            self.COMPOUND)
+        # spelling AND order are normalised: the join key must be ONE string
+        self.assertEqual(pods.from_l2_label(
+            "AI CAP B35 - Content Creators + Sales/Marketing/HR"), self.COMPOUND)
+        self.assertEqual(pods.from_l2_label("AICAPB35, B36-Finance+Data"),
+                         "Finance + Data")
+
+    def test_a_whole_batch_alias_inside_a_compound_is_the_whole_batch(self):
+        self.assertEqual(pods.from_l2_label("AI CAP B35 - All Domains + Techies"),
+                         pods.WHOLE_BATCH)
+
+    def test_one_unknown_item_still_returns_none_so_the_caller_warns(self):
+        self.assertIsNone(pods.from_l2_label("AI CAP B35 - Finance + Robotics"))
+
+    def test_members_gives_the_pods_back_without_reparsing(self):
+        self.assertEqual(pods.members(self.COMPOUND),
+                         ("Sales/Marketing/HR", "Content Creators"))
+        self.assertEqual(pods.members("Techies"), ("Techies",))
+        self.assertEqual(pods.members(pods.COMMON), (pods.COMMON,))
+        self.assertEqual(pods.members(pods.UNKNOWN), (pods.UNKNOWN,))
+        self.assertEqual(pods.members(""), ())
+        self.assertEqual(pods.members(None), ())
+
+    def test_the_join_key_round_trips_through_the_column_header(self):
+        """Whatever string the room carries must be the SAME string at the
+        marker's header, `_col_pod` reading it back, and `session_key`."""
+        import attendance_core as ac
+        header = ac._col_header("2026_09_27", self.COMPOUND)
+        self.assertEqual(header, "2026_09_27 | " + self.COMPOUND)
+        self.assertEqual(ac._col_pod(header), self.COMPOUND)
+        self.assertEqual(ac.session_key(header), ("2026_09_27", self.COMPOUND))
+
+    def test_the_poll_lookup_files_the_room_under_the_same_key(self):
+        """polls.lookup_by_session_rows keys on from_l2_label, so the compound
+        string data.py reads off the column finds the rating."""
+        import io
+        import polls
+        from openpyxl import Workbook
+        wb = Workbook(); wb.remove(wb.active)
+        ws = wb.create_sheet("Sep 2026")
+        ws.append(["Date", "Webinar ID", "Batch Name", "Topic"])
+        ws.append(["09/27/2026", "555", "AI CAP B35 , B36 - S/M/HR + Content Creators",
+                   "Spy, Swipe & Ship"])
+        buf = io.BytesIO(); wb.save(buf)
+        rows = [("poll_555_2026_09_27.csv",
+                 {"session": 4.5, "trainer": 4.6, "recommend": 4.4, "responses": 7})]
+        got, _ = polls.lookup_by_session_rows(rows, buf.getvalue())
+        self.assertIn(("B35", "09_27", self.COMPOUND), got)
+        self.assertIn(("B36", "09_27", self.COMPOUND), got)
+
+
+class TestCompoundRoomScoring(unittest.TestCase):
+    """27 Sep in miniature: 3 S/M/HR, 2 Content Creators, 4 Techies, 3 Finance.
+    The compound room marks its two PODs; Techies ran their own room."""
+    COMPOUND = "Sales/Marketing/HR + Content Creators"
+
+    def _rows(self, with_plain=False):
+        pod_rows = (["Sales/Marketing/HR"] * 3 + ["Content Creators"] * 2
+                    + ["Techies"] * 4 + ["Finance"] * 3)
+        # 2 of 3 S/M/HR and 1 of 2 Content Creators came. A Techie (row 5) is
+        # ALSO marked Present on this column - never invited, must not count.
+        compound = (["Present", "Present", "Absent"] + ["Present", "Absent"]
+                    + ["Present", "", "", ""] + [""] * 3)
+        techies = [""] * 5 + ["Present", "Present", "Present", "Absent"] + [""] * 3
+        cols = [compound, techies]
+        headers = [f"2026_09_27 | {self.COMPOUND}", "2026_09_27 | Techies"]
+        if with_plain:
+            # an unlabelled room the same day: everyone marked, only Finance came
+            cols.append(["Absent"] * 9 + ["Present"] * 3)
+            headers.append("2026_09_27")
+        return _pod_tab(pod_rows, cols, headers)
+
+    def _build(self, **kw):
+        return data.build_batch(self._rows(**kw), "B35", {("B35", "09_27"): "x"})
+
+    def _room(self, b):
+        return next(s for s in b["sessions"] if s["pod"] == self.COMPOUND)
+
+    def test_the_denominator_is_the_sum_of_both_pods(self):
+        s = self._room(self._build())
+        self.assertEqual(s["total"], 5)          # 3 S/M/HR + 2 CC: not 12, not 3
+        self.assertEqual(s["present"], 3)
+        self.assertEqual(s["pct"], 60.0)
+        self.assertEqual(s["absent"], 2)
+
+    def test_a_student_in_either_pod_is_invited_and_a_third_pod_is_not(self):
+        s = self._room(self._build())
+        self.assertEqual(s["present"], 3)        # the Present Techie is not counted
+        self.assertEqual(s["pod_split"]["Sales/Marketing/HR"],
+                         {"present": 2, "total": 3, "pct": 66.7})
+        self.assertEqual(s["pod_split"]["Content Creators"],
+                         {"present": 1, "total": 2, "pct": 50.0})
+        self.assertNotIn("Techies", s["pod_split"])
+
+    def test_it_displays_as_the_compound_not_as_common(self):
+        b = self._build()
+        s = self._room(b)
+        self.assertEqual(s["excl"], [])          # a named room, not a complement
+        self.assertFalse([x for x in b["sessions"] if x["pod"] == pods.COMMON])
+
+    def test_the_same_days_common_complement_excludes_both_pods(self):
+        b = self._build(with_plain=True)
+        comp = next(s for s in b["sessions"] if s["pod"] == pods.COMMON)
+        self.assertEqual(comp["excl"],
+                         ["Content Creators", "Sales/Marketing/HR", "Techies"])
+        self.assertEqual(comp["total"], 3)       # Finance only
+        self.assertEqual(comp["present"], 3)
+        self.assertEqual(comp["pct"], 100.0)
+        # and the compound room itself is untouched by the extra column
+        self.assertEqual(self._room(b)["total"], 5)
+
+    def test_each_member_pods_view_shows_its_share_of_the_room(self):
+        import dash_view
+        v = dash_view.pod_view(self._build(), "Content Creators")
+        self.assertEqual(len(v["sessions"]), 1)
+        self.assertEqual(v["sessions"][0]["present"], 1)
+        self.assertEqual(v["sessions"][0]["total"], 2)   # CC, not the room's 5
+        v = dash_view.pod_view(self._build(), "Techies")
+        self.assertEqual(len(v["sessions"]), 1)          # their own room only
+        self.assertEqual(v["sessions"][0]["total"], 4)
+
+    def test_the_date_rollup_invites_both_pods_once_and_finance_not_at_all(self):
+        d = self._build()["by_date"][0]
+        self.assertEqual(d["total"], 9)          # 5 compound + 4 Techies
+        self.assertEqual(d["present"], 6)        # 2 + 1 + 3
+        self.assertEqual(d["n_pods"], 2)
+
+    def test_closing_type_attendance_counts_the_room_for_both_pods(self):
+        """Per-person denominators: S/M/HR and CC each have one session (the
+        compound room), Techies one, Finance none -> 6 present of 9 slots."""
+        b = self._build()
+        self.assertEqual(len(b["closing"]), 1)
+        self.assertEqual(b["closing"][0]["att"], round(6 / 9 * 100, 1))
+
+    def test_the_payload_still_json_encodes(self):
+        import json
+        json.dumps(self._build(with_plain=True))
+
+
+class TestMarkerWritesTheCompoundColumn(unittest.TestCase):
+    """End to end through the marker: the L2 label, the header it writes, and
+    who it marks. Neither the roster nor the folder spells the compound the
+    way L2 does, so the column header is where the key is fixed."""
+    COMPOUND = "Sales/Marketing/HR + Content Creators"
+    SMHR = ("smhr@x.com", "919000000001")
+    CC = ("cc@x.com", "919000000002")
+    TECH = ("tech@x.com", "919000000003")
+    FIN = ("fin@x.com", "919000000004")
+
+    def _roster(self):
+        import io
+        from openpyxl import Workbook
+        wb = Workbook(); wb.remove(wb.active)
+        ws = wb.create_sheet("AI CAP B35")
+        ws.append(["Country", "Registered Number", "Registered Mail", "WhatsApp",
+                   "Broadcast", "Batch", "Amount", "Payment", "Close Type",
+                   "POD Prefrence"])
+        for (em, ph), pod in ((self.SMHR, "Sales/Marketing/HR"),
+                              (self.CC, "Content Creators - AI Career Accelerator Program B35"),
+                              (self.TECH, "Techies"), (self.FIN, "Finance")):
+            ws.append([91, ph, em, "", "", "B35", 0, "Full Paid", "BDA Closing", pod])
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    def _l2(self, label, wid, date="09/27/2026"):
+        import io
+        from openpyxl import Workbook
+        wb = Workbook(); wb.remove(wb.active)
+        ws = wb.create_sheet("Sep 2026")
+        ws.append(["Date", "Webinar ID", "Batch Name", "Topic"])
+        ws.append([date, wid, label, "Session"])
+        buf = io.BytesIO(); wb.save(buf); return buf.getvalue()
+
+    def _run(self, label, folder, wid, ymd, attendees):
+        import attendance_core as ac
+        from tests.test_cross_room import report_csv
+        files = [(f"{folder}/attendee_{wid}_{ymd}.csv", report_csv(attendees))]
+        mdy = f"{ymd[5:7]}/{ymd[8:10]}/{ymd[:4]}"          # L2 writes 09/27/2026
+        out, report, warns = ac.process_files(
+            self._roster(), self._l2(label, wid, mdy), files, values_only=True)
+        return out, report, warns
+
+    def _headers(self, out):
+        import io
+        from openpyxl import load_workbook
+        ws = load_workbook(io.BytesIO(out))["AI CAP B35"]
+        return [str(ws.cell(1, c).value) for c in range(11, ws.max_column + 1)]
+
+    def test_the_plus_label_marks_both_pods_under_one_compound_header(self):
+        out, report, warns = self._run(
+            "AI CAP B35 , B36 , B37 , B38 - S/M/HR + Content Creators",
+            "2026-09-27 - AI CAP B35 , B36 , B37 , B38 - S M HR + Content Creators - Spy Swipe Ship",
+            "99900000027", "2026_09_27", [self.SMHR, self.CC, self.TECH])
+        self.assertEqual(self._headers(out), ["2026_09_27 | " + self.COMPOUND])
+        r = report[0]
+        self.assertEqual(r["pod"], self.COMPOUND)
+        self.assertEqual(r["present"], 2, "S/M/HR + Content Creators")
+        self.assertEqual(r["total"], 2, "denominator is the two PODs, not the batch")
+        self.assertEqual(r["outside"], 1, "the Techie is reported, not counted")
+        self.assertFalse([w for w in warns if "not recognised" in w], warns)
+
+    def test_the_dashless_label_marks_a_finance_column(self):
+        out, report, warns = self._run(
+            "AI CAP B35, B36, B37, B38 Finance",
+            "2026-09-26 - AI CAP B35, B36, B37, B38 Finance - Forecasting",
+            "99900000026", "2026_09_26", [self.FIN, self.TECH])
+        self.assertEqual(self._headers(out), ["2026_09_26 | Finance"])
+        r = report[0]
+        self.assertEqual(r["pod"], "Finance")
+        self.assertEqual((r["present"], r["total"]), (1, 1))   # NOT 2 of 4
+        self.assertEqual(r["outside"], 1)
+
+
+class TestCompoundRoomWithOneMemberAbsentFromTheBatch(unittest.TestCase):
+    """A batch with 3 S/M/HR, 4 Techies and NO Content Creators sits in the
+    compound room. Its breakdown collapses - `data._real_split` drops a lone
+    bucket covering everyone invited - so the S/M/HR filter has no share to
+    take from it. The room IS that POD's session (its denominator is already
+    S/M/HR's strength), and the filter must show it whole rather than show
+    nothing for the date. Not live for 26-27 Sep 2026 (every batch has both
+    PODs) but it is the mechanism the compound room introduced."""
+    COMPOUND = "Sales/Marketing/HR + Content Creators"
+
+    def _build(self):
+        pod_rows = ["Sales/Marketing/HR"] * 3 + ["Techies"] * 4
+        compound = ["Present", "Present", "Absent"] + [""] * 4
+        techies = [""] * 3 + ["Present", "Present", "Present", "Absent"]
+        rows = _pod_tab(pod_rows, [compound, techies],
+                        [f"2026_09_27 | {self.COMPOUND}", "2026_09_27 | Techies"])
+        return data.build_batch(rows, "B38", {("B38", "09_27"): "x"})
+
+    def test_the_room_scores_against_the_one_pod_that_is_present(self):
+        s = next(x for x in self._build()["sessions"] if x["pod"] == self.COMPOUND)
+        self.assertEqual((s["present"], s["total"]), (2, 3))
+        self.assertEqual(s["pod_split"], {})     # one bucket is not a breakdown
+
+    def test_the_present_members_filter_shows_the_room_whole(self):
+        import dash_view
+        v = dash_view.pod_view(self._build(), "Sales/Marketing/HR")
+        self.assertEqual([(x["present"], x["total"], x["pod"]) for x in v["sessions"]],
+                         [(2, 3, "Sales/Marketing/HR")])
+        self.assertEqual(v["strength"], 3)
+        self.assertEqual(v["avg_pct"], 66.7)
+
+    def test_the_absent_members_filter_shows_nothing_and_is_not_offered(self):
+        import dash_view
+        b = self._build()
+        self.assertNotIn("Content Creators", dash_view.pod_names(b))
+        self.assertEqual(dash_view.pod_view(b, "Content Creators")["sessions"], [])
+
+    def test_a_third_pod_does_not_inherit_the_room(self):
+        import dash_view
+        v = dash_view.pod_view(self._build(), "Techies")
+        self.assertEqual([(x["present"], x["total"]) for x in v["sessions"]], [(3, 4)])
+
+    def test_a_room_with_a_real_breakdown_still_hands_out_shares_not_the_whole(self):
+        """With both PODs present the existing path - a share per member - is
+        the one taken, never the whole-row fallback."""
+        import dash_view
+        pod_rows = ["Sales/Marketing/HR"] * 3 + ["Content Creators"] * 2
+        compound = ["Present", "Present", "Absent", "Present", "Absent"]
+        rows = _pod_tab(pod_rows, [compound], [f"2026_09_27 | {self.COMPOUND}"])
+        b = data.build_batch(rows, "B38", {("B38", "09_27"): "x"})
+        v = dash_view.pod_view(b, "Content Creators")
+        self.assertEqual([(x["present"], x["total"]) for x in v["sessions"]], [(1, 2)])
+        self.assertTrue(v["sessions"][0].get("within_common"))
+
+    def test_every_row_still_renders(self):
+        import dash_view
+        b = self._build()
+        for sel in dash_view.pod_names(b):
+            dash_view.sessions_table_html(dash_view.pod_view(b, sel))
+
+
+class TestFolderKeyMatchesTheMarkersHeader(unittest.TestCase):
+    """The freeze: `attendance_core.folder_keys` (what the incremental skip
+    compares) must contain the `session_key` of the header the marker wrote
+    from L2, or the folder is downloaded and re-marked on every run. Both
+    26-27 Sep 2026 folders failed this until `from_folder` learned the '+'
+    and dashless spellings; the compound comes back as the SAME string L2's
+    label resolves to, whether the folder spaces or slashes S/M/HR."""
+    COMPOUND = "Sales/Marketing/HR + Content Creators"
+    PLUS_L2 = "AI CAP B35 , B36 , B37 , B38 - S/M/HR + Content Creators"
+    PLUS_FOLDER = ("2026-09-27 - AI CAP B35 , B36 , B37 , B38 - S M HR + "
+                   "Content Creators - Spy Swipe Ship")
+    DASHLESS_L2 = "AI CAP B35, B36, B37, B38 Finance"
+    DASHLESS_FOLDER = "2026-09-26 - AI CAP B35, B36, B37, B38 Finance - Forecasting"
+
+    def test_the_two_real_folders_resolve_to_the_columns_l2_names(self):
+        self.assertEqual(pods.from_folder(self.PLUS_FOLDER), self.COMPOUND)
+        self.assertEqual(pods.from_folder(
+            self.PLUS_FOLDER.replace("S M HR", "S/M/HR")), self.COMPOUND)
+        self.assertEqual(pods.from_folder(self.DASHLESS_FOLDER), "Finance")
+
+    def test_folder_keys_contain_the_header_the_marker_writes(self):
+        import attendance_core as ac
+        for label, folder, ymd in ((self.PLUS_L2, self.PLUS_FOLDER, "2026_09_27"),
+                                   (self.DASHLESS_L2, self.DASHLESS_FOLDER, "2026_09_26")):
+            header = ac._col_header(ymd, pods.from_l2_label(label))
+            self.assertIn(ac.session_key(header), ac.folder_keys(folder), folder)
+
+    def test_the_older_spellings_still_read_the_same(self):
+        for folder, want in (
+            ("2026-08-23 - AI CAP B35 - Techies - Python with AI", "Techies"),
+            ("2026-09-06 - AI CAP B37 8PM-Techis - Topic", "Techies"),
+            ("2026-08-30 - AICAPB35, B36-Generalist - Topic", "Generalist"),
+            ("2026-08-02 - AI CAP B33 - Office Productivity", None),
+            ("2026-09-13 - AI CAP B39, B40, B41 All Domains - Topic", None),
+            ("2026-09-27 - AI CAP B42 Day 2 - Topic", None),
+            ("2026-09-27 - AI CAP B37 8PM - Topic", None),
+            ("2026-09-27 - AI CAP B8 + B22 - Topic", None),
+        ):
+            self.assertEqual(pods.from_folder(folder), want, folder)
+
+    def test_a_topic_ending_in_a_domain_word_is_not_a_domain(self):
+        # the dashless rule runs only inside a segment that names a batch
+        self.assertIsNone(pods.from_folder("2026-09-27 - AI CAP B35 - Session 2 Finance"))
+        self.assertIsNone(pods.from_folder("2026-09-27 - AI CAP B35 - Excel + AI"))

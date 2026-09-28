@@ -340,7 +340,8 @@ def merge_marks(fresh_roster_bytes: bytes,
                         rp, _multi = pods.from_roster_cell(ws.cell(r, pc).value)
                         rp = rp or pods.UNKNOWN
                     for key, ci in placed.items():
-                        if key[1] and rp != key[1]:
+                        # a compound room's column is for both its PODs
+                        if key[1] and rp not in pods.members(key[1]):
                             continue
                         ws.cell(r, ci).value = "Absent"
                         report["filled"] += 1

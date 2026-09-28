@@ -1119,10 +1119,16 @@ with sub_browse:
         # rollups use - so this table and those numbers cannot disagree.
         #
         # RATINGS ARE PER BATCH since the poll split (pipeline [5a.1]): each
-        # batch's cells hold ITS students' answers, and the room's whole poll
-        # sits once in the merged "Joint" columns. When the poll could not be
-        # split (an export naming nobody) every batch shows the joint figure
-        # and the cell says so.
+        # batch's cells hold ITS students' answers, and the poll over everyone
+        # found on a sharing roster sits once in the merged "Joint" columns
+        # (rating_shared.joint). A respondent on NO sharing roster - a BSIAI
+        # student in a shared AI CAP room - is counted nowhere, the Joint
+        # figure included (owner's decision, 2026-09-28); the whole room's
+        # count survives in rating_shared.room, and that is what "Whole room"
+        # means wherever it is printed below. An older store has no `room`:
+        # its joint WAS the room, so every reader falls back to joint. When
+        # the poll could not be split (an export naming nobody) every batch
+        # shows the joint figure and the cell says so.
         _groups: dict = {}
         for s in _v:
             _groups.setdefault(_recap_mod.session_key(s), []).append(s)
@@ -1144,10 +1150,15 @@ with sub_browse:
             if n == 1 or not sh:
                 return ""
             if sh.get("split"):
-                j = sh.get("joint") or {}
+                # The room is `room` (everyone who answered), never `joint`
+                # (only those on a sharing roster) - or the unmatched count
+                # beside it would name people outside the figure it is
+                # printed against.
+                w = sh.get("room") or sh.get("joint") or {}
                 return (f' title="{s["batch"]}\'s own students only. Whole room: '
-                        f'{j.get("responses") or 0} responses'
+                        f'{w.get("responses") or 0} responses'
                         + (f', {sh["unmatched"]} on no sharing roster'
+                           + (' (not in the Joint columns)' if sh.get("room") else '')
                            if sh.get("unmatched") else "") + '"')
             return (' title="This poll was run anonymously (no emails in the '
                     'export), so it cannot be divided between the batches. '
@@ -1303,10 +1314,13 @@ with sub_browse:
                    "students' poll answers. Present + Absent is that row's strength: "
                    "for a POD session that is the POD's strength, not the whole "
                    "batch's — the same denominator Att % uses. "
-                   "The **Joint** block is the whole "
-                   "room's poll, once; for a single-batch session it equals the "
-                   "batch's own. Hover a rating cell in a shared session for the "
-                   "split. *anonymous poll* means the hosts ran that feedback "
+                   "The **Joint** block is a shared room's poll over everyone "
+                   "found on a sharing roster, once — an answer from an email on "
+                   "none of those rosters (a BSIAI student in a shared AI CAP "
+                   "room) is counted nowhere, the Joint figure included; for a "
+                   "single-batch session Joint equals the batch's own. Hover a "
+                   "rating cell in a shared session for the split and the whole "
+                   "room's count. *anonymous poll* means the hosts ran that feedback "
                    "poll anonymously — no emails in the export, so it cannot be "
                    "divided; only the Joint figure exists.")
 
@@ -1340,6 +1354,9 @@ with sub_browse:
             "Joint trainer rating": _sh(s, "trainer"),
             "Joint overall": _sh(s, "session"), "Joint NPS": _sh(s, "nps"),
             "Joint responses": _sh(s, "responses"),
+            "Whole-room responses": (((s.get("rating_shared") or {}).get("room")
+                                      or (s.get("rating_shared") or {}).get("joint")
+                                      or {}).get("responses")),
             "Unmatched respondents": (s.get("rating_shared") or {}).get("unmatched"),
             "Own rating unavailable": (
                 "anonymous poll" if ((s.get("rating_shared") or {}).get("reason")
@@ -1519,7 +1536,12 @@ with sub_browse:
                            "wearing the same name.")
             if len(_grp) > 1:
                 # Per batch: attendance against its own roster, and its own
-                # students' answers. The room's whole poll is the chart below.
+                # students' answers. The chart below is the JOINT figure - the
+                # poll over everyone on a sharing roster, once - not the whole
+                # room: a respondent on none of these rosters (a BSIAI student
+                # in a shared AI CAP room) is counted nowhere. The whole room's
+                # count is rating_shared.room; an older store has no `room`
+                # and its joint WAS the room, hence the fallback below.
                 _shp = s.get("rating_shared") or {}
                 _ok = _shp.get("split", not _shp)     # per-batch figures exist?
                 st.dataframe(_pd.DataFrame([{
@@ -1530,13 +1552,19 @@ with sub_browse:
                     "Own responses": (x.get("rating_n") or 0) if _ok else None,
                 } for x in _grp]), width='stretch', hide_index=True)
                 if _shp.get("split"):
+                    _room = _shp.get("room") or _shp.get("joint") or {}
                     st.caption(
-                        f"Whole room: {_Gp.get('rating_n') or 0:,} responses"
+                        f"Whole room: {_room.get('responses') or 0:,} responses"
+                        + (f" · Joint figure (the chart below): "
+                           f"{_Gp.get('rating_n') or 0:,}" if _shp.get("room") else "")
                         + (f" · {_shp['unmatched']} answered from an email on none "
-                           "of these batches' rosters (in the room's figure, in "
-                           "no batch's own)" if _shp.get("unmatched") else "")
+                           "of these batches' rosters (in the room's count, in "
+                           "no batch's own"
+                           + (" and not in the Joint figure)" if _shp.get("room") else ")")
+                           if _shp.get("unmatched") else "")
                         + (f" · {_shp['multi']} enrolled in more than one of them "
-                           "(counted in each)" if _shp.get("multi") else ""))
+                           "(counted in each batch's own, once in Joint)"
+                           if _shp.get("multi") else ""))
                 elif _shp:
                     st.caption("This feedback poll was run anonymously — the "
                                "export carries no emails — so it cannot be "

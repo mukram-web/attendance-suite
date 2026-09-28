@@ -165,7 +165,8 @@ def shared_batches(raw_label) -> list:
     counts sessions must count it once. Same spelling and order as the keys
     `polls.lookup_by_session_rows` writes, so the two can never disagree.
     """
-    keys = extract_batches(str(raw_label or ""))
+    keys = [k for k in extract_batches(str(raw_label or ""))
+            if k[0] != "BSIAI"]
     labels = [_polls.batch_label(t, n) for t, n in sorted(keys)]
     return labels if len(labels) > 1 else []
 
@@ -234,6 +235,13 @@ def roster_pod_emails(tabs: dict) -> dict:
     return out
 
 
+# A label segment that names the BSIAI programme, in every spelling L2 uses:
+# 'BSIAI Accelerator B1', 'BSI B1', 'BSI AI B3' and the fully written-out
+# 'Build Side Income Using AI B2'.
+_BSIAI_SEG = re.compile(r"(?i)(?<![a-z])bsi\s*ai|(?<![a-z])bsiai|"
+                        r"(?<![a-z])bsi(?![a-z])|build\s+side\s+income")
+
+
 def clean_l2_label(raw) -> str:
     """Tidy L2's raw 'Batch Name' cell for display without rewording it.
 
@@ -244,6 +252,25 @@ def clean_l2_label(raw) -> str:
     sessions, which is the whole reason the label is shown.
     """
     s = re.sub(r"\s+", " ", str(raw or "")).strip()
+    # BSIAI is a separate programme that merely shares the room; the CAP
+    # dashboard does not report it, so its segment is dropped from the label
+    # rather than shown as though it were a co-batch. Only the segment that
+    # NAMES it goes -- 'AI CAP B40 - Common , BSIAI Accelerator B1' becomes
+    # 'AI CAP B40 - Common'. A cell that names nothing else is left alone, so a
+    # BSIAI-only row still shows what it is instead of going blank.
+    # Split KEEPING the separators, and rebuild ONLY when a segment was
+    # actually dropped. Rejoining unconditionally rewrote every label's
+    # punctuation -- including 'S/M/HR + Content Creators', which is a
+    # compound-POD JOIN KEY (pods.COMPOUND_SEP), not just a caption.
+    bits = re.split(r"(\s*[,+]\s*)", s)
+    segs, seps = bits[0::2], bits[1::2]
+    live = [i for i, g in enumerate(segs) if g.strip()]
+    keep = [i for i in live if not _BSIAI_SEG.search(segs[i])]
+    if keep and len(keep) < len(live):
+        out = segs[keep[0]]
+        for i in keep[1:]:
+            out += seps[i - 1] + segs[i]
+        s = re.sub(r"\s+", " ", out).strip()
     return s.strip("[](){},;:-").strip()
 
 
@@ -337,14 +364,18 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
     # PODs that ran a room of their OWN on a date - whatever else happened that
     # day. A whole-batch session's breakdown must skip them or they appear twice
     # for one date: once in their own room, once inside the All Domains split.
-    pod_rooms: dict = {mm_: {p for _c, p in cc["pod"]}
+    # Expanded through `pods.members`, so a compound room ('Sales/Marketing/HR
+    # + Content Creators') counts as BOTH its PODs having met - the day's
+    # Common complement must exclude both, and a whole-batch split must skip
+    # both.
+    pod_rooms: dict = {mm_: {m for _c, p in cc["pod"] for m in pods.members(p)}
                        for mm_, cc in cols_by_date.items() if cc["pod"]}
 
     date_pods: dict = defaultdict(set)
     for mm_, cc in cols_by_date.items():
         if not cc["pod"] or not cc["plain"]:
             continue                      # nothing to disambiguate
-        met = {p for _c, p in cc["pod"]}
+        met = {m for _c, p in cc["pod"] for m in pods.members(p)}
         members = [r for r in enrolled if row_pod.get(id(r), "") in met]
         if not members:
             continue
@@ -379,7 +410,8 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         if excl:
             return rp not in excl          # the complement room
         if pod:
-            return rp == pod               # a named POD's room
+            # a named room: one POD, or both PODs of a compound room
+            return rp in pods.members(pod)
         return True                        # genuine whole-batch session
 
     # discover + validate session columns (everything after Closing Type)
@@ -406,7 +438,9 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             pod = pods.COMMON
             denom = strength - sum(pod_strength.get(p, 0) for p in excl)
         else:
-            denom = pod_strength.get(pod, 0) if pod else strength
+            # A compound room's denominator is the sum of its PODs' strengths.
+            denom = (sum(pod_strength.get(p, 0) for p in pods.members(pod))
+                     if pod else strength)
         if not denom:
             continue        # a POD nobody in this batch belongs to
 
@@ -421,8 +455,11 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         # until the eleven-POD format starts in week three. A named POD's own
         # room needs none - it is one domain by construction.
         split: dict = defaultdict(lambda: {"present": 0, "total": 0})
-        multi = bool(excl) or not pod
-        own_rooms = pod_rooms.get(mm, frozenset()) if not excl else frozenset()
+        # A compound room invited two domains, so it is broken down too - its
+        # own members are the whole population, so nothing is skipped.
+        multi = bool(excl) or not pod or len(pods.members(pod)) > 1
+        own_rooms = (pod_rooms.get(mm, frozenset())
+                     if not (excl or pod) else frozenset())
 
         present = absent = 0
         for r in enrolled:
@@ -585,7 +622,7 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
             d.setdefault("excl", set()).update(sx["excl"])
             d["complement"] = True
         elif sx.get("pod"):
-            d["pods"].add(sx["pod"])
+            d["pods"].update(pods.members(sx["pod"]))
         else:
             d["whole"] = True
 

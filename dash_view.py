@@ -226,12 +226,24 @@ def pod_view(d: dict, pod: str | None) -> dict:
     # share is recoverable: `pod_split`, computed where the marks are read.
     sess = [s for s in d["sessions"] if s.get("pod") == pod]
     for s in d["sessions"]:
+        if s.get("pod") == pod:
+            continue
         part = (s.get("pod_split") or {}).get(pod)
-        if part and s.get("pod") != pod:
+        if part:
             sess.append(dict(s, pod=pod, present=part["present"],
                              total=part["total"], pct=part["pct"],
                              absent=part["total"] - part["present"],
                              within_common=True))
+        elif (not s.get("pod_split") and pod in _pods.members(s.get("pod"))
+              and pod in (d.get("pods") or {})):
+            # A compound room ('Sales/Marketing/HR + Content Creators') this
+            # POD was invited to, with NO breakdown to take a share from.
+            # data._real_split drops a lone bucket covering the whole invited
+            # population - which is what the split collapses to when the
+            # OTHER member has nobody in this batch. The room's denominator
+            # is then already this POD's strength, so the row is this POD's
+            # whole session and is shown as such rather than not at all.
+            sess.append(dict(s, pod=pod))
     sess.sort(key=lambda x: (x.get("mm") or "", x.get("col") or 0))
     if not sess:
         return dict(d, sessions=[], n_sessions=0, avg_pct=0.0, peak=0.0, low=0.0)

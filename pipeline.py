@@ -1167,10 +1167,13 @@ def main() -> None:
                 _win.setdefault(_k[0], _fid)
         _need = {rt.get("_wid") for rt in ratings.values()
                  if len(rt.get("_batches") or ()) > 1}
-        # [5a.2] and every MULTI-DOMAIN room - an All Domains session or the
-        # complement room - so its poll can be divided by the roster's POD
-        # column. Those are exactly the entries with an empty pod key.
-        _need |= {rt.get("_wid") for k, rt in ratings.items() if not k[2]}
+        # [5a.2] and every MULTI-DOMAIN room - an All Domains session, the
+        # complement room, or a compound room inviting two PODs - so its poll
+        # can be divided by the roster's POD column. `polls.multi_domain` is
+        # the one rule for both this fetch and `apply_pod_split` below, so a
+        # room cannot be divided there but never fetched here (or vice versa).
+        _need |= {rt.get("_wid") for k, rt in ratings.items()
+                  if polls.multi_domain(k[2])}
         _want = {_win[w] for w in _need if w in _win}
         _texts = {}
 
