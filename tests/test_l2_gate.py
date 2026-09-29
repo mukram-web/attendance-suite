@@ -530,12 +530,17 @@ class TestRealL2Regression(unittest.TestCase):
         with open(REAL_L2, "rb") as fh:
             cls.reg = ac.l2_dates(fh.read(), with_ffa=False)
 
-    def test_the_weekend_registers_24_and_29_webinars(self):
-        on26 = {w for w, d in self.reg.items() if "2026_09_26" in d}
-        on27 = {w for w, d in self.reg.items() if "2026_09_27" in d}
-        self.assertEqual(len(on26), 24)
+    def test_the_weekend_registers_22_and_29_webinars(self):
+        # 24 and 29 when measured; two of the 26th (89713589616, 92614513509)
+        # are Hackathon calls and register as NotASession since 2026-09-30, so
+        # they no longer carry a date - see tests/test_not_a_session.py.
+        on26 = {w for w, d in self.reg.items() if isinstance(d, set) and "2026_09_26" in d}
+        on27 = {w for w, d in self.reg.items() if isinstance(d, set) and "2026_09_27" in d}
+        self.assertEqual(len(on26), 22)
         self.assertEqual(len(on27), 29)
-        self.assertEqual(len(on26 | on27), 53)
+        self.assertEqual(len(on26 | on27), 51)
+        self.assertIsInstance(self.reg["89713589616"], ac.NotASession)
+        self.assertIsInstance(self.reg["92614513509"], ac.NotASession)
 
     def test_the_two_twinned_webinars_sit_on_saturday_only(self):
         self.assertEqual(self.reg["91441005879"], {"2026_09_26"})

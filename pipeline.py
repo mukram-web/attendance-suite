@@ -887,7 +887,52 @@ def main() -> None:
               + (f", {_cstat['invalid']:,} invalid" if _cstat.get("invalid") else "")
               + (f" — {_cstat['note']}" if _cstat.get("note") else ""), flush=True)
 
-    # [1c] INCREMENTAL: this week's roster for structure, last week's workbook
+    # [1c] ECAP — a second programme, rostered from a snapshot (see ecap.py).
+    #
+    # It has to happen HERE - before the carry-forward at [1d] and the fetch at
+    # [2/8] - and both orders are load-bearing:
+    #
+    #   * Before [2/8]: `fetch_new_attendees` decides which session folders to
+    #     download by checking each folder's batches against the TABS IN THIS
+    #     WORKBOOK. With no ECAP tab, all 69 ECAP folders are counted "without
+    #     a roster tab" and never fetched, so the marking below would have
+    #     nothing to mark even though the rest of the stack understands ECAP.
+    #   * Before [1d]: `carryforward.merge_marks` keeps a tab's history only
+    #     when THIS WEEK'S roster has that tab. Grafted after the carry, as it
+    #     was until 2026-09-30, the ECAP tabs were absent at merge time: every
+    #     ECAP column was dropped ("batch tab(s) in last week's workbook but
+    #     NOT in this week's roster"), the graft then re-added ECAP as a
+    #     pristine roster, and ECAP was re-fetched and re-marked from Drive on
+    #     every run instead of frozen like every other batch (72 columns
+    #     re-marked on the 2026-09-23 run). On a run that cannot re-fetch them
+    #     - an L2-gated one, a Drive hiccup - that loss is permanent.
+    #     tests/test_ecap_order.py pins both halves.
+    #
+    # Never fatal. ECAP is an addition; a Drive hiccup fetching its snapshot
+    # must not cost the CAP dashboard its weekly refresh.
+    # `warnings` does not exist yet - [3/8] creates it from the marker - so
+    # these are stashed and merged in there.
+    _ecap_warn: list = []
+    if cfg.get("ecap_roster_id"):
+        print("[1c] Grafting the ECAP roster tabs …", flush=True)
+        try:
+            _eb = live_data.fetch_file_bytes(svc, cfg["ecap_roster_id"])
+            roster_bytes, _er = ecap.graft(roster_bytes, _eb)
+            print(f"   {len(_er['added'])} tab(s) added"
+                  + (f" ({', '.join(_er['added'])}, {_er['rows']:,} students)"
+                     if _er["added"] else "")
+                  + (f" · {len(_er['skipped'])} already in the workbook"
+                     if _er["skipped"] else ""), flush=True)
+            for _w in _er.get("warnings") or ():
+                _ecap_warn.append(f"ECAP: {_w}")
+                print(f"   WARNING: {_w}", flush=True)
+        except Exception as e:
+            _ecap_warn.append(
+                f"ECAP roster could not be grafted ({e}) — its batches are "
+                f"missing from this build.")
+            print(f"   WARNING: {e} — continuing without ECAP.", flush=True)
+
+    # [1d] INCREMENTAL: this week's roster for structure, last week's workbook
     # for the session columns. `process_files` only ever writes the columns it
     # was handed files for, so every carried column is frozen exactly as it was
     # — and `_existing_sessions` reading the merged workbook is what stops those
@@ -896,7 +941,7 @@ def main() -> None:
     # full run — slower, more correct, and it says so.
     base_bytes, carry = roster_bytes, {"carried": 0, "warnings": []}
     if args.incremental:
-        print("[1c] Carrying last week's marks forward …", flush=True)
+        print("[1d] Carrying last week's marks forward …", flush=True)
         # `prev_marked` was fetched at [1]; the LMS roster builder needs it too.
         base_bytes, carry = carryforward.merge_marks(roster_bytes, prev_marked)
         print("   " + carryforward.summary(carry), flush=True)
@@ -931,39 +976,6 @@ def main() -> None:
                     f"   Run tools/lms_cutover_diff.py to see which batches, or "
                     f"set ROSTER_SOURCE=sheet to fall back to the Google Sheet.")
 
-    # [1d] ECAP — a second programme, rostered from a snapshot (see ecap.py).
-    #
-    # It has to happen HERE, before [2/8], not later. `fetch_new_attendees`
-    # decides which session folders to download by checking each folder's
-    # batches against the TABS IN THIS WORKBOOK: with no ECAP tab, all 69 ECAP
-    # folders are counted "without a roster tab" and never fetched, so the
-    # marking below would have nothing to mark even though the rest of the
-    # stack understands ECAP perfectly well.
-    #
-    # Never fatal. ECAP is an addition; a Drive hiccup fetching its snapshot
-    # must not cost the CAP dashboard its weekly refresh.
-    # `warnings` does not exist yet - [3/8] creates it from the marker - so
-    # these are stashed and merged in there.
-    _ecap_warn: list = []
-    if cfg.get("ecap_roster_id"):
-        print("[1d] Grafting the ECAP roster tabs …", flush=True)
-        try:
-            _eb = live_data.fetch_file_bytes(svc, cfg["ecap_roster_id"])
-            base_bytes, _er = ecap.graft(base_bytes, _eb)
-            print(f"   {len(_er['added'])} tab(s) added"
-                  + (f" ({', '.join(_er['added'])}, {_er['rows']:,} students)"
-                     if _er["added"] else "")
-                  + (f" · {len(_er['skipped'])} already in the workbook"
-                     if _er["skipped"] else ""), flush=True)
-            for _w in _er.get("warnings") or ():
-                _ecap_warn.append(f"ECAP: {_w}")
-                print(f"   WARNING: {_w}", flush=True)
-        except Exception as e:
-            _ecap_warn.append(
-                f"ECAP roster could not be grafted ({e}) — its batches are "
-                f"missing from this build.")
-            print(f"   WARNING: {e} — continuing without ECAP.", flush=True)
-
     # THE L2 GATE (owner, 2026-09-28: "only add sessions which are in L2
     # sheet", "leave 25th sept"). The Zoom extracts drive sometimes exports a
     # session into a folder and filename dated one day early, and the filename
@@ -980,9 +992,12 @@ def main() -> None:
 
     print("[2/8] Fetching attendee reports (new sessions only) …", flush=True)
     if l2_reg is not None:
-        print(f"   L2 gate on: {sum(1 for v in l2_reg.values() if v)} webinar(s) "
-              f"registered with a date, {sum(1 for v in l2_reg.values() if not v)} "
-              "listed without one (those pass)", flush=True)
+        _dated = sum(1 for v in l2_reg.values() if isinstance(v, set) and v)
+        _undated = sum(1 for v in l2_reg.values() if isinstance(v, set) and not v)
+        _not = sum(1 for v in l2_reg.values() if not isinstance(v, set))
+        print(f"   L2 gate on: {_dated} webinar(s) registered with a date, "
+              f"{_undated} listed without one (those pass), {_not} listed as "
+              "not a session (Hackathon calls; those are skipped)", flush=True)
     attendee_files, info = live_data.fetch_new_attendees(
         svc, cfg["attendee_folder_id"], base_bytes, l2_dates=l2_reg)
     l2_exempt = info.get("marked_dates") or set()

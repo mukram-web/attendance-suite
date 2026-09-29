@@ -322,6 +322,26 @@ def l2_cell_date(v, tab_year=None, tab_month=None):
     return _safe_ymd(year, mon, day)
 
 
+# Owner's rule, 2026-09-28, on webinars 89713589616 / 92614513509: "these two
+# rooms did not run as classes" - both were Hackathon calls. Measured on the live
+# L2 on 2026-09-30: 60 webinars carry the word, every one of them a "Hackathon
+# Intro (Call)" or "Hackathon Solution" call, B2 to B31, and NONE of them has
+# ever been a published session column. So the word alone is the rule; a class
+# topic has never contained it.
+NOT_A_SESSION = re.compile(r"hackathon", re.I)
+
+
+class NotASession(str):
+    """The register's value for a webinar whose every L2 row is a call that is
+    not a class (NOT_A_SESSION). It IS the topic string, so a log can quote it,
+    and it carries the dates L2 lists it on for reporting (tools/preflight.py).
+    Being a str and not a set is what the gate tests for."""
+    def __new__(cls, topic, dates=()):
+        o = str.__new__(cls, topic)
+        o.dates = frozenset(dates)
+        return o
+
+
 def l2_dates(l2_bytes, with_ffa=True) -> dict:
     """webinar_id -> {'YYYY_MM_DD', ...}: every date L2 registers that webinar on.
 
@@ -348,11 +368,18 @@ def l2_dates(l2_bytes, with_ffa=True) -> dict:
     `with_ffa` folds in ffa.py's hand-kept (webinar, date) register: L2 never
     carries an FFA webinar id (0 of 104 rows, §4i), so without it the gate
     would drop every FFA export as unregistered.
+
+    A webinar whose EVERY row's Topic Name matches `NOT_A_SESSION` (Hackathon
+    calls) is registered as a `NotASession` - a str, not a set - and the gate
+    drops its exports with that reason. If the same id also has a class row,
+    the class wins and the dates are kept: an id reused across two kinds of
+    call is a data-entry question, not grounds to skip the class.
     """
     wb = load_workbook(io.BytesIO(l2_bytes), data_only=True)
     out: dict = {}
+    not_session: dict = {}      # wid -> (topic, {dates}) over NOT_A_SESSION rows
     for ws in wb.worksheets:
-        bcol = wcol = hrow = None
+        bcol = wcol = tcol = hrow = None
         for r in range(1, min(ws.max_row or 1, 6) + 1):
             for c in range(1, (ws.max_column or 1) + 1):
                 v = str(ws.cell(r, c).value or '').strip().lower()
@@ -360,6 +387,8 @@ def l2_dates(l2_bytes, with_ffa=True) -> dict:
                     bcol, hrow = c, r
                 elif v == 'webinar id' and not wcol:
                     wcol = c
+                elif v == 'topic name' and not tcol:
+                    tcol = c
             if bcol and wcol:
                 break
         if not (bcol and wcol and hrow):
@@ -375,13 +404,24 @@ def l2_dates(l2_bytes, with_ffa=True) -> dict:
             wid = _wid(ws.cell(r, wcol).value)
             if not wid:
                 continue
+            topic = str(ws.cell(r, tcol).value or '').strip() if tcol else ''
+            if NOT_A_SESSION.search(topic):
+                _t, ds = not_session.setdefault(wid, (topic, set()))
+                if current:
+                    ds.add(current)
+                continue
             dates = out.setdefault(wid, set())
             if current:
                 dates.add(current)
+    for wid, (topic, ds) in not_session.items():
+        if wid not in out:                      # no class row anywhere: excluded
+            out[wid] = NotASession(topic, ds)
     if with_ffa:
         import ffa
         for s in ffa.sessions():
-            out.setdefault(ffa._norm_wid(s['wid']), set()).add(ffa._norm_ymd(s['ymd']))
+            cur = out.setdefault(ffa._norm_wid(s['wid']), set())
+            if isinstance(cur, set):
+                cur.add(ffa._norm_ymd(s['ymd']))
     return out
 
 

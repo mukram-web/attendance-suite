@@ -69,6 +69,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `trainers.py` | per-trainer rollups + identity resolution (91 L2 spellings -> 63 people). Pure, unit-tested. See §4e. |
 | `carryforward.py` | last week's marked columns carried onto this week's roster export — the base workbook for `--incremental`. Pure, unit-tested. See §4g. |
 | `ingest.py` | the **Add data** tab's engine: reads the uploaded file names, checks them against L2, puts them on Drive, dispatches the workflow. Pure parts unit-tested. |
+| `tools/preflight.py`, `tools/postrun_check.py` | the weekend runbook's two ends: what the next dispatched run WILL do with a weekend's exports (before), and what the last run DID (after). §4k. `assess` is pure and unit-tested. |
 | `lms_client.py` | the 10xstats LMS API: `/batches`, `/customers`, retry + backoff, key handling. No pagination and 504s under load — see §4h. |
 | `lms_roster.py` | builds the roster workbook from that API instead of the Sheet, retaining everyone already in the marked workbook. Pure, unit-tested. **Opt-in** via `roster_source` — see §4h. |
 | `archive.py` | dated snapshots of the four source Sheets, the store, **and the marked workbook** into `archive/` on the private Shared Drive. Runs as pipeline step `[8b]`. See §4d. |
@@ -683,7 +684,7 @@ disk, so `_LMS_STORE_PATH.exists()` is the truth; deployed, `.cache/` and
 `live_data.store_exists` — a Drive **metadata probe, never a download**, since
 the app asks on every page load.
 
-**GATE 0**, in `pipeline.py` INSIDE the `--incremental` block at `[1c]`,
+**GATE 0**, in `pipeline.py` INSIDE the `--incremental` block at `[1d]`,
 refuses to publish when `carry["unmatched_prev"]` is non-zero under
 `roster_source=lms`. It therefore does NOT apply to a full run: without
 `--incremental` there is no carry-forward and no `unmatched_prev` to read. It is
@@ -773,18 +774,25 @@ layer.
 **The roster is a SNAPSHOT, by the owner's choice.** `ECAP_ROSTER_ID` points at
 one workbook exported 2026-09-23 — B1 206 people / B2 232 / B3 95, 507 distinct,
 active 172 / 181 / 65. `ecap.graft` copies its `AI ECAP B<n>` tabs onto the CAP
-roster at step `[1d]`. **Enrolment therefore does not refresh**: anyone who
+roster at step `[1c]`. **Enrolment therefore does not refresh**: anyone who
 joins or refunds after that date never appears, so ECAP's denominators go stale
 from the day it shipped. The fix, when wanted, is to teach
 `tools/make_lms_sheet.py` to write those tabs into the main roster sheet — then
 `ecap.py` has no job left.
 
-**`[1d]` runs before `[2/8]`, and the order is load-bearing.**
-`live_data.fetch_new_attendees` decides which session folders to download by
-checking each folder's batches against the TABS IN THE WORKBOOK. Graft after
-the fetch and all 69 ECAP folders are counted "without a roster tab", never
-downloaded, and the marking has nothing to mark — a green run with a silently
-absent programme.
+**`[1c]` runs before the carry-forward at `[1d]` AND before `[2/8]`, and
+both orders are load-bearing.** `live_data.fetch_new_attendees` decides which
+session folders to download by checking each folder's batches against the TABS
+IN THE WORKBOOK. Graft after the fetch and all 69 ECAP folders are counted
+"without a roster tab", never downloaded, and the marking has nothing to mark
+— a green run with a silently absent programme. And `carryforward.merge_marks`
+keeps a tab's history only when THIS WEEK'S roster has that tab: until
+2026-09-30 the graft ran after the carry, so every ECAP column was dropped
+("batch tab(s) in last week's workbook but NOT in this week's roster"), the
+graft re-added ECAP as a pristine roster, and ECAP was re-fetched and
+re-marked from Drive on every run — never frozen, 72 columns re-marked on the
+2026-09-23 run, and permanently lost on any run that could not re-fetch them.
+`tests/test_ecap_order.py` pins both halves.
 
 **An existing tab is SKIPPED, never replaced**, and that is what makes the
 graft safe under `--incremental` (§4g). From the second run on, the base IS
@@ -884,6 +892,51 @@ duration.
 
 `tests/test_l2_gate.py` pins all four, and a regression over the real L2
 workbook: 24 webinars registered on 2026_09_26, 29 on 2026_09_27.
+
+### 4k. The weekend runbook, and the not-a-session rule (added 2026-09-30)
+
+Nothing about the weekly refresh needs a person to move files any more. The
+extractor (`Desktop\Zoom extracts`, its own private repo, three GitHub crons a
+day) files every session's exports on the Zoom extracts drive within six hours
+of the session ending. What a person still does is DECIDE — and press the
+button. Measured on the 26–27 Sep 2026 weekend, the two-plus hours of AI time
+went on a hand-built runner working around three gaps, not on the six-minute
+job:
+
+1. **A new batch with no roster tab** (B42). Every folder for it is skipped
+   "without a roster tab" and the batch silently never appears. The tab was
+   added by hand from the batch's LMS export (2026-09-30: `AI CAP B42`, 2,463
+   students, header copied from B41). `tools/preflight.py` flags the next one.
+2. **ECAP grafted after the carry-forward** — fixed, see §4j.
+3. **Hackathon calls** decided by hand each weekend — now a rule, below.
+
+**The runbook.** Monday, once the extractor's 11:30 IST sweep has run:
+
+```bash
+PYTHONIOENCODING=utf-8 python tools/preflight.py             # what the run WILL do
+gh workflow run refresh.yml -R mukram-web/attendance-suite   # dispatch (or the Actions tab, or Add data)
+python tools/postrun_check.py --wait                         # what it DID: gates, drops, warnings
+```
+
+`preflight` reads L2, the two attendee drives, the roster Sheet and last
+week's marked workbook, and reports READY / MISSING / DATE MISMATCH / NOT IN
+L2 / NO TAB / SKIPPED per session — exit 2 when something needs a decision. It
+never writes, never downloads an attendee report, never dispatches. A
+scheduled task in the Claude desktop app (`weekend-preflight`) runs it every
+Monday 12:30 IST and hands the owner the report. MISSING is not a reason to
+wait for ever: a session whose export arrives later is simply marked by the
+next run, because its column is absent from the base (§4g).
+
+**Not a session.** `attendance_core.NOT_A_SESSION` (`hackathon`, any case) on
+L2's Topic Name registers the webinar as `attendance_core.NotASession` in
+`l2_dates` — a str where a set of dates would be — and `live_data.l2_gate_reason`
+drops its exports with "L2 lists it as '<topic>', not a session". Owner's
+ruling 2026-09-28 on 89713589616 / 92614513509; measured 2026-09-30: all 60
+matching L2 webinars are Hackathon Intro/Solution calls and none was ever a
+published column, so nothing moves. The check runs BEFORE the date exemption
+on purpose (see the docstring): exempting by date would mark a Hackathon room
+for the one batch with no class that day. A webinar with a Hackathon row AND a
+class row keeps its class dates. `tests/test_not_a_session.py` pins all of it.
 
 ## 5. Invariants — break these and the numbers go silently wrong
 
@@ -1096,6 +1149,10 @@ python pipeline.py --no-upload --no-site
 # workbook — the base it carries forward — lives.
 python pipeline.py --no-upload --no-site --incremental
 
+# the weekend runbook (§4k): what the next dispatched run will do, then what it did
+PYTHONIOENCODING=utf-8 python tools/preflight.py --out F:/preflight.md
+python tools/postrun_check.py --wait
+
 # tests — stdlib unittest; pytest is NOT in requirements.txt
 python -m unittest tests.test_data
 
@@ -1103,7 +1160,7 @@ python -m unittest tests.test_data
 # same variable set back to "sheet" is the rollback.
 ROSTER_SOURCE=lms python pipeline.py --no-upload --no-site --incremental
 
-# all of them - 476 as of 2026-09-22, ~45 s. `discover` DOES work from the repo
+# all of them - 677 as of 2026-09-30, ~55 s. `discover` DOES work from the repo
 # root (do not pass `-t .`), and it is the only form that cannot silently skip a
 # new test file, which a hand-maintained module list has done twice.
 # test_dashboard_core_tabs is the slow one: it proves the bytes and tabs= paths

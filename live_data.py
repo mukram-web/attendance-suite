@@ -634,7 +634,17 @@ def l2_gate_reason(name, l2_dates, exempt_dates=None):
     parseable date at all (in L2, nothing to judge it on).
 
     Drops: a webinar L2 does not list ("not in L2"); a webinar L2 lists on a
-    DIFFERENT date only, the day-early twin ("L2 has it on 2026_09_26").
+    DIFFERENT date only, the day-early twin ("L2 has it on 2026_09_26"); a
+    webinar L2 lists only as a call that is not a class - an
+    `attendance_core.NotASession`, a str where a set of dates would be
+    ("L2 lists it as 'Hackathon Solution', not a session").
+
+    That last one is checked BEFORE the exemption, on purpose. The exemption
+    exists so a published column can never move; a call L2 itself says is not
+    a class has no column to protect (0 of the 60 Hackathon webinars had ever
+    been published, measured 2026-09-30) and its file is by definition new.
+    Exempting it by date would mark a Hackathon room for the one batch that had
+    no class that day - exactly the case the owner vetoed on 2026-09-28.
 
     `l2_dates=None` means no gate at all, never "nothing is registered".
     """
@@ -644,9 +654,11 @@ def l2_gate_reason(name, l2_dates, exempt_dates=None):
     if got is None:
         return None
     wid, d = got
+    dates = l2_dates.get(wid)
+    if isinstance(dates, str):
+        return f"L2 lists it as '{dates}', not a session"
     if _date_in(d, exempt_dates):
         return None
-    dates = l2_dates.get(wid)
     if dates is None:
         return "not in L2"
     if not dates or _date_in(d, dates):
