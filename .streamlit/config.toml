@@ -1,0 +1,8 @@
+# Streamlit theme — presentation only, NO secrets in this file.
+# primaryColor must equal ui_theme.BRAND["accent"]; both change together when
+# the brand colours arrive. base = "light" pins the palette the charts, pills
+# and tiles were validated against.
+[theme]
+base = "light"
+primaryColor = "#2a78d6"
+font = "sans serif"

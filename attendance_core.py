@@ -105,6 +105,12 @@ def _track_named(seg):
     if re.search(r'\bus\b', s):      return 'US'
     if 'lcp' in s:                   return 'LCP'
     if 'cap' in s:                   return 'CAP'
+    # The long form 'Build Side Income Using AI Accelerator B43' names no CAP
+    # and no 'bsi', so it defaulted to CAP and credited BSIAI's own room to
+    # AI CAP B43. It must be the programme NAME (a batch number follows it):
+    # the topic 'B38 - Build a Side Income Using AI' is still CAP B38.
+    if re.search(r'side income using ai\s*(accelerator\s*)?b?\s*\d', s):
+        return 'BSIAI'
     return None
 
 def _track(seg):

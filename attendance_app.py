@@ -37,8 +37,52 @@ import live_data
 import data as ddata          # new dashboard data layer (aliased; 'data' is used as a local below)
 import sheets as dsheets      # gspread / xlsx source adapter
 import dash_view              # Plotly drill-down dashboard UI
+import ui_theme as T          # brand tokens, the one stylesheet, KPI tiles, plain-word labels
 
-st.set_page_config(page_title="Be10X Attendance", page_icon="📊", layout="wide")
+# The tab icon is the wordmark's disc (ui_theme.BRAND["favicon"]). The emoji
+# stays as the fallback because a missing file makes set_page_config raise,
+# and a cosmetic asset must never be able to take the app down.
+import os as _os                                            # noqa: E402
+import ui_theme as _brand                                   # noqa: E402
+_ICON = _brand.BRAND.get("favicon")
+st.set_page_config(
+    page_title="Be10X Attendance",
+    page_icon=(_ICON if _ICON and _os.path.exists(_ICON) else "📊"),
+    layout="wide")
+
+
+def _brand_title() -> None:
+    """The wordmark beside the page name, falling back to a plain title.
+
+    `st.logo()` is deliberately not used: it pins the image to the top of the
+    SIDEBAR, and this app's sidebar is an Admin drawer that starts collapsed, so
+    the brand would be invisible on first paint. An inline <img> in the header is
+    the only place it is always seen. The file is inlined base64 rather than
+    served, because Streamlit has no static route for a repo path.
+
+    Which file: the black wordmark on a light surface, the white one on a dark
+    surface. They are NOT interchangeable — the white file is white ink on
+    transparent, so picking it wrongly gives a blank header rather than a
+    faint one. `theme.base` is Streamlit's resolved theme, so it follows
+    .streamlit/config.toml (or a deployment that overrides it).
+
+    The `.mark` wrapper crops the file's 30% vertical padding; the geometry and
+    the 140px width both live in ui_theme.BRAND.
+    """
+    import base64
+    dark = str(st.get_option("theme.base") or "light").lower() == "dark"
+    path = T.BRAND.get("logo_dark" if dark else "logo_light")
+    if not (path and _os.path.exists(path)):
+        st.title("Be10X — AI CAP Attendance")
+        return
+    with open(path, "rb") as fh:
+        b64 = base64.b64encode(fh.read()).decode()
+    mime = "image/svg+xml" if path.lower().endswith(".svg") else "image/png"
+    st.markdown(
+        f'<div class="brandbar">'
+        f'<span class="mark"><img src="data:{mime};base64,{b64}" alt="be10X"></span>'
+        f'<span class="t">AI CAP Attendance</span></div>',
+        unsafe_allow_html=True)
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -69,7 +113,7 @@ def _password_ok() -> None:
     except Exception:            # no secrets file at all
         expected = ""
 
-    st.title("📊 Be10X — AI CAP Attendance")
+    _brand_title()
     if not expected:
         st.error(
             f"**No `{_PASSWORD_KEY}` is configured, so the app is locked.** "
@@ -384,6 +428,48 @@ def _grid(roster_bytes, sheet_name):
     return dc.roster_grid(roster_bytes, sheet_name)
 
 
+# What a session cell shows. The grid holds the words 'Present' / 'Absent' /
+# '' (dashboard_core.roster_grid); the words are what they mean, but forty of
+# them across a row is a wall of text nobody reads a pattern out of, and they
+# force every session column wide enough to spell "Present". The glyph carries
+# the same three states and the colour behind it is the same status pair the
+# dashboard's pills use — never colour alone, which is why they are glyphs and
+# not blank coloured squares.
+_MARK_PRESENT = "✓"       # ✓
+_MARK_ABSENT = "✗"        # ✗
+_MARK_BLANK = "—"         # —
+
+
+@st.cache_data(show_spinner=False)
+def _roster_display(_g, batch, active_only, show_pii, stamp):
+    """The Roster grid's DISPLAY frame: filtered, masked and turned into glyphs.
+
+    Returns (frame, session columns, students shown, students present ≥ once).
+
+    `_g` has a leading underscore so Streamlit does NOT hash it — hashing a
+    3,000-row frame on every rerun costs more than the work below. The cache
+    key is therefore the four things that actually change the output plus
+    `stamp` (the store's `generated_at_iso`), and that last one is not
+    optional: without it a refresh to a new store would keep serving the
+    previous week's grid under the same batch and toggles.
+    """
+    g = _g[_g["Active"].astype(bool)] if active_only else _g
+    sess_cols = [c for c in g.columns
+                 if c not in ("Email", "Phone", "Active", "Present")]
+    n_students = len(g)
+    n_present_any = int((g["Present"] > 0).sum())
+    disp = g.copy()
+    if not show_pii:
+        disp["Email"] = disp["Email"].map(mask_email)
+        disp["Phone"] = disp["Phone"].map(mask_phone)
+    glyph = {"present": _MARK_PRESENT, "absent": _MARK_ABSENT}
+    for c in sess_cols:
+        disp[c] = disp[c].map(
+            lambda v: glyph.get(str(v).strip().lower(), _MARK_BLANK))
+    disp = disp[["Email", "Phone", "Active", "Present"] + sess_cols]
+    return disp, sess_cols, n_students, n_present_any
+
+
 @st.cache_data(show_spinner=False)
 def _sheet_map(roster_bytes):
     return dc.batch_sheet_map(roster_bytes)
@@ -445,7 +531,8 @@ def mask_phone(p: str) -> str:
 
 
 # ───────────────────────────── header ────────────────────────────────────────
-st.title("📊 Be10X — AI CAP Attendance")
+_brand_title()
+T.inject_css()          # the one stylesheet: tiles, chips, expander spacing, dashboard fragments
 
 if "nonce" not in st.session_state:
     st.session_state.nonce = 0
@@ -461,8 +548,13 @@ _store_configured = bool(_store_folder_id())
 _store_local_only = not _store_configured and _STORE_PATH.exists()
 _store_available = _store_configured or _store_local_only
 
-with st.sidebar:
-    st.header("① Data source")
+# Everything technical about WHERE the data comes from lives in one collapsed
+# Admin box: the refresh button, the matching rule, and the data-source
+# warnings that are appended to it further down. The Week selector (archived
+# weeks) stays outside it because it is for readers, not operators.
+_admin = st.sidebar.expander("Admin", expanded=False)
+with _admin:
+    st.caption("Data source")
 
     if st.button("🔄 Refresh from Google", width='stretch',
                  disabled=not (live_ready or _store_available),
@@ -477,14 +569,14 @@ with st.sidebar:
     # a live-looking radio here would be a lie.
     mode = "exact"
     if not _store_available:
-        with st.expander("⚙️ Matching rule (advanced)"):
-            mode_label = st.radio(
-                "How to match a student to an attendee",
-                ["Exact — Registered mail + number (recommended)",
-                 "Inclusive — also WhatsApp / broadcast, last-10-digit phone"],
-                index=0, label_visibility="collapsed",
-            )
-            mode = "exact" if mode_label.startswith("Exact") else "inclusive"
+        st.caption("Matching rule (advanced)")
+        mode_label = st.radio(
+            "How to match a student to an attendee",
+            ["Exact — Registered mail + number (recommended)",
+             "Inclusive — also WhatsApp / broadcast, last-10-digit phone"],
+            index=0, label_visibility="collapsed",
+        )
+        mode = "exact" if mode_label.startswith("Exact") else "inclusive"
 
 
 # ───────────────────────────── acquire the data ──────────────────────────────
@@ -557,20 +649,23 @@ if not _viewing and _store_available:
         report, warnings = store["report"], store["warnings"]
         source_label = store["source"]
         if store.get("drive_error"):
-            st.sidebar.warning("Drive unreachable — showing the last downloaded "
-                               f"data.\n\n{store['drive_error']}")
+            _admin.warning("Drive unreachable — showing the last downloaded "
+                           f"data.\n\n{store['drive_error']}")
         if _store_local_only:
-            st.sidebar.warning(
+            _admin.warning(
                 f"Using a **locally built** store from {store['generated_at']}. "
                 "🔄 Refresh cannot update it — no `store_folder_id` is configured. "
                 "Re-run `pipeline.py`, or delete `.cache/attendance.duckdb` to read "
                 "Google Drive directly."
             )
         else:
-            st.sidebar.caption(f"📅 Data as of **{store['generated_at']}** · "
-                               "rebuilt when data is added")
+            # The build stamp is the ONE caption under the title (see
+            # `_data_stamp`). Repeating it here is how the page came to print
+            # it three times on first paint.
+            _admin.caption("Rebuilt when a week's data is added")
         pipeline_mode = (store.get("stamps") or {}).get("mode") or "exact"
-        st.sidebar.caption(f"Matching rule: **{pipeline_mode}** (set by the pipeline)")
+        _admin.caption(f"Source: {source_label}")
+        _admin.caption(f"Matching rule: **{pipeline_mode}** (set by the pipeline)")
     elif loaded and loaded.get("error"):
         st.sidebar.error(f"Couldn’t load the prebuilt dashboard:\n\n{loaded['error']}"
                          + ("\n\nFalling back to reading Google Drive directly."
@@ -596,7 +691,7 @@ if not store_mode and marked_bytes is None:
                        "See **SETUP_LIVE.md** to make it automatic.")
         up_roster = st.file_uploader("Master Roster (.xlsx)", type=["xlsx"])
         with st.expander("Optional: mark fresh attendance"):
-            up_l2 = st.file_uploader("L2 schedule (.xlsx)", type=["xlsx"])
+            up_l2 = st.file_uploader("Weekly schedule (.xlsx)", type=["xlsx"])
             up_zip = st.file_uploader("Zoom attendee reports (.zip)", type=["zip"])
     if up_roster is None:
         st.info("👈 **Upload your Master Roster** in the sidebar to begin "
@@ -641,18 +736,74 @@ if marked.empty:
     st.stop()
 
 
-# status line
+# status line — ONE quiet caption, and the only "Data as of" on the page.
+# "🟢 Prebuilt data · Data as of" is the five-second health check
+# (CLAUDE.md §8); the source detail is in Admin.
+def _refresh_note(report: list) -> str:
+    """What the last run did to the session columns, in the pipeline's own
+    three buckets.
+
+    `attendance_core.process_files` tags every report row `NEW`, `re-mark` or
+    `frozen`, and `pipeline.py` counts the third separately for exactly the
+    reason this function used not to: a carried-forward column was NOT
+    re-marked — nothing was written to it — so counting it as "re-marked"
+    claimed 36 columns had been recomputed on a run that recomputed none.
+
+    A report whose rows carry no `kind` at all is an older store, and the
+    honest answer there is to print no counts rather than guess a bucket.
+    """
+    if not report:
+        return ""
+    kinds = [r.get("kind") for r in report]
+    if not any(k for k in kinds):
+        return ""
+    new_n = sum(1 for k in kinds if k == "NEW")
+    re_n = sum(1 for k in kinds if k == "re-mark")
+    fz_n = sum(1 for k in kinds if k == "frozen")
+    if new_n + re_n + fz_n != len(kinds):          # a bucket we do not know
+        return ""
+    return (f"last refresh: {new_n} new, {re_n} re-marked, "
+            f"{fz_n} frozen session column(s)")
+
+
+def _sessions_through(store: dict) -> str:
+    """The newest session date the store carries, as '27 Sep 2026'.
+
+    The build stamp says when the pipeline RAN; this says what it got to,
+    which is the question people actually ask of a dashboard ("is last
+    weekend in?"). recap's session rows carry ISO dates (recap.py), so this
+    is a max over strings and needs no parsing to compare.
+    """
+    days = [str(s.get("date") or "") for s in (store.get("sessions") or ())]
+    days = [d for d in days if len(d) >= 10]
+    if not days:
+        return ""
+    try:
+        return f"{_dt.date.fromisoformat(max(days)[:10]):%d %b %Y}"
+    except ValueError:
+        return ""
+
+
 if store_mode:
-    auto = "🟢 Prebuilt data"
-    st.caption(f"{auto} · {source_label} · data as of {store['generated_at']}")
+    _through = _sessions_through(store)
+    _stamp = (f"🟢 Prebuilt data · Data as of {store['generated_at']}"
+              + (f" · sessions through {_through}" if _through else ""))
 else:
     auto = "🟢 Live from Google Drive" if (live_ready and not live_failed) else "📤 Manual upload"
-    st.caption(f"{auto} · {source_label} · refreshed {datetime.now():%d %b %Y, %H:%M}")
-if report:
-    new_n = sum(1 for r in report if r["kind"] == "NEW")
-    st.success(f"✅ Auto-marked attendance: {len(report)} session column(s) across "
-               f"{len({r['batch'] for r in report})} batch(es) "
-               f"({new_n} new, {len(report)-new_n} re-marked).")
+    _stamp = f"{auto} · {source_label} · refreshed {datetime.now():%d %b %Y, %H:%M}"
+st.caption(" · ".join(x for x in (_stamp, _refresh_note(report)) if x))
+
+# ── the run's own warnings, in Admin ────────────────────────────────────────
+# `store["warnings"]` is what the pipeline wants a human to know about the
+# week it published — an unregistered webinar, a skipped sheet. It was read
+# into a variable and then never rendered anywhere, so nobody has seen one.
+# It belongs in the Admin drawer with the rest of the operational detail, not
+# as a yellow box over the numbers: these are notes about the data, not a
+# reason to distrust what is on screen.
+if warnings:
+    _admin.caption(f"Notes from the last refresh ({len(warnings)})")
+    for _w0 in warnings:
+        _admin.caption("• " + str(_w0))
 
 
 def _marked_roster_download(key: str) -> None:
@@ -713,13 +864,52 @@ def _marked_roster_download(key: str) -> None:
         )
 
 
-# Prominent: the full marked roster (all sessions) — same deliverable as the original marker
-_marked_roster_download("dl_top")
-st.caption("The complete marked workbook — every batch, all sessions, Present/Absent.")
-
+# The marked-roster download lives at the top of the Roster tab (it used to sit
+# above the tab strip, on every tab).
 
 # Batch list for the Roster tab (the new Dashboard has its own selector).
 all_batches = sorted(marked["Batch"].unique(), key=dc.batch_key)
+
+
+# ─────────────── proof that the fragments below are really fragments ─────────
+# Each tab body is an @st.fragment, so a widget inside one repaints that tab
+# alone instead of re-running all six. That is invisible from the outside —
+# the page looks identical either way — so each body stamps a counter here and
+# tests/test_ui_layout.py asserts that changing the Dashboard's batch does not
+# move the Roster's. Cheap, and the only observable evidence the wrapping is
+# in force; without it a later refactor can quietly drop @st.fragment and no
+# test notices.
+def _painted(name: str) -> None:
+    n = dict(st.session_state.get("_painted") or {})
+    n[name] = n.get(name, 0) + 1
+    st.session_state["_painted"] = n
+
+
+def _card(kicker: str, title: str, who: str, mentor: str, value: str,
+          why: str) -> str:
+    """One Weekend Recap card — the award cards and the Below-the-curve cards
+    are the same object and must stay the same object, or the page reads as
+    two unrelated blocks that happen to sit under each other.
+
+    Everything here is hand-typed in the schedule (topic, mentor) and renders
+    with unsafe_allow_html, so every field is escaped: a stray '<' in a
+    session title would otherwise eat the rest of the card, and anything
+    worse than that would run.
+    """
+    e = _html.escape
+    return (
+        "<div style='border:1px solid rgba(128,128,128,.28);border-radius:10px;"
+        "padding:12px 14px'>"
+        "<div style='font-size:10px;letter-spacing:.08em;opacity:.7;"
+        f"font-weight:700'>{e(str(kicker)).upper()}</div>"
+        "<div style='font-weight:650;margin:6px 0 2px;font-size:13px'>"
+        f"{e(str(title)[:46])}</div>"
+        f"<div style='opacity:.7;font-size:12px'>{e(str(who))}"
+        + (f" &middot; {e(str(mentor))}" if mentor else "")
+        + "</div><div style='font-size:26px;font-weight:700;margin-top:8px'>"
+        f"{e(str(value))}</div>"
+        "<div style='opacity:.6;font-size:11px;margin-top:4px;"
+        f"line-height:1.35'>{e(str(why))}</div></div>")
 
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
@@ -739,12 +929,14 @@ with tab_sessions:
         ["🔎 Browse", "🏆 This week", "🎓 Trainers"])
 
 # ============================ TAB 1 — DASHBOARD ==============================
-with tab_dash:
+@st.fragment
+def _tab_dashboard():
+    _painted("dashboard")
     if store_mode:
         # Everything was prebuilt by pipeline.py — render straight from the store.
+        # The build stamp is already the caption under the title; not repeated.
         DATA, summary = store["DATA"], store["summary"]
-        note = (f"🟢 Data as of {store['generated_at']} · rebuilt when a week's "
-                "Zoom exports are added (➕ Add data)")
+        note = ""
     else:
         # Legacy: build from the roster this server just marked.
         if live_ready and not live_failed:
@@ -754,16 +946,33 @@ with tab_dash:
             names = upload_attendee_names
             note = "📤 Showing the uploaded roster"
         DATA, summary = _build_dashboard(marked_bytes, names, l2_bytes)
-    dash_view.render(DATA, summary, note)
+    # The batch selector, the domain control and the click-to-select bar all
+    # live inside this fragment, so a pick repaints the Dashboard alone.
+    dash_view.render(DATA, summary, note, store=store if store_mode else None,
+                     rerun_scope="fragment")
+
+
+with tab_dash:
+    _tab_dashboard()
 
 # ============================ TAB 2 — ROSTER =================================
-with tab_roster:
+@st.fragment
+def _tab_roster():
+    _painted("roster")
+    # The full marked roster (all sessions) — same deliverable as the original marker
+    _marked_roster_download("dl_roster")
+    st.caption("The complete marked workbook — every batch, all sessions, Present/Absent.")
+    st.divider()
     st.caption("The marked attendance, student-by-student, exactly like the roster sheet.")
     if store_mode:
         grid_batches = [b for b in store["batches"] if b in set(all_batches)] or store["batches"]
     else:
         smap = _sheet_map(marked_bytes)
         grid_batches = [b for b in all_batches if b in smap]
+    # NEWEST FIRST, the same ordering the Dashboard's selector uses. This list
+    # came straight off `batch_key`, so the tab opened on B17 — a cohort that
+    # finished months ago — and every visit began by scrolling to today's.
+    grid_batches = dash_view.batch_order(grid_batches)
     ctop1, ctop2 = st.columns([3, 2])
     pick = ctop1.selectbox("Batch", grid_batches,
                            index=0 if grid_batches else None, key="roster_pick")
@@ -773,9 +982,8 @@ with tab_roster:
     if pick:
         if store_mode:
             g = _store_grid(store["path"], pick, store["generated_at_iso"])
-            g = g.copy() if g is not None else None
         else:
-            g = _grid(marked_bytes, smap[pick]).copy()
+            g = _grid(marked_bytes, smap[pick])
     if g is None:
         st.info("No roster rows to show for this batch — try 🔄 Refresh from Google."
                 if pick else "No batch sheets to show.")
@@ -787,58 +995,76 @@ with tab_roster:
         # are simply missing a Payment value. Dashboard percentages are not
         # affected either way: they always use total strength (data.py).
         active_only = st.checkbox("Active learners only", value=True, key="roster_active")
-        if active_only:
-            g = g[g["Active"].astype(bool)]
-        sess_cols = [c for c in g.columns if c not in ("Email", "Phone", "Active", "Present")]
-        n_students = len(g)
-        n_present_any = int((g["Present"] > 0).sum())
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Students shown", f"{n_students:,}")
-        m2.metric("Attended ≥1 session", f"{n_present_any:,}")
-        m3.metric("Sessions", len(sess_cols))
-
-        disp = g.copy()
-        if not show_pii:
-            disp["Email"] = disp["Email"].map(mask_email)
-            disp["Phone"] = disp["Phone"].map(mask_phone)
-        disp = disp[["Email", "Phone", "Active", "Present"] + sess_cols]
+        disp, sess_cols, n_students, n_present_any = _roster_display(
+            g, pick, active_only, show_pii,
+            store["generated_at_iso"] if store_mode else "")
+        T.tiles([
+            {"label": "Students shown", "value": f"{n_students:,}"},
+            {"label": "Attended ≥1 session", "value": f"{n_present_any:,}"},
+            {"label": "Sessions", "value": len(sess_cols)},
+        ])
 
         def _hl(v):
-            s = str(v).lower()
-            if s == "present":
-                return "background-color: #d8f3dc; color:#1b4332"
-            if s == "absent":
-                return "background-color: #ffe5e5; color:#7d1128"
-            return ""
+            """Attendance glyphs in the theme's status colours — the same
+            good / low pair the dashboard pills use, from ui_theme, so a
+            rebrand changes them in one place."""
+            if v == _MARK_PRESENT:
+                b = T.STATUS["high"]
+            elif v == _MARK_ABSENT:
+                b = T.STATUS["low"]
+            else:
+                return ""
+            return f"background-color: {b['bg']}; color:{b['fg']}"
         styled = disp.style.map(_hl, subset=sess_cols)  # .map (pandas >=2.1; applymap removed in 3.0)
-        st.dataframe(styled, width='stretch', hide_index=True, height=520)
+        st.dataframe(
+            styled, width='stretch', hide_index=True, height=520,
+            column_config={
+                # Pinned, so the person a row belongs to stays on screen while
+                # you scroll thirty session columns sideways. Without it the
+                # glyphs are anonymous past about the eighth column.
+                "Email": st.column_config.TextColumn("Email", pinned=True),
+                **{c: st.column_config.TextColumn(c, width="small")
+                   for c in sess_cols},
+            })
+        st.caption(f"{_MARK_PRESENT} present · {_MARK_ABSENT} absent · "
+                   f"{_MARK_BLANK} not marked for that session (the student "
+                   "was not in the room the column covers, or joined the "
+                   "batch after it ran).")
 
-    st.divider()
-    _marked_roster_download("dl_roster")
+
+with tab_roster:
+    _tab_roster()
 
 # ========================== TAB 4 — FORECAST =================================
 # Predicted attendance for sessions that have not run yet, built by pipeline.py
 # from the dashboard's own DATA plus the Master Curriculum Schedule. Aggregates
 # only. Everything shown here is a PREDICTION — the copy says so in every place
 # a number could otherwise be mistaken for a measurement.
-with tab_fcst:
+@st.fragment
+def _tab_forecast():
+    _painted("forecast")
     _f = (store or {}).get("forecast") if store_mode else None
 
     if not store_mode:
-        st.info("The Forecast tab reads the prebuilt store. It is empty in "
-                "upload / legacy-live mode because the curriculum schedule is a "
-                "separate Sheet the app does not fetch at runtime.")
+        st.caption("No forecast in this data set.")
+        with st.expander("Notes on this forecast", expanded=False):
+            st.info("The Forecast tab reads the prebuilt store. It is empty in "
+                    "upload / legacy-live mode because the curriculum schedule is a "
+                    "separate Sheet the app does not fetch at runtime.")
     elif _f is None:
-        st.warning(
-            "**The forecast is not configured yet.** Add `CURRICULUM_ID` (repo "
-            "secret, or `curriculum_id` under `[drive]` in secrets.toml) pointing "
-            "at the Master Curriculum Schedule, and share that Sheet with the "
-            "service account. The next refresh will fill this tab in."
-        )
+        st.caption("No forecast in this data set yet.")
+        with st.expander("Notes on this forecast", expanded=False):
+            st.warning(
+                "**The forecast is not configured yet.** Add `CURRICULUM_ID` (repo "
+                "secret, or `curriculum_id` under `[drive]` in secrets.toml) pointing "
+                "at the Master Curriculum Schedule, and share that Sheet with the "
+                "service account. The next refresh will fill this tab in."
+            )
     elif not _f.get("sessions"):
-        st.warning("The forecast produced no sessions in the last refresh.")
-        for _w in _f.get("warnings", []):
-            st.caption("• " + str(_w))
+        st.caption("The forecast produced no sessions in the last refresh.")
+        with st.expander("Notes on this forecast", expanded=False):
+            for _w in _f.get("warnings", []):
+                st.caption("• " + str(_w))
     else:
         import pandas as _pd
 
@@ -851,27 +1077,32 @@ with tab_fcst:
             f"across every past batch. Built {store['generated_at']}."
         )
 
-        m1, m2, m3, m4 = st.columns(4)
         # Count SESSIONS, not per-batch rows: one session that three batches sit
         # in is one thing to run and staff, not three. The rows are still there
         # in the detail table and the full CSV.
-        m1.metric("Sessions ahead", f"{len(_f.get('by_session') or []):,}",
-                  help=f"{len(_rows):,} batch-slots across them — a session that "
-                       "several batches attend counts once here.")
-        m2.metric("Predicted attendees", f"{sum(r['pred'] for r in _rows):,}")
+        _ft = [
+            {"label": "Sessions ahead", "value": f"{len(_f.get('by_session') or []):,}",
+             "help": f"{len(_rows):,} batch-slots across them — a session that "
+                     "several batches attend counts once here."},
+            {"label": "Predicted attendees", "value": f"{sum(r['pred'] for r in _rows):,}"},
+        ]
         if _acc.get("mape_1_4wk") is not None:
-            m3.metric("Typical error, 1–4 wks", f"±{_acc['mape_1_4wk']}%",
-                      help="Mean absolute % error on headcount, measured by "
-                           "replaying every past batch: fit on what was known at "
-                           "the time, score against what actually happened.")
+            _ft.append({"label": "Typical error, 1–4 wks", "value": f"±{_acc['mape_1_4wk']}%",
+                        "help": "Mean absolute % error on headcount, measured by "
+                                "replaying every past batch: fit on what was known at "
+                                "the time, score against what actually happened."})
         if _acc.get("baseline_mape_1_4wk") is not None:
-            m4.metric("Naive baseline", f"±{_acc['baseline_mape_1_4wk']}%",
-                      help="What you would get by assuming the next session "
-                           "repeats the last one's attendance rate. The model is "
-                           "only worth having while it beats this.")
+            _ft.append({"label": "Naive baseline", "value": f"±{_acc['baseline_mape_1_4wk']}%",
+                        "help": "What you would get by assuming the next session "
+                                "repeats the last one's attendance rate. The model is "
+                                "only worth having while it beats this."})
+        T.tiles(_ft)
 
-        for _w in _f.get("warnings", []):
-            st.warning(str(_w))
+        if _f.get("warnings"):
+            with st.expander(f"Notes on this forecast ({len(_f['warnings'])})",
+                             expanded=False):
+                for _w in _f["warnings"]:
+                    st.caption("• " + str(_w))
 
         # ── every session, batch-wise and total ──────────────────────────────
         # One row per SESSION with a column per batch, because that is the unit
@@ -888,7 +1119,7 @@ with tab_fcst:
         _fdate = c1.multiselect("Date", list(dict.fromkeys(
             _pd.to_datetime([s["date"] for s in _sess]).strftime("%a %d %b"))),
             key="fcst_date")
-        _fpod = c2.multiselect("Pod", sorted({s["pod"] for s in _sess}),
+        _fpod = c2.multiselect("Domain", sorted({s["pod"] for s in _sess}),
                                key="fcst_pod")
         _ftopic = c3.multiselect("Topic — type to search",
                                  sorted({s["topic"] for s in _sess}),
@@ -904,7 +1135,7 @@ with tab_fcst:
             _lbl = _pd.to_datetime(s["date"]).strftime("%a %d %b")
             if _fdate and _lbl not in _fdate:
                 continue
-            _r = {"Date": _lbl, "Pod": s["pod"], "Topic": s["topic"],
+            _r = {"Date": _lbl, "Domain": s["pod"], "Topic": s["topic"],
                   "Trainer": s["trainer"] or "—"}
             for b in _all_b:
                 _pb = s["per_batch"].get(b)
@@ -961,14 +1192,14 @@ with tab_fcst:
         with st.expander("How this is calculated, and how much to trust it"):
             st.markdown(
                 "**predicted = group size × decay curve(week) × batch offset × "
-                "pod multiplier**\n\n"
+                "domain multiplier**\n\n"
                 "- **Decay curve** — attendance against weeks-since-batch-start, "
                 "pooled over every past batch. The shape is very stable: batches "
                 "open near 50% and fall about 10% a week.\n"
                 "- **Batch offset** — how this batch is actually tracking against "
                 "that curve. A batch running cold shows up here first.\n"
-                "- **Pod multiplier** — how a pod draws relative to its own "
-                "batch on the same day. **This is the weak layer**: the pod split "
+                "- **Domain multiplier** — how a domain draws relative to its own "
+                "batch on the same day. **This is the weak layer**: the domain split "
                 "only began in late Aug 2026, so it rests on few sessions and is "
                 "shrunk toward the batch average.\n\n"
                 "Accuracy is re-measured on live data every refresh by replaying "
@@ -982,11 +1213,11 @@ with tab_fcst:
                         {"Weeks ahead": list(_mh), "Error ±%": list(_mh.values())}),
                         width='stretch', hide_index=True, height=240)
             with _cB:
-                st.caption("**Pod multipliers** (>1 attends more than its batch)")
+                st.caption("**Domain multipliers** (>1 attends more than its batch)")
                 _pmd = _f.get("pod_multiplier") or {}
                 if _pmd:
                     st.dataframe(_pd.DataFrame(
-                        [{"Pod": k, "×": v["mult"], "Sessions seen": v["n"]}
+                        [{"Domain": k, "×": v["mult"], "Sessions seen": v["n"]}
                          for k, v in sorted(_pmd.items(),
                                             key=lambda kv: -kv[1]["mult"])]),
                         width='stretch', hide_index=True, height=240)
@@ -999,8 +1230,14 @@ with tab_fcst:
                         _bo.items(), key=lambda kv: dc.batch_key(kv[0]))]),
                     width='stretch', hide_index=True, height=240)
 
+
+with tab_fcst:
+    _tab_forecast()
+
 # ===================== SESSIONS - BROWSE (sub-tab) ===========================
-with sub_browse:
+@st.fragment
+def _sub_browse():
+    _painted("browse")
     _S = (store or {}).get("sessions") if store_mode else None
     if _S:
         # Backfill from DATA for any field the stored sessions section predates.
@@ -1025,18 +1262,47 @@ with sub_browse:
             if _r.get("nps") is None and _src.get("rating_nps") is not None:
                 _r["nps"] = _src["rating_nps"]
     if not store_mode:
-        st.info("The session browser reads the prebuilt data file.")
+        st.caption("No session list in this data set.")
+        with st.expander("Why", expanded=False):
+            st.info("The session browser reads the prebuilt data file.")
     elif not _S:
         st.warning("No sessions in the last refresh.")
     else:
         import pandas as _pd
-        st.caption(
-            "Every logged session across every batch. Select a row for the full "
-            "breakdown. **Attendance % = present ÷ batch strength**, taken from "
-            "the roster automatically — so it is filled in for all "
-            f"{len({s['batch'] for s in _S})} batches, not only the ones somebody "
-            "remembered to configure."
-        )
+        st.caption("Every logged session across every batch. Filter, then tick "
+                   "a row for its full breakdown.")
+        with st.expander("How this is calculated", expanded=False):
+            st.markdown(
+                "**Attendance % = present ÷ strength of whoever was invited** — "
+                "the batch, a domain, a compound room, or the day's common room "
+                "— taken from the roster automatically, so it is filled in for all "
+                f"{len({s['batch'] for s in _S})} batches, not only the ones somebody "
+                "remembered to configure.\n\n"
+                "Title, trainer, duration and peak are one session's facts, so "
+                "they span its batches. **Att %**, **Present**, **Absent** and the "
+                "first rating block are per batch — each batch's own roster, and "
+                "its own students' poll answers. Present + Absent is that row's "
+                "strength: for a domain session that is the domain's strength, "
+                "not the whole batch's — the same denominator Att % uses. "
+                "The **Whole room** block is a shared room's poll over everyone "
+                "found on a sharing roster, once — an answer from an email on "
+                "none of those rosters (a BSIAI student in a shared AI CAP "
+                "room) is counted nowhere, the Whole room figure included; for a "
+                "single-batch session Whole room equals the batch's own. Hover a "
+                "rating cell in a shared session for the split and the count of "
+                "everyone who answered. *anonymous poll* means the hosts ran that "
+                "feedback poll anonymously — no emails in the export, so it "
+                "cannot be divided; only the Whole room figure exists.\n\n"
+                "**Duration (hrs)** is first-join to last-leave, not Zoom's "
+                "'Actual Duration' — that one runs from the host starting to the "
+                "host leaving, so a trainer who forgets to end the webinar "
+                "inflates it. **Peak** is the highest number of people in the "
+                "room at once, swept from the join/leave times: it matches Zoom's "
+                "own *Max Concurrent Views* exactly on 93% of the reports that "
+                "carry that field, and covers the 64% that do not. **Simulive** "
+                "is blank unless the schedule says so — only 49 of 1,610 mentor "
+                "rows record it, so a blank means *not recorded*, never *Live*."
+            )
 
         # ── filters ──────────────────────────────────────────────────────────
         _dates = sorted({s["date"] for s in _S})
@@ -1048,7 +1314,7 @@ with sub_browse:
             max_value=_dt.date.fromisoformat(_dates[-1]), key="ss_dates")
         _fb = f2.multiselect("Batch", sorted({s["batch"] for s in _S},
                                              key=dc.batch_key), key="ss_batch")
-        _fp = f3.multiselect("POD", sorted({s["pod"] for s in _S if s["pod"]}),
+        _fp = f3.multiselect("Domain", sorted({s["pod"] for s in _S if s["pod"]}),
                              key="ss_pod")
         g1, g2, g3 = st.columns([2, 1, 2])
         _ft = g1.multiselect("Trainer", sorted({t for s in _S
@@ -1084,29 +1350,30 @@ with sub_browse:
         _merged = _polls_mod.merge_dists(g.get("dist") for g in _G)
         _pres = sum(s["present"] for s in _v)
         _inv = sum(s["total"] for s in _v)
-        m1, m2, m3, m4, m5 = st.columns(5)
-        m1.metric("Sessions", f"{len(_G):,}",
-                  help=f"{len(_v):,} batch rows. A room several batches sat in "
-                       "is one session here.")
-        m2.metric("Attendance", f"{_pres / _inv * 100:.1f}%" if _inv else "—",
-                  help=f"{_pres:,} present of {_inv:,} invited, pooled — not a "
-                       "mean of per-session percentages.")
-        m3.metric("Avg overall",
-                  f"{sum(g['rating'] * g['rating_n'] for g in _rated) / _rn:.2f}"
-                  if _rn else "—",
-                  help="Weighted by responses, so a 12-response session does not "
-                       "outweigh a 900-response one. A shared room's poll counts "
-                       "once, whole.")
         _trd = [g for g in _G if g.get("rating_trainer") is not None]
         _trn = sum(g["rating_n"] for g in _trd)
-        m4.metric("Avg trainer",
-                  f"{sum(g['rating_trainer'] * g['rating_n'] for g in _trd) / _trn:.2f}"
-                  if _trn else "—")
         _nps = _polls_mod.nps_from_dist(_merged.get("recommend"))
-        m5.metric("NPS", f"{_nps:+d}" if _nps is not None else "—",
-                  help="Promoter 5, passive 4, detractor 1-3, computed from the "
-                       "SUMMED 1-5 histograms of every session shown — not an "
-                       "average of their NPS percentages.")
+        T.tiles([
+            {"label": "Sessions", "value": f"{len(_G):,}",
+             "help": f"{len(_v):,} batch rows. A room several batches sat in "
+                     "is one session here."},
+            {"label": "Attendance", "value": f"{_pres / _inv * 100:.1f}%" if _inv else "—",
+             "help": f"{_pres:,} present of {_inv:,} invited, pooled — not a "
+                     "mean of per-session percentages."},
+            {"label": "Avg overall",
+             "value": (f"{sum(g['rating'] * g['rating_n'] for g in _rated) / _rn:.2f}"
+                       if _rn else "—"),
+             "help": "Weighted by responses, so a 12-response session does not "
+                     "outweigh a 900-response one. A shared room's poll counts "
+                     "once, whole."},
+            {"label": "Avg trainer",
+             "value": (f"{sum(g['rating_trainer'] * g['rating_n'] for g in _trd) / _trn:.2f}"
+                       if _trn else "—")},
+            {"label": "NPS", "value": f"{_nps:+d}" if _nps is not None else "—",
+             "help": "Promoter 5, passive 4, detractor 1-3, computed from the "
+                     "SUMMED 1-5 histograms of every session shown — not an "
+                     "average of their NPS percentages."},
+        ])
 
         # ── the table ────────────────────────────────────────────────────────
         # ONE SESSION, MANY BATCHES. A session several batches sit in produces
@@ -1155,14 +1422,14 @@ with sub_browse:
                 # beside it would name people outside the figure it is
                 # printed against.
                 w = sh.get("room") or sh.get("joint") or {}
-                return (f' title="{s["batch"]}\'s own students only. Whole room: '
-                        f'{w.get("responses") or 0} responses'
+                return (f' title="{s["batch"]}\'s own students only. Everyone who '
+                        f'answered: {w.get("responses") or 0}'
                         + (f', {sh["unmatched"]} on no sharing roster'
-                           + (' (not in the Joint columns)' if sh.get("room") else '')
+                           + (' (not in the Whole room columns)' if sh.get("room") else '')
                            if sh.get("unmatched") else "") + '"')
             return (' title="This poll was run anonymously (no emails in the '
                     'export), so it cannot be divided between the batches. '
-                    'The room\'s figure is in the Joint columns."')
+                    'The room\'s figure is in the Whole room columns."')
 
         def _unsplit(s, n):
             """True when a shared room's poll could NOT be divided per batch.
@@ -1221,22 +1488,24 @@ with sub_browse:
                 _rows_html.append("<tr>" + (merged if i == 0 else "") + per
                                   + (tail if i == 0 else "") + "</tr>")
 
+        # Scoped under .sess-wrap: these rules used to be global and restyled
+        # the Dashboard tab's own sessions table (12px, no wrapping).
         st.markdown(
-            """<style>
-            .sess-wrap{max-height:560px;overflow:auto;border:1px solid #e6e9ef;border-radius:8px}
-            table.sess{border-collapse:collapse;width:100%;font-size:12px}
-            table.sess th{position:sticky;top:0;background:#f4f6f9;text-align:left;
-              padding:7px 9px;font-weight:600;color:#4a5568;border-bottom:1px solid #e6e9ef;
-              white-space:nowrap;z-index:1}
-            table.sess td{padding:6px 9px;border-bottom:1px solid #f1f3f6;
-              border-right:1px solid #f6f7f9;white-space:nowrap;vertical-align:middle}
-            table.sess td.n{text-align:right;font-variant-numeric:tabular-nums}
-            table.sess td.t{max-width:300px;overflow:hidden;text-overflow:ellipsis}
-            table.sess td[rowspan]{background:#fcfdff}
-            .bw{display:flex;align-items:center;gap:6px;min-width:96px}
-            .bf{height:7px;background:#2f6df6;border-radius:4px}
-            .bw span{font-variant-numeric:tabular-nums;color:#4a5568}
-            .anon{color:#9aa4b5;font-size:11px;font-style:italic;white-space:nowrap}
+            f"""<style>
+            .sess-wrap{{max-height:560px;overflow:auto;border:1px solid rgba(128,128,128,.28);border-radius:8px}}
+            .sess-wrap table.sess{{border-collapse:collapse;width:100%;font-size:12px}}
+            .sess-wrap table.sess th{{position:sticky;top:0;background:{T.INK['surface']};text-align:left;
+              padding:7px 9px;font-weight:600;color:{T.INK['secondary']};border-bottom:1px solid rgba(128,128,128,.28);
+              white-space:nowrap;z-index:1}}
+            .sess-wrap table.sess td{{padding:6px 9px;border-bottom:1px solid rgba(128,128,128,.14);
+              border-right:1px solid rgba(128,128,128,.08);white-space:nowrap;vertical-align:middle}}
+            .sess-wrap table.sess td.n{{text-align:right;font-variant-numeric:tabular-nums}}
+            .sess-wrap table.sess td.t{{max-width:300px;overflow:hidden;text-overflow:ellipsis}}
+            .sess-wrap table.sess td[rowspan]{{background:rgba(128,128,128,.04)}}
+            .sess-wrap .bw{{display:flex;align-items:center;gap:6px;min-width:96px}}
+            .sess-wrap .bf{{height:7px;background:{T.BRAND['accent']};border-radius:4px}}
+            .sess-wrap .bw span{{font-variant-numeric:tabular-nums}}
+            .sess-wrap .anon{{opacity:.6;font-size:11px;font-style:italic;white-space:nowrap}}
             </style>""", unsafe_allow_html=True)
         # ── MARK A ROW, GET ITS BREAKDOWN ────────────────────────────────
         # Streamlit's row selection only exists on a real dataframe; the merged
@@ -1255,8 +1524,12 @@ with sub_browse:
             _dfrows.append({
                 "Date": _s["date"], "Title": _s.get("topic") or "",
                 "Trainer": _G2.get("trainer") or "", "Type": _G2.get("trainer_type") or "",
-                "POD": _s.get("pod") or "", "Batch": _s["batch"],
-                "Att %": _s.get("pct"), "Present": _p2,
+                "Domain": _s.get("pod") or "", "Batch": _s["batch"],
+                "Att %": _s.get("pct"),
+                # The ranking key the rest of the app uses, on the surface
+                # people actually sort. Att % alone always favours the
+                # youngest cohort in view.
+                "vs expected": _s.get("index"), "Present": _p2,
                 "Absent": (_t2 - _p2 if isinstance(_p2, (int, float))
                            and isinstance(_t2, (int, float)) else None),
                 # None, never the room's figure, when a shared poll could not be
@@ -1266,26 +1539,35 @@ with sub_browse:
                 "NPS": None if _u2 else _s.get("nps"),
                 "Resp": None if _u2 else (_s.get("rating_n") or 0),
                 "Dur (h)": _G2.get("duration_hrs"), "Peak": _G2.get("peak"),
-                "Joint ★": _G2.get("rating_trainer"),
-                "Joint overall": _G2.get("rating"), "Joint NPS": _G2.get("nps"),
-                "Joint resp": _G2.get("rating_n") or 0,
+                "Whole room ★": _G2.get("rating_trainer"),
+                "Whole room overall": _G2.get("rating"), "Whole room NPS": _G2.get("nps"),
+                "Whole room resp": _G2.get("rating_n") or 0,
             })
         _num = st.column_config.NumberColumn
+        _room_help = ("The shared room's poll over everyone found on a sharing "
+                      "roster, counted once. Equals the batch's own for a "
+                      "single-batch session.")
         _sel = st.dataframe(
             _pd.DataFrame(_dfrows), hide_index=True, height=430, width="stretch",
             on_select="rerun", selection_mode="single-row", key="ss_rows",
             column_config={
                 "Att %": _num(format="%.1f%%"),
+                "vs expected": _num(
+                    format="%.2f×",
+                    help="What this batch drew over what the decay curve says a "
+                         "cohort of that age, level and domain should draw. "
+                         "1.00 is exactly on curve."),
                 "Present": _num(format="%d"), "Absent": _num(format="%d"),
                 "Trainer ★": _num(format="%.2f"),
                 "Overall": st.column_config.ProgressColumn(
                     format="%.2f", min_value=0, max_value=5),
                 "NPS": _num(format="%+d"), "Resp": _num(format="%d"),
                 "Dur (h)": _num(format="%.1f"), "Peak": _num(format="%d"),
-                "Joint ★": _num(format="%.2f"),
-                "Joint overall": st.column_config.ProgressColumn(
-                    format="%.2f", min_value=0, max_value=5),
-                "Joint NPS": _num(format="%+d"), "Joint resp": _num(format="%d"),
+                "Whole room ★": _num(format="%.2f", help=_room_help),
+                "Whole room overall": st.column_config.ProgressColumn(
+                    format="%.2f", min_value=0, max_value=5, help=_room_help),
+                "Whole room NPS": _num(format="%+d", help=_room_help),
+                "Whole room resp": _num(format="%d", help=_room_help),
             })
         try:
             _selrows = list((_sel.selection or {}).get("rows") or [])
@@ -1298,31 +1580,18 @@ with sub_browse:
                          "one row each (merged cells)", expanded=False):
             st.markdown(
                 '<div class="sess-wrap"><table class="sess"><tr>'
-                '<th>Date</th><th>Title</th><th>Trainer</th><th>Type</th><th>POD</th>'
+                '<th>Date</th><th>Title</th><th>Trainer</th><th>Type</th><th>Domain</th>'
                 '<th>Batch</th><th>Att %</th><th>Present</th><th>Absent</th>'
                 '<th>Trainer ★</th><th>Overall</th><th>NPS</th><th>Resp</th>'
                 '<th>Dur (h)</th><th>Peak</th>'
-                '<th>Joint ★</th><th>Joint overall</th><th>Joint NPS</th><th>Joint resp</th>'
+                '<th>Whole room ★</th><th>Whole room overall</th>'
+                '<th>Whole room NPS</th><th>Whole room resp</th>'
                 '</tr>'
                 + "".join(_rows_html) + '</table></div>',
                 unsafe_allow_html=True)
         st.caption(f"{len(_groups):,} sessions · {len(_v):,} batch rows. "
-                   "Title, trainer, duration and peak are one session's facts, so "
-                   "they span its batches. **Att %**, **Present**, **Absent** and the "
-                   "first rating block "
-                   "are per batch — each batch's own roster, and its own "
-                   "students' poll answers. Present + Absent is that row's strength: "
-                   "for a POD session that is the POD's strength, not the whole "
-                   "batch's — the same denominator Att % uses. "
-                   "The **Joint** block is a shared room's poll over everyone "
-                   "found on a sharing roster, once — an answer from an email on "
-                   "none of those rosters (a BSIAI student in a shared AI CAP "
-                   "room) is counted nowhere, the Joint figure included; for a "
-                   "single-batch session Joint equals the batch's own. Hover a "
-                   "rating cell in a shared session for the split and the whole "
-                   "room's count. *anonymous poll* means the hosts ran that feedback "
-                   "poll anonymously — no emails in the export, so it cannot be "
-                   "divided; only the Joint figure exists.")
+                   "What each column means is under *How this is calculated* "
+                   "at the top of this tab.")
 
         def _sh(s, k, default=None):
             return ((s.get("rating_shared") or {}).get("joint") or {}).get(k, default)
@@ -1368,18 +1637,6 @@ with sub_browse:
                            file_name="sessions.csv", mime="text/csv",
                            key="dl_sessions")
 
-        st.caption(
-            "**Duration (hrs)** is first-join to last-leave, not Zoom's "
-            "'Actual Duration' — that one runs from the host starting to the host "
-            "leaving, so a trainer who forgets to end the webinar inflates it. "
-            "**Peak** is the highest number of people in the room at once, swept "
-            "from the join/leave times: it matches Zoom's own *Max Concurrent "
-            "Views* exactly on 93% of the reports that carry that field, and "
-            "covers the 64% that do not. **Simulive** is blank unless L2 says so — "
-            "only 49 of 1,610 mentor rows record it, so a blank means *not "
-            "recorded*, never *Live*."
-        )
-
         st.divider()
         if not _selrows:
             st.caption("Tick a row in the table above to see that session's full "
@@ -1400,6 +1657,13 @@ with sub_browse:
                        + (f" · {s['trainer']}" if s.get("trainer") else "")
                        + (f" ({s['trainer_type']})" if s.get("trainer_type") else ""))
 
+            def _m(label, val, fmt="{:,}", help=None):
+                """One tile: the value formatted exactly as before, '—' when
+                there is no number."""
+                return {"label": label,
+                        "value": fmt.format(val) if isinstance(val, (int, float)) else "—",
+                        "help": help}
+
             _curve = _Gp.get("retention") or s.get("retention")
             # END COUNT is the MEAN over the closing ten minutes, never the
             # final minute. Two reasons, and they agree: it is what the
@@ -1413,10 +1677,6 @@ with sub_browse:
                     if _curve else None)
             _sh0 = s.get("rating_shared") or {}
             _mine = {} if (_sh0 and not _sh0.get("split")) else s
-
-            def _m(col, label, val, fmt="{:,}", help=None):
-                col.metric(label, fmt.format(val) if isinstance(val, (int, float))
-                           else "—", help=help)
 
             # RETENTION SCORE - did they stay AND did they like it, in one
             # number out of 5. Deliberately the same formula the
@@ -1438,55 +1698,58 @@ with sub_browse:
             _ov0 = _mine.get("rating")
             _ret = ((_end / _peak0) * _ov0
                     if _end and _peak0 and _ov0 is not None else None)
-            a0, a1, a2, a3 = st.columns(4)
-            _m(a0, "Retention score", _ret, "{:.2f}",
-               help=("End count ÷ peak × overall rating, out of 5"
-                     + (f" — {_end:,} ÷ {_peak0:,} × {_ov0:.2f}"
-                        if _ret is not None else "")
-                     + ". Rewards a session that both holds the room and rates "
-                       "well. Blank when no poll was run: a session nobody was "
-                       "asked about has no score, which is not the same as a "
-                       "bad one."))
-            _m(a1, "vs curve", s.get("index"), "{:.2f}x",
-               help="What this batch actually drew over what the decay curve "
-                    "says a cohort of its age, level and POD should draw. "
-                    "1.00 is exactly on curve. Ranking on raw attendance just "
-                    "crowns the youngest cohort every week.")
-            _m(a2, "Stickiness (10 min)", _Gp.get("stick10") or s.get("stick10"),
-               "{:.0f}%", help="Mean concurrency over the closing 10 minutes as "
-                               "a share of the session's peak — the end "
-                               "count above, over the peak beside it.")
-            _m(a3, "Stickiness (30 min)", _Gp.get("stick30") or s.get("stick30"),
-               "{:.0f}%")
+            T.tiles([
+                _m("Retention score", _ret, "{:.2f}",
+                   help=("End count ÷ peak × overall rating, out of 5"
+                         + (f" — {_end:,} ÷ {_peak0:,} × {_ov0:.2f}"
+                            if _ret is not None else "")
+                         + ". Rewards a session that both holds the room and rates "
+                           "well. Blank when no poll was run: a session nobody was "
+                           "asked about has no score, which is not the same as a "
+                           "bad one.")),
+                _m("vs expected", s.get("index"), "{:.2f}× expected",
+                   help="What this batch actually drew over what the decay curve "
+                        "says a cohort of its age, level and domain should draw. "
+                        "1.00 is exactly on curve. Ranking on raw attendance just "
+                        "crowns the youngest cohort every week."),
+                _m("Stickiness (10 min)", _Gp.get("stick10") or s.get("stick10"),
+                   "{:.0f}%", help="Mean concurrency over the closing 10 minutes as "
+                                   "a share of the session's peak — the end "
+                                   "count above, over the peak beside it."),
+                _m("Stickiness (30 min)", _Gp.get("stick30") or s.get("stick30"),
+                   "{:.0f}%"),
+            ])
 
-            b1, b2, b3, b4, b5, b6 = st.columns(6)
-            _m(b1, "Overall", _mine.get("rating"), "{:.2f}",
-               help=("This batch's own students. The whole room's poll is in "
-                     "the table below.") if len(_grp) > 1 else None)
-            _m(b2, "Trainer", _mine.get("rating_trainer"), "{:.2f}")
-            _m(b3, "NPS", _mine.get("nps"), "{:+d}",
-               help="Promoter 5, passive 4, detractor 1-3 on the recommend "
-                    "question.")
-            _m(b4, "Peak", _Gp.get("peak") or s.get("peak"),
-               help="Most people in the room at once, swept from the join and "
-                    "leave times — the whole room, every batch in it.")
-            _m(b5, "Duration", _Gp.get("duration_hrs") or s.get("duration_hrs"),
-               "{:.1f} h", help="First join to last leave, not Zoom's Actual "
-                                "Duration — that runs from the host starting "
-                                "to the host leaving.")
-            _m(b6, "End count", _end,
-               help="Mean people in the room over the closing ten minutes — "
-                    "not the last minute, which is often a single person who "
-                    "never clicked Leave.")
+            T.tiles([
+                _m("Overall", _mine.get("rating"), "{:.2f}",
+                   help=("This batch's own students. The whole room's poll is in "
+                         "the table below.") if len(_grp) > 1 else None),
+                _m("Trainer", _mine.get("rating_trainer"), "{:.2f}"),
+                _m("NPS", _mine.get("nps"), "{:+d}",
+                   help="Promoter 5, passive 4, detractor 1-3 on the recommend "
+                        "question."),
+                _m("Peak", _Gp.get("peak") or s.get("peak"),
+                   help="Most people in the room at once, swept from the join and "
+                        "leave times — the whole room, every batch in it."),
+                _m("Duration", _Gp.get("duration_hrs") or s.get("duration_hrs"),
+                   "{:.1f} h", help="First join to last leave, not Zoom's Actual "
+                                    "Duration — that runs from the host starting "
+                                    "to the host leaving."),
+                _m("End count", _end,
+                   help="Mean people in the room over the closing ten minutes — "
+                        "not the last minute, which is often a single person who "
+                        "never clicked Leave."),
+            ])
 
             # Attendance last, because it is the one figure that is ALWAYS this
             # batch's own and never the room's - a room three batches sat in has
             # three different attendance rates and no single correct one.
             _p, _t = s.get("present"), s.get("total")
-            c1, c2, c3 = st.columns(3)
-            _m(c1, f"Present · {s['batch']}", _p)
-            _m(c2, "Invited", _t)
-            _m(c3, "Attendance", s.get("pct"), "{:.1f}%")
+            T.tiles([
+                _m(f"Present · {s['batch']}", _p),
+                _m("Invited", _t),
+                _m("Attendance", s.get("pct"), "{:.1f}%"),
+            ])
             if len(_grp) > 1:
                 _pp = sum(x["present"] for x in _grp)
                 _tt = sum(x["total"] for x in _grp)
@@ -1503,24 +1766,20 @@ with sub_browse:
                 import plotly.graph_objects as _go2
                 _f2 = _go2.Figure(_go2.Scatter(
                     x=list(range(len(_curve))), y=_curve, mode="lines",
-                    line=dict(color="#2a5bd7", width=2), fill="tozeroy",
-                    fillcolor="rgba(42,91,215,0.10)",
+                    line=dict(color=T.BRAND["accent"], width=2), fill="tozeroy",
+                    fillcolor=T.BRAND["accent_soft"],
                     hovertemplate="minute %{x}<br>%{y:,} in the room<extra></extra>"))
                 _pm2 = _Gp.get("poll_at_min", s.get("poll_at_min"))
                 if _pm2 is not None:
-                    _f2.add_vline(x=_pm2, line_width=1, line_dash="dash",
-                                  line_color="#c0392b")
+                    _f2.add_vline(x=_pm2, line_width=1, line_dash="dot",
+                                  line_color=T.INK["muted"])
                     _f2.add_annotation(x=_pm2, y=max(_curve), yshift=12,
                                        text="poll", showarrow=False,
-                                       font=dict(size=11, color="#c0392b"))
-                _f2.update_layout(
-                    height=280, margin=dict(l=10, r=10, t=24, b=10),
-                    xaxis=dict(title="Time (min)", showgrid=False),
-                    yaxis=dict(title="Attendees", gridcolor="#eef1f6",
-                               rangemode="tozero"),
-                    plot_bgcolor="white", paper_bgcolor="white",
-                    font=dict(family="Inter, system-ui, sans-serif",
-                              color="#5a6573", size=12))
+                                       font=dict(size=11, color=T.INK["secondary"]))
+                _f2.update_layout(T.plotly_layout(
+                    280, margin=dict(t=24),
+                    xaxis=dict(title="Time (min)"),
+                    yaxis=dict(title="Attendees", rangemode="tozero")))
                 st.plotly_chart(_f2, width="stretch",
                                 config={"displayModeBar": False})
                 st.download_button(
@@ -1554,16 +1813,16 @@ with sub_browse:
                 if _shp.get("split"):
                     _room = _shp.get("room") or _shp.get("joint") or {}
                     st.caption(
-                        f"Whole room: {_room.get('responses') or 0:,} responses"
-                        + (f" · Joint figure (the chart below): "
+                        f"Everyone who answered: {_room.get('responses') or 0:,}"
+                        + (f" · Whole room figure (the chart below): "
                            f"{_Gp.get('rating_n') or 0:,}" if _shp.get("room") else "")
                         + (f" · {_shp['unmatched']} answered from an email on none "
-                           "of these batches' rosters (in the room's count, in "
-                           "no batch's own"
-                           + (" and not in the Joint figure)" if _shp.get("room") else ")")
+                           "of these batches' rosters (in the count of everyone who "
+                           "answered, in no batch's own"
+                           + (" and not in the Whole room figure)" if _shp.get("room") else ")")
                            if _shp.get("unmatched") else "")
                         + (f" · {_shp['multi']} enrolled in more than one of them "
-                           "(counted in each batch's own, once in Joint)"
+                           "(counted in each batch's own, once in Whole room)"
                            if _shp.get("multi") else ""))
                 elif _shp:
                     st.caption("This feedback poll was run anonymously — the "
@@ -1586,47 +1845,60 @@ with sub_browse:
             else:
                 st.caption("No poll was run for this session.")
 
+
+with sub_browse:
+    _sub_browse()
+
 # ===================== SESSIONS - THIS WEEK (sub-tab) ========================
-with sub_recap:
+@st.fragment
+def _sub_this_week():
+    _painted("this_week")
     _r = (store or {}).get("recap") if store_mode else None
     if not store_mode:
-        st.info("The recap is built by the weekly pipeline, so it needs the "
-                "prebuilt data file. This server is running in live/upload mode.")
+        st.caption("No weekly recap in this data set.")
+        with st.expander("Why", expanded=False):
+            st.info("The recap is built by the weekly pipeline, so it needs the "
+                    "prebuilt data file. This server is running in live/upload mode.")
     elif not _r or not _r.get("weeks"):
-        st.warning("No recap in the last refresh."
-                   + ("  \n• " + "  \n• ".join(_r.get("warnings") or []) if _r else ""))
+        st.warning("No recap in the last refresh.")
+        if _r and _r.get("warnings"):
+            with st.expander("Details", expanded=False):
+                for _w in _r["warnings"]:
+                    st.caption("• " + str(_w))
     else:
         import pandas as _pd
         _lat = _r["latest"]
-        st.caption(
-            "Every headline here is a **residual** — what a session actually drew "
-            "over what the decay curve says a batch of that age, level and pod "
-            "should draw. Ranking on raw attendance just crowns the youngest "
-            "cohort every week, because attendance falls about 10% a week over a "
-            f"batch's life. An index of 1.00 is exactly on curve. "
-            f"Built {store['generated_at']}."
-        )
+        with st.expander("How this is calculated", expanded=False):
+            st.markdown(
+                "Every headline here is **attendance vs expected** — what a session "
+                "actually drew over what the decay curve says a batch of that age, "
+                "level and domain should draw. Ranking on raw attendance just crowns "
+                "the youngest cohort every week, because attendance falls about 10% "
+                "a week over a batch's life. 1.00× expected is exactly on curve. "
+                f"Built {store['generated_at']}."
+            )
 
-        def _d(v, pct=False, signed=True):
-            if v is None:
-                return None
-            return f"{v:+.1f}{'%' if pct else ''}" if signed else f"{v:.1f}"
-
-        k1, k2, k3, k4, k5 = st.columns(5)
-        k1.metric("Sessions", f"{_lat['sessions']:,}")
-        k2.metric("Learners present", f"{_lat['present']:,}",
-                  _d(_lat["delta"]["present"]))
-        k3.metric("Attendance", f"{_lat['pct']:.1f}%" if _lat["pct"] else "—",
-                  _d(_lat["delta"]["pct"], pct=True))
-        k4.metric("vs curve", f"{_lat['index']:.2f}x" if _lat["index"] else "—",
-                  _d(_lat["delta"]["index"]),
-                  help="Above 1.00 means these sessions beat what cohorts of "
-                       "their age normally draw. This is the one to watch — the "
-                       "raw percentage falls every week by design.")
-        k5.metric("NPS", f"{_lat['nps']:+d}" if _lat["nps"] is not None else "—",
-                  _d(_lat["delta"]["nps"]),
-                  help="Promoter 5, passive 4, detractor 1-3, on the poll's "
-                       "recommend question.")
+        # One delta helper for the whole app (ui_theme.delta_text): the unit
+        # comes from WHICH FIGURE changed, so "+3" under NPS and "+3" under
+        # Learners can no longer look like the same claim.
+        _dl0 = _lat["delta"]
+        T.tiles([
+            {"label": "Sessions", "value": f"{_lat['sessions']:,}"},
+            {"label": "Learners present", "value": f"{_lat['present']:,}",
+             "delta": T.delta_text("present", _dl0["present"])},
+            {"label": "Attendance", "value": f"{_lat['pct']:.1f}%" if _lat["pct"] else "—",
+             "delta": T.delta_text("pct", _dl0["pct"])},
+            {"label": "vs expected",
+             "value": T.fmt_index(_lat["index"]) if _lat["index"] else "—",
+             "delta": T.delta_text("index", _dl0["index"]),
+             "help": "Above 1.00 means these sessions beat what cohorts of "
+                     "their age normally draw. This is the one to watch — the "
+                     "raw percentage falls every week by design."},
+            {"label": "NPS", "value": f"{_lat['nps']:+d}" if _lat["nps"] is not None else "—",
+             "delta": T.delta_text("nps", _dl0["nps"]),
+             "help": "Promoter 5, passive 4, detractor 1-3, on the poll's "
+                     "recommend question."},
+        ])
 
         if _r.get("awards"):
             st.subheader("This week")
@@ -1639,65 +1911,89 @@ with sub_recap:
                     _esc = _html.escape
                     st.markdown(
                         f"**{_esc(_a['award'])}**  \n"
-                        f"### {_esc(_a['value'])}  \n"
+                        f"### {_esc(T.award_value(_a))}  \n"
                         f"{_esc(_a['batch'])} · {_esc(_a['topic'][:44])}"
                         + (f" · {_esc(_a['pod'])}" if _a.get("pod") else "")
                         + (f"  \n_{_esc(_a['mentor'])}_" if _a.get("mentor") else "")
-                        + "  \n<span style='color:#7a8598;font-size:12px'>"
+                        + "  \n<span style='opacity:.65;font-size:12px'>"
                         + _esc(_a["why"]) + "</span>",
                         unsafe_allow_html=True)
 
+        _idx_col = st.column_config.NumberColumn(
+            "vs expected", format="%.2f×",
+            help="1.00 = exactly what the decay curve predicts for a batch of "
+                 "that age, level and domain.")
         st.subheader("Week by week")
         st.dataframe(_pd.DataFrame([{
             "Week of": w["week"], "Sessions": w["sessions"],
             "Batches": len(w["batches"]), "Present": w["present"],
             "Invited": w["invited"], "Attendance %": w["pct"],
-            "vs curve": w["index"], "Rating": w["rating"], "NPS": w["nps"],
-        } for w in reversed(_r["weeks"])]), width='stretch', hide_index=True)
+            "vs expected": w["index"], "Rating": w["rating"], "NPS": w["nps"],
+        } for w in reversed(_r["weeks"])]), width='stretch', hide_index=True,
+            column_config={"vs expected": _idx_col})
 
         if _r.get("leaderboard"):
             st.subheader("Trainers, this week")
-            st.caption("Ranked on the residual, so a trainer who taught an old "
-                       "cohort is not punished for its age.")
+            st.caption("Ranked on attendance vs expected, so a trainer who taught "
+                       "an old cohort is not punished for its age.")
             st.dataframe(_pd.DataFrame([{
                 "Trainer": b["mentor"], "Sessions": b["sessions"],
                 "Present": b["present"], "Attendance %": b["pct"],
-                "vs curve": b["index"], "Rating": b["rating"], "NPS": b["nps"],
-            } for b in _r["leaderboard"]]), width='stretch', hide_index=True)
+                "vs expected": b["index"], "Rating": b["rating"], "NPS": b["nps"],
+            } for b in _r["leaderboard"]]), width='stretch', hide_index=True,
+                column_config={"vs expected": _idx_col})
+
+
+with sub_recap:
+    _sub_this_week()
 
 # ===================== SESSIONS - TRAINERS (sub-tab) =========================
-with sub_trainer:
+@st.fragment
+def _sub_trainers():
+    _painted("trainers")
     _t = (store or {}).get("trainers") if store_mode else None
     if not store_mode:
-        st.info("Trainer rollups are built by the weekly pipeline.")
+        st.caption("No trainer rollup in this data set.")
+        with st.expander("Why", expanded=False):
+            st.info("Trainer rollups are built by the weekly pipeline.")
     elif not _t or not _t.get("trainers"):
-        st.warning("No trainer data in the last refresh."
-                   + ("  \n• " + "  \n• ".join(_t.get("warnings") or []) if _t else ""))
+        st.warning("No trainer data in the last refresh.")
+        if _t and _t.get("warnings"):
+            with st.expander("Details", expanded=False):
+                for _w in _t["warnings"]:
+                    st.caption("• " + str(_w))
     else:
         import pandas as _pd
-        st.caption(
-            f"**{_t['n_raw']} spellings in L2 resolve to {_t['n_people']} people.** "
-            "The Mentor cell is hand-typed, so one person arrives as 'Swapnil', "
-            "'Swapnil Narayan' and 'Swapnil (Play Simulive)'. Where L2 carries an "
-            "email it is trusted; otherwise a short name joins a longer one only "
-            "when it is an unambiguous prefix of it. A room several batches sat "
-            "in (one POD webinar for B35, B36 and B37) is **one session**, "
-            "rated once by its whole poll — attendance still pools every batch."
-        )
+        with st.expander("How this is calculated", expanded=False):
+            st.markdown(
+                f"**{_t['n_raw']} spellings in the schedule resolve to "
+                f"{_t['n_people']} people.** "
+                "The Mentor cell is hand-typed, so one person arrives as 'Swapnil', "
+                "'Swapnil Narayan' and 'Swapnil (Play Simulive)'. Where the schedule "
+                "carries an email it is trusted; otherwise a short name joins a "
+                "longer one only when it is an unambiguous prefix of it. A room "
+                "several batches sat in (one domain webinar for B35, B36 and B37) "
+                "is **one session**, rated once by its whole poll — attendance "
+                "still pools every batch. **Co-taught** counts sessions credited "
+                "to more than one trainer — both get the session, so totals across "
+                "trainers exceed the session count."
+            )
         _min = st.slider("Minimum sessions", 1, 25, 5, key="tr_min",
-                         help="A trainer's index over one session is noise.")
+                         help="A trainer's figure over one session is noise.")
         _rows = [x for x in _t["trainers"] if x["sessions"] >= _min]
         st.dataframe(_pd.DataFrame([{
             "Trainer": x["trainer"], "Sessions": x["sessions"],
             "Co-taught": x["co_taught"], "Batches": len(x["batches"]),
             "Present": x["present"], "Invited": x["invited"],
-            "Attendance %": x["pct"], "vs curve": x["index"],
+            "Attendance %": x["pct"], "vs expected": x["index"],
             "Rating": x["rating"], "Responses": x["rating_n"], "NPS": x["nps"],
             "First": x["first"], "Last": x["last"],
-        } for x in _rows]), width='stretch', hide_index=True, height=520)
-        st.caption(f"{len(_rows)} of {_t['n_people']} shown. **Co-taught** counts "
-                   "sessions credited to more than one trainer — both get the "
-                   "session, so totals across trainers exceed the session count.")
+        } for x in _rows]), width='stretch', hide_index=True, height=520,
+            column_config={"vs expected": st.column_config.NumberColumn(
+                "vs expected", format="%.2f×",
+                help="1.00 = exactly what the decay curve predicts for the "
+                     "batches this trainer taught, at their age.")})
+        st.caption(f"{len(_rows)} of {_t['n_people']} shown.")
 
         if _t.get("merged"):
             with st.expander(f"Spellings merged ({len(_t['merged'])} people)"):
@@ -1706,17 +2002,28 @@ with sub_trainer:
                      for k, v in sorted(_t["merged"].items())]),
                     width='stretch', hide_index=True)
         if _t.get("ambiguous"):
-            st.warning(
-                "Left unmerged because the name could be more than one person: "
-                + ", ".join(f"**{n}**" for n in _t["ambiguous"])
-                + ". Add their email to L2's *Mentor's email* column to resolve them.")
+            with st.expander(f"Names left unmerged ({len(_t['ambiguous'])})",
+                             expanded=False):
+                st.warning(
+                    "Left unmerged because the name could be more than one person: "
+                    + ", ".join(f"**{n}**" for n in _t["ambiguous"])
+                    + ". Add their email to the schedule's *Mentor's email* "
+                      "column to resolve them.")
+
+
+with sub_trainer:
+    _sub_trainers()
 
 # ========================= TAB 3 - WEEKEND RECAP =============================
-with tab_weekend:
+@st.fragment
+def _tab_weekend():
+    _painted("weekend")
     _W = (store or {}).get("recap") if store_mode else None
     _WS = (store or {}).get("sessions") if store_mode else None
     if not store_mode:
-        st.info("The weekend recap is built by the weekly pipeline.")
+        st.caption("No weekend recap in this data set.")
+        with st.expander("Why", expanded=False):
+            st.info("The weekend recap is built by the weekly pipeline.")
     elif not _W or not _W.get("weeks"):
         st.warning("No recap in the last refresh.")
     else:
@@ -1732,46 +2039,54 @@ with tab_weekend:
         _dl = _w.get("delta") or {}
 
         st.markdown(
-            "<div style='background:#f7f9fc;border:1px solid #e6e9ef;"
+            f"<div style='background:{T.BRAND['accent_soft']};"
+            "border:1px solid rgba(128,128,128,.22);"
             "border-radius:12px;padding:20px 22px;margin:6px 0 14px'>"
-            "<div style='font-size:11px;letter-spacing:.09em;color:#2a5bd7;"
+            # Secondary ink, NOT the accent: accent ink on the accent's own
+            # 10% wash measures 3.89:1, under AA's 4.5 for 11px bold (large-text
+            # relief starts at 18.66px bold). The same 3.89 was measured and
+            # fixed on `.chip` one file over. 7.00:1 here. The wash stays as the
+            # banner's SURFACE — it is the text that may not be the series colour.
+            f"<div style='font-size:11px;letter-spacing:.09em;color:{T.INK['secondary']};"
             "font-weight:700'>WEEKEND RECAP</div>"
             f"<div style='font-size:30px;font-weight:700;margin:4px 0 2px'>"
             f"Week of {_d0:%d %B %Y}</div>"
-            f"<div style='color:#7a8598;font-size:13px'>{_w['sessions']} sessions"
+            f"<div style='opacity:.7;font-size:13px'>{_w['sessions']} sessions"
             f" &middot; {_d0:%d %b} \u2013 {_d0 + _dt.timedelta(days=6):%d %b %Y}"
             f" &middot; {len(_w['batches'])} batches</div>"
             # The build stamp belongs ON this page, not only in the sidebar.
             # Four times now a stale cached store has been read as missing
             # data ("no reports", "no curve") because the only clue that the
             # store predated the code was a caption on another tab.
-            f"<div style='color:#9aa4b5;font-size:11px;margin-top:6px'>"
+            f"<div style='opacity:.55;font-size:11px;margin-top:6px'>"
             f"Built from the store of {store['generated_at']}</div></div>",
             unsafe_allow_html=True)
 
-        def _dtxt(v):
-            """Streamlit's delta arrow, or nothing when there is no prior week.
-            None is not zero -- a first week has no change, it has no comparison."""
-            return None if v is None else f"{v:+g}"
-
-        k = st.columns(6)
-        k[0].metric("Sessions", f"{_w['sessions']:,}")
-        k[1].metric("Avg overall", f"{_w['rating']:.2f}" if _w.get("rating") else "\u2014",
-                    _dtxt(_dl.get("rating")))
-        k[2].metric("Avg trainer",
-                    f"{_w['rating_trainer']:.2f}" if _w.get("rating_trainer") else "\u2014",
-                    _dtxt(_dl.get("rating_trainer")))
-        k[3].metric("Avg NPS", f"{_w['nps']:+d}" if _w.get("nps") is not None else "\u2014",
-                    _dtxt(_dl.get("nps")))
-        k[4].metric("Learners", f"{_w['present']:,}", _dtxt(_dl.get("present")),
-                    help="Attendances across the week. Someone who came to three "
-                         "sessions counts three times \u2014 attendances, not people.")
-        k[5].metric("Avg stickiness",
-                    f"{_w['stickiness']:.0f}%" if _w.get("stickiness") else "\u2014",
-                    _dtxt(_dl.get("stickiness")),
-                    help="Of the fullest each room got, how much was still there "
-                         "over the closing half hour. Averaged over the "
-                         f"{_w.get('n_sticky', 0)} sessions with a Zoom report.")
+        # Same helper as This week (ui_theme.delta_text). It replaces a local
+        # `{:+g}` that printed a bare "+3" under both NPS and Learners, where
+        # one meant three points of NPS and the other three people.
+        T.tiles([
+            {"label": "Sessions", "value": f"{_w['sessions']:,}"},
+            {"label": "Avg overall",
+             "value": f"{_w['rating']:.2f}" if _w.get("rating") else "\u2014",
+             "delta": T.delta_text("rating", _dl.get("rating"))},
+            {"label": "Avg trainer",
+             "value": f"{_w['rating_trainer']:.2f}" if _w.get("rating_trainer") else "\u2014",
+             "delta": T.delta_text("rating_trainer", _dl.get("rating_trainer"))},
+            {"label": "Avg NPS",
+             "value": f"{_w['nps']:+d}" if _w.get("nps") is not None else "\u2014",
+             "delta": T.delta_text("nps", _dl.get("nps"))},
+            {"label": "Learners", "value": f"{_w['present']:,}",
+             "delta": T.delta_text("present", _dl.get("present")),
+             "help": "Attendances across the week. Someone who came to three "
+                     "sessions counts three times \u2014 attendances, not people."},
+            {"label": "Avg stickiness",
+             "value": f"{_w['stickiness']:.0f}%" if _w.get("stickiness") else "\u2014",
+             "delta": T.delta_text("stickiness", _dl.get("stickiness")),
+             "help": "Of the fullest each room got, how much was still there "
+                     "over the closing half hour. Averaged over the "
+                     f"{_w.get('n_sticky', 0)} sessions with a Zoom report."},
+        ])
 
         # Awards are recomputed for the SELECTED week, using the same rules the
         # pipeline uses, so picking an older week does not show this week's.
@@ -1781,39 +2096,67 @@ with tab_weekend:
             st.subheader("Highlights of the week")
             for _a, _c in zip(_aw, st.columns(len(_aw))):
                 with _c:
-                    st.markdown(
-                        "<div style='border:1px solid #e6e9ef;border-radius:10px;"
-                        "padding:12px 14px'>"
-                        "<div style='font-size:10px;letter-spacing:.08em;"
-                        f"color:#7a8598;font-weight:700'>"
-                        f"{_html.escape(_a['award']).upper()}</div>"
-                        f"<div style='font-weight:650;margin:6px 0 2px;"
-                        f"font-size:13px'>{_html.escape(_a['topic'][:46])}</div>"
-                        f"<div style='color:#7a8598;font-size:12px'>"
-                        f"{_html.escape(_a['batch'])}"
-                        + (f" &middot; {_html.escape(_a['mentor'])}"
-                           if _a.get("mentor") else "")
-                        + "</div><div style='font-size:26px;font-weight:700;"
-                        f"margin-top:8px'>{_html.escape(_a['value'])}</div>"
-                        f"<div style='color:#9aa3b2;font-size:11px;margin-top:4px;"
-                        f"line-height:1.35'>{_html.escape(_a['why'])}</div></div>",
-                        unsafe_allow_html=True)
+                    st.markdown(_card(_a["award"], _a["topic"],
+                                      _a.get("batch") or "", _a.get("mentor") or "",
+                                      T.award_value(_a), _a.get("why") or ""),
+                                unsafe_allow_html=True)
+
+        # \u2500\u2500 the other end of the same ranking \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+        # "Beat the curve" names the week's best session against expectation;
+        # nothing named the worst, so a session that drew half what its cohort
+        # normally does left no trace on the page anybody reads on a Monday.
+        # Same key, same cards, bottom three. Sessions with no curve point are
+        # left out entirely rather than sorted to the bottom \u2014 no expectation
+        # is not the same as falling short of one.
+        _below = sorted((r for r in _rows_w if r.get("index") is not None),
+                        key=lambda r: r["index"])[:3]
+        if _below:
+            st.subheader("Below the curve")
+            st.caption("The three sessions furthest under what the decay curve "
+                       "expected of a cohort that age, level and domain. Same "
+                       "measure as *Beat the curve* above, read from the other end.")
+            for _b0, _c in zip(_below, st.columns(len(_below))):
+                _why = (f"{_b0['pct']:.1f}% attended against "
+                        f"{_b0['expected_pct']:.1f}% expected"
+                        if _b0.get("expected_pct") else
+                        f"{_b0.get('present', 0):,} of {_b0.get('total', 0):,} invited")
+                with _c:
+                    st.markdown(_card("Below the curve",
+                                      _b0.get("topic") or "Session",
+                                      _b0.get("l2_batch") or _b0.get("batch") or "",
+                                      _b0.get("mentor") or "",
+                                      T.fmt_index(_b0["index"]), _why),
+                                unsafe_allow_html=True)
 
         if _rows_w:
-            _lb = [t for t in (_trainers_mod.build(_rows_w).get("trainers") or [])
-                   if t.get("rating") is not None]
-            _lb.sort(key=lambda t: -t["rating"])
+            # RANKED ON vs EXPECTED, not on the raw poll score \u2014 the same key
+            # This week's leaderboard and every other ranking in this app use
+            # (recap.build's `board`). Sorting on `rating` crowned whoever
+            # happened to teach the best-rated room, and a trainer with no
+            # rating at all vanished from a board they had earned a place on.
+            # Unrated / unindexed trainers sort last rather than being dropped.
+            _lb = list(_trainers_mod.build(_rows_w).get("trainers") or [])
+            _lb.sort(key=lambda t: (t.get("index") is None, -(t.get("index") or 0)))
             if _lb:
                 st.subheader("Trainer leaderboard")
-                st.caption("By average session rating this week. A session taught "
-                           "by two people credits both.")
+                st.caption("Ranked on attendance vs expected, so a trainer who "
+                           "taught an old cohort is not punished for its age \u2014 "
+                           "the same measure the Sessions tab ranks on. A "
+                           "session taught by two people credits both.")
                 st.dataframe(_pd.DataFrame([{
                     "#": i + 1, "Trainer": t["trainer"],
                     "Type": t.get("type") or "\u2014",
                     "Sessions": t["sessions"], "Learners": t["present"],
+                    "Attendance %": t.get("pct"), "vs expected": t.get("index"),
                     "Avg rating": t["rating"], "NPS": t["nps"],
                 } for i, t in enumerate(_lb[:12])]),
-                    width="stretch", hide_index=True)
+                    width="stretch", hide_index=True,
+                    column_config={"vs expected": st.column_config.NumberColumn(
+                        "vs expected", format="%.2f\u00d7",
+                        help="1.00 = exactly what the decay curve predicts for "
+                             "the batches this trainer taught, at their age."),
+                        "Attendance %": st.column_config.NumberColumn(
+                            "Attendance %", format="%.1f%%")})
 
         if _rows_w:
             st.subheader("Session breakdown")
@@ -1837,15 +2180,16 @@ with tab_weekend:
                         else "  (no report)")] = _r0
             _pick = st.selectbox("Session", list(_byk), key="wr_sess")
             r = _byk[_pick]
-            c = st.columns(6)
-            c[0].metric("Overall", f"{r['rating']:.2f}" if r.get("rating") else "\u2014")
-            c[1].metric("Trainer", f"{r['rating_trainer']:.2f}"
-                        if r.get("rating_trainer") else "\u2014")
-            c[2].metric("NPS", f"{r['nps']:+d}" if r.get("nps") is not None else "\u2014")
-            c[3].metric("Responses", f"{r.get('rating_n', 0):,}")
-            c[4].metric("Duration", f"{r['duration_hrs']:.1f} h"
-                        if r.get("duration_hrs") else "\u2014")
-            c[5].metric("Peak", f"{r['peak']:,}" if r.get("peak") else "\u2014")
+            T.tiles([
+                {"label": "Overall", "value": f"{r['rating']:.2f}" if r.get("rating") else "\u2014"},
+                {"label": "Trainer", "value": (f"{r['rating_trainer']:.2f}"
+                                               if r.get("rating_trainer") else "\u2014")},
+                {"label": "NPS", "value": f"{r['nps']:+d}" if r.get("nps") is not None else "\u2014"},
+                {"label": "Responses", "value": f"{r.get('rating_n', 0):,}"},
+                {"label": "Duration", "value": (f"{r['duration_hrs']:.1f} h"
+                                                if r.get("duration_hrs") else "\u2014")},
+                {"label": "Peak", "value": f"{r['peak']:,}" if r.get("peak") else "\u2014"},
+            ])
             if len(r.get("rows") or ()) > 1:
                 _shw = next((x.get("rating_shared") for x in r["rows"]
                              if x.get("rating_shared")), None) or {}
@@ -1865,14 +2209,15 @@ with tab_weekend:
                         + (f" \u00b7 {_shw['unmatched']} respondents matched no roster"
                            if _shw.get("unmatched") else ""))
 
-            s1, s2, s3 = st.columns(3)
-            s1.metric("Stickiness (10 min)",
-                      f"{r['stick10']:.0f}%" if r.get("stick10") else "\u2014",
-                      help="Mean concurrency over the closing 10 minutes, "
-                           "as a share of the session's peak.")
-            s2.metric("Stickiness (30 min)",
-                      f"{r['stick30']:.0f}%" if r.get("stick30") else "\u2014")
-            s3.metric("Attendance", f"{r['pct']:.1f}%" if r.get("pct") else "\u2014")
+            T.tiles([
+                {"label": "Stickiness (10 min)",
+                 "value": f"{r['stick10']:.0f}%" if r.get("stick10") else "\u2014",
+                 "help": "Mean concurrency over the closing 10 minutes, "
+                         "as a share of the session's peak."},
+                {"label": "Stickiness (30 min)",
+                 "value": f"{r['stick30']:.0f}%" if r.get("stick30") else "\u2014"},
+                {"label": "Attendance", "value": f"{r['pct']:.1f}%" if r.get("pct") else "\u2014"},
+            ])
 
             _curve = r.get("retention")
             if _curve:
@@ -1884,30 +2229,26 @@ with tab_weekend:
                 import plotly.graph_objects as _go
                 _fig = _go.Figure(_go.Scatter(
                     x=list(range(len(_curve))), y=_curve, mode="lines",
-                    line=dict(color="#2a5bd7", width=2),
-                    fill="tozeroy", fillcolor="rgba(42,91,215,0.10)",
+                    line=dict(color=T.BRAND["accent"], width=2),
+                    fill="tozeroy", fillcolor=T.BRAND["accent_soft"],
                     hovertemplate="minute %{x}<br>%{y:,} in the room<extra></extra>"))
                 _pm = r.get("poll_at_min")
                 if _pm is not None:
                     # Where the room STARTED ANSWERING the poll -- the first
                     # submission in the poll export, not a moderator's note.
-                    _fig.add_vline(x=_pm, line_width=1, line_dash="dash",
-                                   line_color="#c0392b")
+                    _fig.add_vline(x=_pm, line_width=1, line_dash="dot",
+                                   line_color=T.INK["muted"])
                     _fig.add_annotation(x=_pm, y=max(_curve), yshift=12,
                                         text="poll", showarrow=False,
-                                        font=dict(size=11, color="#c0392b"))
-                _fig.update_layout(
-                    height=280, margin=dict(l=10, r=10, t=24, b=10),
-                    xaxis=dict(title="Time (min)", showgrid=False),
-                    yaxis=dict(title="Attendees", gridcolor="#eef1f6",
-                               rangemode="tozero"),
-                    plot_bgcolor="white", paper_bgcolor="white",
-                    font=dict(family="Inter, system-ui, sans-serif",
-                              color="#5a6573", size=12))
+                                        font=dict(size=11, color=T.INK["secondary"]))
+                _fig.update_layout(T.plotly_layout(
+                    280, margin=dict(t=24),
+                    xaxis=dict(title="Time (min)"),
+                    yaxis=dict(title="Attendees", rangemode="tozero")))
                 st.plotly_chart(_fig, width="stretch",
                                 config={"displayModeBar": False})
                 if _pm is not None:
-                    st.caption(f"The dashed line at minute {_pm} is when the room "
+                    st.caption(f"The dotted line at minute {_pm} is when the room "
                                "began answering the poll — the first "
                                "submission in the poll export, not a note of "
                                "when it was circulated.")
@@ -1929,10 +2270,12 @@ with tab_weekend:
                 # Zoom reports, it is a store built before the sweep existed --
                 # and saying "no report" here sent people looking for missing
                 # files four times. Name the real cause.
-                st.info("No session this week has a retention curve, which "
-                        f"means the store of {store['generated_at']} predates "
-                        "the code that measures it. The next pipeline run "
-                        "fills these in \u2014 the Zoom reports are already there.")
+                st.caption("No retention curve for any session this week.")
+                with st.expander("Why", expanded=False):
+                    st.info("No session this week has a retention curve, which "
+                            f"means the store of {store['generated_at']} predates "
+                            "the code that measures it. The next pipeline run "
+                            "fills these in \u2014 the Zoom reports are already there.")
             else:
                 st.caption("No Zoom report for this session, so no retention "
                            "curve. Nothing is inferred from attendance \u2014 that "
@@ -1955,9 +2298,14 @@ with tab_weekend:
 
         st.caption("**Phase-wise retention (Teaching / Q&A) is deliberately "
                    "absent.** It needs someone to record when Q&A started; the "
-                   "reference app asks for it at upload time. Nothing in L2, the "
-                   "curriculum sheet or the Zoom report carries it, so a boundary "
+                   "reference app asks for it at upload time. Nothing in the "
+                   "schedule, the curriculum sheet or the Zoom report carries it, "
+                   "so a boundary "
                    "here would be a guess wearing a percentage.")
+
+
+with tab_weekend:
+    _tab_weekend()
 
 
 # ======================== TAB 8 - ADD THIS WEEK'S DATA =======================
@@ -1990,12 +2338,14 @@ with tab_add:
         # reads the dashboard; WRITING data is a different privilege, and the
         # blast radius of a wrong upload is now permanent (nothing is rebuilt).
         if not _up_pw:
-            st.info(
-                "Adding data is switched off. Set `upload_password` in the app's "
-                "secrets (Streamlit Cloud: Manage app -> Settings -> Secrets) to "
-                "enable this page. It is deliberately separate from the password "
-                "used to view the dashboard."
-            )
+            st.caption("Adding data is switched off on this deployment.")
+            with st.expander("Setup", expanded=False):
+                st.info(
+                    "Set `upload_password` in the app's secrets (Streamlit Cloud: "
+                    "Manage app -> Settings -> Secrets) to enable this page. It is "
+                    "deliberately separate from the password used to view the "
+                    "dashboard."
+                )
             st.stop()
 
         def _upload_submit():
@@ -2084,7 +2434,7 @@ with tab_add:
     if not _l2_id:
         # Without L2 every session looks unscheduled and the page would blame
         # the schedule for a configuration problem.
-        st.error("`drive.l2_id` is not configured, so the L2 schedule cannot be "
+        st.error("`drive.l2_id` is not configured, so the schedule sheet cannot be "
                  "read and every session below will look unscheduled. Add it to "
                  "the app's secrets — this is a setup problem, not a problem "
                  "with your files.")
@@ -2093,7 +2443,7 @@ with tab_add:
             _l2_bytes, _ = live_data.fetch_sheet_cached(
                 live_data._drive_service(), _l2_id)
         except Exception as _e:
-            st.warning(f"Could not read the L2 schedule ({_e}) - every session "
+            st.warning(f"Could not read the schedule sheet ({_e}) - every session "
                        "will look unscheduled until it is readable.")
     _l2_map, _l2_labels = (ac.parse_l2(_l2_bytes, with_labels=True)
                            if _l2_bytes else ({}, {}))
@@ -2103,9 +2453,9 @@ with tab_add:
     if _rows:
         st.dataframe(_pd.DataFrame([{
             "Date": _r0["date"], "Webinar": _r0["wid"],
-            "In L2": "yes" if _r0["in_l2"] else "NO",
+            "In schedule": "yes" if _r0["in_l2"] else "NO",
             "Batches": ", ".join(_r0["batches"]) or "-",
-            "POD": _r0["pod"] or "whole batch",
+            "Domain": _r0["pod"] or "whole batch",
             "Title": _r0["topic"] or "-",
             "Attendee files": _r0["n_attendee"], "Poll files": _r0["n_poll"],
         } for _r0 in _rows]), width="stretch", hide_index=True)
@@ -2143,7 +2493,7 @@ with tab_add:
         st.stop()
 
     _n_files = sum(len(_r0["files"]) for _r0 in _rows)
-    st.success(f"{len(_rows)} session(s), {_n_files} file(s), all scheduled in L2.")
+    st.success(f"{len(_rows)} session(s), {_n_files} file(s), all in the schedule.")
 
     st.markdown("**3 - Add them**")
     st.caption(

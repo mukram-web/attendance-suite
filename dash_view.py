@@ -1,10 +1,13 @@
 """
 dash_view.py — Streamlit + Plotly rendering of the AI CAP attendance dashboard.
 
-Mirrors the static HTML prototype: 4 KPIs → batch selector + cross-batch
-comparison bar → selected-batch drill-down (metric cards, attendance-by-date
-line, closing-types panel, sessions table). Colour bands and look match the
-prototype. All numbers come from data.build(); this file is presentation only.
+Top of the tab: the LAST WEEKEND — the newest Sat/Sun in the store — with a
+per-batch bar, the sessions that ran furthest above and below expectation, and
+the eight-week attendance line. Below it the all-time view: 4 KPIs → cross-batch
+comparison bar (clickable) + batch selector → selected-batch drill-down (metric
+cards, attendance-by-date line, sessions table, closing-types panel, domain
+matrix). All numbers come from data.build() / recap.py; this file is
+presentation only, and every colour comes from ui_theme.
 
 The figure builders and the HTML fragments (_comparison_bar, _date_line,
 closing_rows_html, sessions_table_html, CSS) are PURE — no Streamlit — because
@@ -12,41 +15,35 @@ site_build.py reuses them to render the identical front end as a static
 website. Change the look here and both the app and the site follow.
 """
 from __future__ import annotations
+import datetime as _dt
 import html
 import plotly.graph_objects as go
 
 import data as D
 import polls as _polls          # pure; the NPS rule must live in one place only
 import pods as _pods            # for the WHOLE_BATCH sentinel below
+import recap as _recap          # the week's rollup rules, shared with the pipeline
+import dashboard_core as _dc    # batch_key — the one batch ordering
+import ui_theme as T
 
-# prototype colour bands
-_BAND = {
-    "high": {"bg": "#e3f4ec", "fg": "#0f6e56", "hex": "#1a9e75"},
-    "mid":  {"bg": "#fbeedd", "fg": "#8a5108", "hex": "#c98500"},
-    "low":  {"bg": "#fae4dd", "fg": "#993c1d", "hex": "#d8543a"},
-}
-_ACCENT = "#2a5bd7"
-_INK2 = "#5a6573"
+# status bands (pills / closing panel) — defined once, in ui_theme
+_BAND = T.STATUS
+_ACCENT = T.BRAND["accent"]
+_NEUTRAL = T.BRAND["neutral"]
+_INK2 = T.INK["secondary"]
+# How many tick labels a categorical x axis may carry before they are thinned.
+# A 700px plot fits ~16 labels at the ~42px "16 May" measures at size 11, and
+# these render at size 10; 14 leaves real slack, keeps every label of a batch
+# that has run a full quarter (13 weekends), and caps B17's 36 dates at 12.
+_TICK_BUDGET = 14
 
-_CSS = """
-<style>
-  .aicap .panel-title{font-size:14px;font-weight:600;margin:18px 0 10px;color:#151a22;}
-  .aicap .pill{padding:2px 9px;border-radius:999px;font-weight:600;font-size:12px;
-    font-variant-numeric:tabular-nums;display:inline-block;}
-  .aicap .cl-row{display:grid;grid-template-columns:140px 1fr 120px 64px;align-items:center;
-    gap:12px;padding:8px 0;border-bottom:1px solid #eef1f6;}
-  .aicap .cl-name{font-size:13px;color:#151a22;}
-  .aicap .cl-track{height:8px;background:#eef1f6;border-radius:6px;overflow:hidden;}
-  .aicap .cl-fill{height:100%;background:#9fb4e8;border-radius:6px;}
-  .aicap .cl-count{font-size:12px;color:#5a6573;text-align:right;font-variant-numeric:tabular-nums;}
-  .aicap table.sess{width:100%;border-collapse:collapse;font-size:13px;}
-  .aicap table.sess th,.aicap table.sess td{padding:8px 10px;border-bottom:1px solid #eef1f6;text-align:left;}
-  .aicap table.sess th.num,.aicap table.sess td.num{text-align:right;font-variant-numeric:tabular-nums;}
-  .aicap table.sess thead th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:#8c95a3;}
-  .aicap .flag{font-size:10px;color:#8a5108;background:#fbeedd;padding:1px 6px;border-radius:6px;margin-left:6px;}
-  .aicap .dh-sub{color:#5a6573;font-weight:400;font-size:14px;}
-</style>
-"""
+# The static site scopes the same rules under its own wrapper; the app injects
+# them once, from ui_theme.css(), under `.dash`.
+_CSS = "<style>" + T.dash_rules(".aicap ") + "</style>"
+
+# What the drill-down heading calls the two non-POD scopes. `pod_view` still
+# takes the sentinels; only the words on screen change.
+_SCOPE_LABEL = {_pods.WHOLE_BATCH: "All Domains", _pods.COMMON: "Common room"}
 
 
 def _pill(pct: float) -> str:
@@ -55,50 +52,173 @@ def _pill(pct: float) -> str:
             f'{pct:.0f}%</span>')
 
 
-def _comparison_bar(DATA: dict):
+def _band_lines(fig, ymax: float) -> None:
+    """The 45 / 30 attendance thresholds (data.BAND_HIGH / BAND_MID) as dotted
+    reference lines, drawn only where the fitted axis can show them."""
+    for y in (D.BAND_HIGH, D.BAND_MID):
+        if y < ymax:
+            fig.add_hline(y=y, line_width=1, line_dash="dot", line_color=T.INK["axis"],
+                          annotation_text=f"{y}%", annotation_position="top left",
+                          annotation_font=dict(size=10, color=T.INK["muted"]))
+
+
+def _comparison_bar(DATA: dict, sel: str | None = None):
+    """Average attendance per batch. One series colour; the selected batch in
+    the accent; a value label only on the selected, best and worst bars;
+    x labels horizontal (ECAP codes wrap instead of rotating)."""
     codes = list(DATA)
     pcts = [DATA[c]["avg_pct"] for c in codes]
+    best = max(range(len(pcts)), key=pcts.__getitem__) if pcts else None
+    worst = min(range(len(pcts)), key=pcts.__getitem__) if pcts else None
+    sel_i = codes.index(sel) if sel in codes else None
+    text = [f"{p:.0f}%" if i in (best, worst, sel_i) else "" for i, p in enumerate(pcts)]
+    ymax = max(pcts) * 1.15 if pcts else 10
     fig = go.Figure(go.Bar(
         x=codes, y=pcts,
-        marker_color=[_BAND[D.band(p)]["hex"] for p in pcts],
-        text=[f"{p:.0f}%" for p in pcts], textposition="outside",
+        marker=dict(color=[_ACCENT if c == sel else _NEUTRAL for c in codes],
+                    line_width=0, cornerradius=4),
+        text=text, textposition="outside", cliponaxis=False, constraintext="none",
+        textfont=dict(size=11, color=_INK2),
+        selected=dict(marker=dict(opacity=1)), unselected=dict(marker=dict(opacity=1)),
         hovertemplate="<b>%{x}</b><br>%{y:.1f}% avg attendance<extra></extra>",
     ))
-    fig.update_layout(
-        height=300, margin=dict(l=10, r=10, t=10, b=10),
-        yaxis=dict(range=[0, max(60, max(pcts) + 8)], ticksuffix="%",
-                   gridcolor="#eef1f6", title=None),
-        xaxis=dict(title=None), plot_bgcolor="white", paper_bgcolor="white",
-        font=dict(family="Inter, system-ui, sans-serif", color=_INK2, size=12),
-        showlegend=False,
-    )
+    fig.update_layout(T.plotly_layout(
+        300, bargap=0.35,
+        xaxis=dict(tickmode="array", tickvals=codes,
+                   ticktext=[T.ecap_tick(c) for c in codes],
+                   # pinned horizontal: Plotly would otherwise rotate the
+                   # ticks to 30° / 90° as the plot narrows (ruling D).
+                   tickfont=dict(size=10), tickangle=0),
+        yaxis=dict(range=[0, ymax], ticksuffix="%"),
+    ))
+    _band_lines(fig, ymax)
     return fig
 
 
 def _date_line(d: dict):
+    """Attendance by date for one batch (or one domain of it)."""
     # intro-call rows carry no percentage — the % line shows class sessions only
     sess = [s for s in d["sessions"] if not s.get("is_intro")]
-    ymax = max(60, int((d["peak"] + 6) // 5 * 5 + 5))
+    ymax = (max(s["pct"] for s in sess) * 1.15) if sess else 10
+    # One tick per DISTINCT date, thinned to at most _TICK_BUDGET of them. 21 of
+    # the 29 batches feed this axis 17-36 date labels, and left to itself Plotly
+    # walks its autotickangles [0, 30, 90] and stands every label on its end
+    # once they stop fitting - the rotation ruling D bans and the two bar charts
+    # already pin against. Thinning the AXIS loses nothing: every point keeps
+    # its hover, and the sessions table below is this chart's table-view twin.
+    uniq = list(dict.fromkeys(s["date_lbl"] for s in sess))
+    stride = max(1, -(-len(uniq) // _TICK_BUDGET))
+    # Walk back from the NEWEST date. `uniq[::stride]` anchors at index 0 and
+    # so drops the LAST label unless (len(uniq)-1) % stride == 0 - which left
+    # 13 of the 29 batches with their newest point unlabelled (B17/B19/B24/B26
+    # a full week short of the 27 Sep they end on). The right-hand end is the
+    # end a time series is read from. The first is kept too, so neither end
+    # goes bare; tickmode="array" renders only what is listed here.
+    keep = set(uniq[::-1][::stride]) | {uniq[0]}
+    ticks = [u for u in uniq if u in keep]
     cust = [[s["topic"], s["present"], s["total"],
              "(no absent logged)" if s["present_only"] else ""] for s in sess]
     fig = go.Figure(go.Scatter(
         x=[s["date_lbl"] for s in sess], y=[s["pct"] for s in sess],
-        mode="lines+markers", line=dict(color=_ACCENT, width=2, shape="spline"),
-        fill="tozeroy", fillcolor="rgba(42,91,215,0.08)",
-        marker=dict(size=7, color=_ACCENT, line=dict(color="white", width=1.5)),
+        mode="lines+markers", line=dict(color=_ACCENT, width=2, shape="linear"),
+        fill="tozeroy", fillcolor=T.BRAND["accent_soft"],
+        marker=dict(size=8, color=_ACCENT, line=dict(color=T.INK["surface"], width=2)),
         customdata=cust,
         hovertemplate=("<b>%{x}</b><br>%{customdata[0]}<br>"
                        "Present: %{customdata[1]:,} / %{customdata[2]:,}<br>"
                        "%{y:.1f}% of strength<br>%{customdata[3]}<extra></extra>"),
     ))
-    fig.update_layout(
-        height=360, margin=dict(l=10, r=10, t=10, b=10),
-        yaxis=dict(range=[0, ymax], ticksuffix="%", gridcolor="#eef1f6", title=None),
-        xaxis=dict(title=None, showgrid=False),
-        plot_bgcolor="white", paper_bgcolor="white",
-        font=dict(family="Inter, system-ui, sans-serif", color=_INK2, size=12),
-    )
+    fig.update_layout(T.plotly_layout(
+        340, yaxis=dict(range=[0, ymax], ticksuffix="%"),
+        xaxis=dict(tickmode="array", tickvals=ticks,
+                   tickangle=0, tickfont=dict(size=10)),
+    ))
+    _band_lines(fig, ymax)
     return fig
+
+
+def _weekend_bar(per_batch: list):
+    """Last weekend's present % of strength per batch — one colour, the best
+    and worst bars labelled, x labels horizontal. `per_batch` is
+    [(code, pct), ...]."""
+    codes = [c for c, _ in per_batch]
+    pcts = [p for _, p in per_batch]
+    best = max(range(len(pcts)), key=pcts.__getitem__) if pcts else None
+    worst = min(range(len(pcts)), key=pcts.__getitem__) if pcts else None
+    text = [f"{p:.0f}%" if i in (best, worst) else "" for i, p in enumerate(pcts)]
+    ymax = max(pcts) * 1.15 if pcts else 10
+    fig = go.Figure(go.Bar(
+        x=codes, y=pcts,
+        marker=dict(color=_ACCENT, line_width=0, cornerradius=4),
+        text=text, textposition="outside", cliponaxis=False, constraintext="none",
+        textfont=dict(size=11, color=_INK2),
+        hovertemplate="<b>%{x}</b><br>%{y:.1f}% of strength<extra></extra>",
+    ))
+    fig.update_layout(T.plotly_layout(
+        240, bargap=0.35, margin=dict(t=18),
+        xaxis=dict(tickmode="array", tickvals=codes,
+                   ticktext=[T.ecap_tick(c) for c in codes],
+                   # pinned horizontal: Plotly would otherwise rotate the
+                   # ticks to 30° / 90° as the plot narrows (ruling D).
+                   tickfont=dict(size=10), tickangle=0),
+        yaxis=dict(range=[0, ymax], ticksuffix="%"),
+    ))
+    return fig
+
+
+def _weeks_line(weeks: list):
+    """Weekly attendance across every batch, the last N weeks (recap.weeks)."""
+    pts = [(w["week"], w["pct"]) for w in weeks if w.get("pct") is not None]
+    labels = [f"{_dt.date.fromisoformat(w):%d %b}".lstrip("0") for w, _ in pts]
+    ys = [p for _, p in pts]
+    ymax = max(ys) * 1.15 if ys else 10
+    fig = go.Figure(go.Scatter(
+        x=labels, y=ys, mode="lines+markers+text",
+        line=dict(color=_ACCENT, width=2, shape="linear"),
+        marker=dict(size=8, color=_ACCENT, line=dict(color=T.INK["surface"], width=2)),
+        text=[f"{y:.1f}%" if i == len(ys) - 1 else "" for i, y in enumerate(ys)],
+        textposition="top center", textfont=dict(size=11, color=_INK2),
+        cliponaxis=False,
+        hovertemplate="week of %{x}<br>%{y:.1f}% attendance<extra></extra>",
+    ))
+    fig.update_layout(T.plotly_layout(
+        240, margin=dict(t=18),
+        yaxis=dict(range=[0, ymax], ticksuffix="%"),
+        xaxis=dict(tickfont=dict(size=10)),
+    ))
+    return fig
+
+
+def newest_batch(DATA: dict, sessions: list | None = None) -> str | None:
+    """The most recently STARTED batch with at least one dated session.
+
+    With the store's dated rows the start is the batch's first session date;
+    without them (legacy mode) the highest CAP batch number stands in, ECAP
+    last, since `batch_key` offsets ECAP past every CAP batch and ECAP's
+    numbers say nothing about age.
+    """
+    with_dates = [c for c in DATA if any(s.get("mm") for s in DATA[c].get("sessions") or ())]
+    if not with_dates:
+        return None
+    starts: dict = {}
+    for r in sessions or ():
+        b, d = r.get("batch"), r.get("date")
+        if b and d and (b not in starts or d < starts[b]):
+            starts[b] = d
+    if starts:
+        return max(with_dates, key=lambda c: (starts.get(c, ""), _dc.batch_key(c)))
+    return max(with_dates, key=lambda c: (not c.upper().startswith("ECAP"), _dc.batch_key(c)))
+
+
+def batch_order(codes) -> list:
+    """Batches newest first: CAP by number, then ECAP by number."""
+    return sorted(codes, key=lambda c: (c.upper().startswith("ECAP"), -_dc.batch_key(c)))
+
+
+def weekend_rows(sessions: list, sat: _dt.date, sun: _dt.date) -> list:
+    """The store's session rows that fall on that weekend."""
+    a, b = sat.isoformat(), sun.isoformat()
+    return [s for s in sessions or () if a <= (s.get("date") or "") <= b]
 
 
 def pod_names(d: dict) -> list:
@@ -123,7 +243,9 @@ def pod_view(d: dict, pod: str | None) -> dict:
     rather than eleven competing lines.
     """
     if not pod:
-        rows = d.get("by_date")
+        # B41+ (data.paired): one row per WEEKEND, each person counted once
+        # over Saturday and Sunday - the same session runs on both days.
+        rows = d.get("weekends") or d.get("by_date")
         if not rows:
             # A batch with no date rollup: return it untouched rather than an
             # empty list, which rendered "No sessions logged for None yet".
@@ -137,7 +259,8 @@ def pod_view(d: dict, pod: str | None) -> dict:
             by_mm.setdefault(sx["mm"], []).append(sx)
         sess = []
         for r in rows:
-            same = by_mm.get(r["mm"], [])
+            same = [x for mm in (r.get("days") or [r["mm"]])
+                    for x in by_mm.get(mm, [])]
             n = r.get("n_pods", 1)
             # Carry the poll rating onto the rollup row, or it vanishes from the
             # default view - which is where almost everyone looks. Several PODs
@@ -154,8 +277,14 @@ def pod_view(d: dict, pod: str | None) -> dict:
                 "rating": rating, "rating_n": wn,
                 # same reason as the rating: without this the rolled-up row
                 # loses the trainer and the column reads blank for pod days
-                "mentor": next((x.get("mentor") for x in same
-                                if (x.get("mentor") or "").strip()), ""),
+                # A weekend row names every trainer it covers (Common and
+                # Techies are taught by different people).
+                "mentor": (", ".join(dict.fromkeys(
+                               x["mentor"].strip() for x in same
+                               if (x.get("mentor") or "").strip()))
+                           if r.get("days") else
+                           next((x.get("mentor") for x in same
+                                 if (x.get("mentor") or "").strip()), "")),
                 # Weighted by responses like the overall rating above. It used
                 # to be carried only when exactly one POD had a poll, which was
                 # fine for a tooltip but leaves a dedicated column blank on every
@@ -176,10 +305,23 @@ def pod_view(d: dict, pod: str | None) -> dict:
                     x.get("rating_dist") for x in same)),
                 "rating_nps": _polls.nps_from_dist(merged.get("recommend")),
                 "col": None, "mm": r["mm"], "date_lbl": r["date_lbl"],
-                "topic": (f"{n} POD sessions" if n > 1
+                "topic": r.get("topic") or (f"{n} domain sessions" if n > 1
                           else (same[0]["topic"] if same else "Session")),
                 "pod": "", "l2_batch": "" if n > 1 else (same[0].get("l2_batch", "")
                                                          if same else ""),
+                # A shared room is still a shared room when it is the day's only
+                # session; the rollup of several rooms carries no chip.
+                "shared_batches": ((same[0].get("shared_batches") or [])
+                                   if (n == 1 and same) else []),
+                # ... and the poll's provenance travels with it, or the
+                # "room poll, shared with ..." note can never fire in the view
+                # the tab OPENS on - which for B17-B34 is the ONLY view there
+                # is, since they have no domains and so no domain selector.
+                # Empty when n > 1: a rollup of several domain rooms is a
+                # weighted mean, and calling that "the room's own poll" would
+                # be a different wrong claim.
+                "rating_shared": ((same[0].get("rating_shared") or {})
+                                  if (n == 1 and same) else {}),
                 "present": r["present"], "total": r["total"],
                 "absent": max(0, r["total"] - r["present"]),
                 "pct": r["pct"], "present_only": False, "no_l2": False,
@@ -256,12 +398,37 @@ def pod_view(d: dict, pod: str | None) -> dict:
                 active=info.get("active", d["active"]))
 
 
+def closing_title(pod_sel: str | None) -> tuple[str, str]:
+    """The closing-types panel's heading and subtitle for the selected view.
+
+    `closing` is built once per BATCH (data.build_batch) and `pod_view` carries
+    it through untouched, so in a domain or Common view this panel is still the
+    whole batch's. The panel is KEPT there — how a cohort was closed is a batch
+    fact and worth reading beside any view of it — but it has to say so: a
+    "share of batch" bar sitting under a heading that reads "Finance" is read
+    as Finance's closing mix, which it is not.
+    """
+    if pod_sel:
+        return ("Closing types · whole batch",
+                "bar = share of the whole batch · pill = that channel's avg "
+                "attendance across the batch, not the view selected above")
+    return ("Closing types",
+            "bar = share of batch · pill = that channel's avg attendance")
+
+
 def closing_rows_html(d: dict) -> str:
-    """The closing-types panel rows — shared verbatim by the app and the site."""
+    """The closing-types panel rows — shared verbatim by the app and the site.
+
+    The 'Unknown' bucket (a blank Close Type cell) is shown LAST and called
+    'Not recorded': it is the absence of a channel, not a channel, and it was
+    sitting at the top of B40's panel at 57% as if it were the biggest one.
+    """
     rows = []
-    for ch in d["closing"]:
+    ordered = sorted(d["closing"], key=lambda ch: ch["type"] == "Unknown")
+    for ch in ordered:
+        name = "Not recorded" if ch["type"] == "Unknown" else html.escape(str(ch["type"]))
         rows.append(
-            f'<div class="cl-row"><div class="cl-name">{ch["type"]}</div>'
+            f'<div class="cl-row"><div class="cl-name">{name}</div>'
             f'<div class="cl-track"><div class="cl-fill" style="width:{ch["pct"]:.1f}%"></div></div>'
             f'<div class="cl-count">{ch["count"]:,} · {ch["pct"]:.0f}%</div>'
             f'<div>{_pill(ch["att"])}</div></div>')
@@ -271,7 +438,7 @@ def closing_rows_html(d: dict) -> str:
 def _num2(v) -> str:
     """A 1-5 score to 2dp, or a muted dash when no poll ran."""
     if not isinstance(v, (int, float)):
-        return '<span style="color:#9aa3b2">&mdash;</span>'
+        return '<span class="muted">&mdash;</span>'
     return f"{v:.2f}"
 
 
@@ -279,9 +446,8 @@ def _signed(v) -> str:
     """NPS, always signed: -20 and +20 are opposite findings and a bare '20'
     hides which one you are looking at."""
     if not isinstance(v, (int, float)):
-        return '<span style="color:#9aa3b2">&mdash;</span>'
-    colour = "#1f8b4c" if v >= 50 else ("#b07d18" if v >= 0 else "#c0392b")
-    return f'<span style="color:{colour};font-weight:600">{v:+.0f}</span>'
+        return '<span class="muted">&mdash;</span>'
+    return f'<span style="font-weight:600">{v:+.0f}</span>'
 
 
 def _mentor(s: dict) -> str:
@@ -293,22 +459,45 @@ def _mentor(s: dict) -> str:
     """
     who = (s.get("mentor") or "").strip()
     if not who:
-        return '<span style="color:#c8cdd6">-</span>'
+        return '<span class="muted">-</span>'
     return f'<span style="white-space:nowrap">{html.escape(who)}</span>'
 
 
-def _rating(s: dict) -> str:
+def _room_poll_note(s: dict, own: str = "") -> str:
+    """"room poll, shared with B36, B37" — when the figure beside it is NOT
+    this batch's own.
+
+    A shared room's poll is normally divided per batch (pipeline `[5a.1]`), but
+    an anonymous export names nobody and cannot be divided, so every sharing
+    batch shows the SAME room-wide number. Unlabelled, that reads as "B35's
+    students rated it 4.57" when what happened is "the room did, and we cannot
+    say which batch". `own` is the batch whose table this is, so it is left out
+    of the list of who else was in the room.
+    """
+    sh = s.get("rating_shared") or {}
+    if not sh or sh.get("split"):
+        return ""
+    others = [b for b in (s.get("shared_batches") or []) if b and b != own]
+    if not others:
+        return ""
+    return ('<div class="muted" style="font-size:11px;white-space:nowrap">'
+            '· room poll, shared with ' + html.escape(", ".join(others))
+            + "</div>")
+
+
+def _rating(s: dict, own: str = "") -> str:
     """The session's poll score, or "no poll conducted" when none was run.
 
     Shown out of 5 with the response count, because 4.8 from 9 people and 4.8
     from 500 are not the same claim. Trainer / recommend ride in the tooltip so
-    the column stays readable.
+    the column stays readable. A figure that is the whole room's rather than
+    this batch's own says so underneath (`_room_poll_note`).
     """
     v = s.get("rating")
     if v is None:
         # Say it plainly. A dash reads as "missing data" and invites someone to
         # go looking for a number that was never collected.
-        return ('<span style="color:#9aa3b2;font-size:11px;font-style:italic">'
+        return ('<span class="muted" style="font-size:11px;font-style:italic">'
                 'no poll conducted</span>')
     n = s.get("rating_n") or 0
     tips = [f"session {v:.2f}"]
@@ -320,10 +509,10 @@ def _rating(s: dict) -> str:
         # Signed, because an NPS of -20 and one of 20 are opposite findings and
         # a bare "20" hides which one you are looking at.
         tips.append(f"NPS {s['rating_nps']:+d}")
-    colour = "#1f8b4c" if v >= 4.5 else ("#b07d18" if v >= 4.0 else "#c0392b")
     return (f'<span title="{" · ".join(tips)} ({n} responses)" '
-            f'style="color:{colour};font-weight:600">{v:.1f}</span>'
-            f'<span style="color:#9aa3b2;font-size:11px"> /5 ({n})</span>')
+            f'style="font-weight:600">{v:.1f}</span>'
+            f'<span class="muted" style="font-size:11px"> /5 ({n})</span>'
+            + _room_poll_note(s, own))
 
 
 # Below this many answers a domain's rating is not shown. A 5-response 5.00
@@ -375,50 +564,55 @@ def domain_matrix_html(d: dict) -> str:
             rt = (s.get("pod_ratings") or {}).get(p) or {}
             n = rt.get("responses") or 0
             if rt.get("session") is not None and n >= _MIN_RATING_N:
-                extra = (f'<div style="font-size:10px;color:#6b7785">'
+                extra = (f'<div class="muted" style="font-size:11px">'
                          f'★ {rt["session"]:.2f} · n={n}</div>')
             elif n:
-                extra = (f'<div style="font-size:10px;color:#9aa4b2">'
-                         f'n={n}</div>')
+                extra = f'<div class="muted" style="font-size:11px">n={n}</div>'
             else:
                 extra = ""
             tds.append(f'<td class="num">{_pill(part["pct"])}'
-                       f'<div style="font-size:10px;color:#6b7785">'
+                       f'<div class="muted" style="font-size:11px">'
                        f'{part["present"]:,}/{part["total"]:,}</div>'
                        f'{extra}</td>')
-        trs.append(f'<tr><td>{p}</td>{"".join(tds)}</tr>')
+        trs.append(f'<tr><td>{html.escape(p)}</td>{"".join(tds)}</tr>')
     return ('<table class="sess"><thead><tr><th>Domain</th>' + head +
             "</tr></thead><tbody>" + "".join(trs) + "</tbody></table>")
 
 
 def sessions_table_html(d: dict) -> str:
     """The all-sessions table — shared verbatim by the app and the site."""
+    # Which batch's table this is, so a room-wide poll can name the OTHER
+    # batches that sat in it. `code` is set by data.build_batch; a caller that
+    # predates it simply gets the full list.
+    own = str(d.get("code") or "")
     trs = []
     for s in d["sessions"]:
         if s.get("is_intro"):   # intro call: attendees + how many then joined the batch
-            joined = (' <span style="font-size:11px;color:#8a5108;background:#fbeedd;'
-                      'padding:1px 7px;border-radius:6px;margin-left:6px;white-space:nowrap">'
+            joined = (' <span class="flag">'
                       f'{s["total"]:,} joined this batch</span>')
             trs.append(
-                f'<tr><td>{s["date_lbl"]}</td><td>{s["topic"]}{joined}</td>'
+                f'<tr><td>{s["date_lbl"]}</td><td class="topic">{html.escape(s["topic"])}{joined}</td>'
                 f'<td class="num">{s["present"]:,}</td><td class="num">—</td>'
-                f'<td class="num">—</td><td>—</td><td class="num">—</td></tr>')
+                f'<td class="num">—</td><td>—</td><td class="num">—</td>'
+                f'<td class="num">—</td><td class="num">—</td></tr>')
             continue
         absent = "—" if s["present_only"] else f'{s["absent"]:,}'
         flag = '<span class="flag">no absent logged</span>' if s["present_only"] else ""
-        miss = '<span class="flag">no L2 match</span>' if s["no_l2"] else ""
-        # The same topic runs across many batches, so show L2's own batch wording
-        # ("AI CAP B35 - Techies") to tell two identically-named sessions apart.
-        lbl = (s.get("pod") or s.get("l2_batch") or "").strip()
-        who = (f'<span style="font-size:11px;color:#3d5a80;background:#eaf1f8;'
-               f'padding:1px 7px;border-radius:6px;margin-right:6px;'
-               f'white-space:nowrap">{lbl}</span>') if lbl else ""
+        miss = '<span class="flag">no schedule match</span>' if s["no_l2"] else ""
+        # A chip only for a SHARED room, and then L2's own wording of who was in
+        # it ("AI CAP B35 , B36 , B37 - Techies") - so two identically-named
+        # sessions can be told apart. A room this batch had to itself shows the
+        # topic alone; the heading above the table already names the batch.
+        shared = s.get("shared_batches") or []
+        lbl = (s.get("l2_batch") or ", ".join(shared)).strip() if shared else ""
+        who = f'<span class="chip">{html.escape(lbl)}</span>' if lbl else ""
         trs.append(
-            f'<tr><td>{s["date_lbl"]}</td><td>{who}{s["topic"]}{flag}{miss}</td>'
+            f'<tr><td>{s["date_lbl"]}</td>'
+            f'<td class="topic">{who}{html.escape(str(s["topic"]))}{flag}{miss}</td>'
             f'<td class="num">{s["present"]:,}</td><td class="num">{absent}</td>'
             f'<td class="num">{_pill(s["pct"])}</td>'
             f'<td>{_mentor(s)}</td>'
-            f'<td class="num">{_rating(s)}</td>'
+            f'<td class="num">{_rating(s, own)}</td>'
             f'<td class="num">{_num2(s.get("rating_trainer"))}</td>'
             f'<td class="num">{_signed(s.get("rating_nps"))}</td></tr>')
     return ('<table class="sess"><thead><tr><th>Date</th><th>Session</th>'
@@ -429,6 +623,61 @@ def sessions_table_html(d: dict) -> str:
             '<th class="num">Trainer &#9733;</th>'
             '<th class="num">NPS</th></tr></thead><tbody>'
             + "".join(trs) + "</tbody></table>")
+
+
+def _weekday(mm: str) -> str:
+    """'10_03' -> 'Saturday'. The key carries no year: take the latest year
+    that does not put the date more than a month in the future."""
+    today = _dt.date.today()
+    mo, dd = (int(x) for x in mm.split("_"))
+    for y in (today.year, today.year - 1):
+        try:
+            day = _dt.date(y, mo, dd)
+        except ValueError:
+            continue
+        if day <= today + _dt.timedelta(days=31):
+            return day.strftime("%A")
+    return ""
+
+
+def weekend_table_html(w: dict) -> str:
+    """One weekend of a B41+ batch: each room per day, then each room and the
+    whole batch counted ONCE over both days (present in either room)."""
+    def _row(label, p, t, strong=False):
+        pct = f"{p / t * 100:.1f}%" if t else "—"
+        st_ = (' style="font-weight:700;background:var(--brand-accent-soft)"'
+               if strong else "")
+        return (f'<tr{st_}><td>{html.escape(label)}</td>'
+                f'<td class="num">{p:,}</td><td class="num">{t:,}</td>'
+                f'<td class="num">{pct}</td></tr>')
+    trs = []
+    for i, mm in enumerate(w["days"]):
+        for rm in w["rooms"]:
+            dd = rm["days"][i]
+            trs.append(_row(f'{rm["room"]} {_weekday(mm)} ({dd["date_lbl"]})',
+                            dd["present"], dd["total"]))
+    both = "both days" if len(w["days"]) > 1 else "counted once"
+    for rm in w["rooms"]:
+        trs.append(_row(f'Unique {rm["room"]} {both}', rm["present"], rm["total"], True))
+    trs.append(_row("Unique overall", w["present"], w["total"], True))
+    return ('<table class="sess"><thead><tr><th></th><th class="num">Attended</th>'
+            '<th class="num">Enrolled</th><th class="num">% of enrolled</th>'
+            '</tr></thead><tbody>' + "".join(trs) + "</tbody></table>")
+
+
+def weekend_pods_html(w: dict) -> str:
+    """The same weekend by roster POD, each person counted once."""
+    if not w.get("pods"):
+        return ""
+    trs = [f'<tr><td>{html.escape(p)}</td><td class="num">{v["present"]:,}</td>'
+           f'<td class="num">{v["total"]:,}</td><td class="num">{_pill(v["pct"])}</td></tr>'
+           for p, v in w["pods"].items()]
+    trs.append(f'<tr style="font-weight:700;background:var(--brand-accent-soft)">'
+               f'<td>Total</td><td class="num">{w["present"]:,}</td>'
+               f'<td class="num">{w["total"]:,}</td><td class="num">{w["pct"]:.1f}%</td></tr>')
+    return ('<table class="sess"><thead><tr><th>Domain</th><th class="num">Attended</th>'
+            '<th class="num">Enrolled</th><th class="num">% of enrolled</th>'
+            '</tr></thead><tbody>' + "".join(trs) + "</tbody></table>")
 
 
 def sessions_subtitle(d: dict) -> str:
@@ -442,49 +691,155 @@ def sessions_subtitle(d: dict) -> str:
     n_missing = sum(1 for s in d["sessions"] if s.get("no_l2"))
     sub = f' <span class="dh-sub">· {len(d["sessions"])} rows'
     if n_hidden:
-        sub += (f' · {n_hidden} session column(s) hidden - not in the L2 schedule')
+        sub += (f' · {n_hidden} session column(s) hidden - not in the schedule')
     elif n_missing:
-        sub += f' · {n_missing} without an L2 topic match'
+        sub += f' · {n_missing} without a schedule topic match'
     return sub + "</span>"
 
 
-def render(DATA: dict, summary: dict, source_note: str = "") -> None:
-    """Draw the dashboard."""
+# ── Streamlit-side helpers ────────────────────────────────────────────────────
+def _dash(st, fragment: str) -> None:
+    """Emit a dashboard HTML fragment under the `.dash` scope."""
+    st.markdown(f'<div class="dash">{fragment}</div>', unsafe_allow_html=True)
+
+
+def _title(st, text: str, sub: str = "", size: int = 14) -> None:
+    _dash(st, f'<div class="panel-title" style="font-size:{size}px">{text}'
+              + (f' <span class="dh-sub">· {sub}</span>' if sub else "") + "</div>")
+
+
+def _mini_list(items: list) -> str:
+    """Rows of (who, what, value) as a compact list."""
+    lis = []
+    for who, what, val in items:
+        lis.append(f'<li><span><span class="who">{html.escape(who)}</span> '
+                   f'{html.escape(what)}</span><span class="val">{html.escape(val)}</span></li>')
+    return '<ul class="mini-list">' + "".join(lis) + "</ul>"
+
+
+def _last_weekend(st, store: dict) -> bool:
+    """The newest Sat/Sun in the store, in four small pieces. Every figure is
+    one the Sessions / Recap tabs already show: per-batch attendance is
+    `recap._agg` over that batch's weekend rows (the same pooled present ÷
+    invited the Browse tab's Attendance tile uses), the best / worst lists
+    read the per-session `index` the pipeline stored, and the weekly line is
+    `recap.weeks` — the Week-by-week table's Attendance % column."""
+    sessions = store.get("sessions") or []
+    wk = T.latest_weekend(s.get("date") for s in sessions)
+    if not wk:
+        return False
+    sat, sun = wk
+    rows = weekend_rows(sessions, sat, sun)
+    if not rows:
+        return False
+    agg = _recap._agg(rows)
+    label = T.weekend_label(sat, sun)
+    st.markdown(
+        f'<div class="section-title">Last weekend · {label} · '
+        f'{agg["sessions"]} sessions · {len(agg["batches"])} batches</div>'
+        '<div class="section-sub">Present % of strength per batch, the sessions '
+        'furthest above and below what the decay curve expected, and the weekly '
+        'attendance across every batch.</div>', unsafe_allow_html=True)
+
+    per_batch = []
+    for b in sorted(agg["batches"], key=_dc.batch_key):
+        pct = _recap._agg([r for r in rows if r.get("batch") == b])["pct"]
+        if pct is not None:
+            per_batch.append((b, pct))
+    _title(st, "Attendance by batch", "this weekend, present % of strength")
+    st.plotly_chart(_weekend_bar(per_batch), width="stretch",
+                    config={"displayModeBar": False}, key="lw_bar")
+
+    indexed = sorted((r for r in rows if r.get("index") is not None),
+                     key=lambda r: r["index"], reverse=True)
+
+    def _row(r):
+        who = r["batch"] + (f" · {r['pod']}" if r.get("pod") else "")
+        return (who, (r.get("topic") or "Session")[:60], T.fmt_index(r["index"]))
+
+    weeks = (store.get("recap") or {}).get("weeks") or []
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        _title(st, "Weekly attendance", f"all batches, last {len(weeks)} weeks")
+        if weeks:
+            st.plotly_chart(_weeks_line(weeks), width="stretch",
+                            config={"displayModeBar": False}, key="lw_weeks")
+        else:
+            st.caption("No weekly rollup in this store yet.")
+    with c2:
+        _title(st, "Best vs expected", "1.00× = exactly what the curve predicts")
+        if indexed:
+            _dash(st, _mini_list([_row(r) for r in indexed[:3]]))
+    with c3:
+        _title(st, "Furthest below expected")
+        if indexed:
+            _dash(st, _mini_list([_row(r) for r in indexed[::-1][:3]]))
+    return True
+
+
+def render(DATA: dict, summary: dict, source_note: str = "",
+           store: dict | None = None, rerun_scope: str = "app") -> None:
+    """Draw the dashboard.
+
+    `rerun_scope` is what the bar-click rerun asks Streamlit to repaint. The
+    app calls this from inside an `@st.fragment`, where "fragment" repaints
+    the Dashboard alone; the default stays "app" so any caller OUTSIDE a
+    fragment still works — `st.rerun(scope="fragment")` raises there, and
+    catching it is not an option because the rerun itself is an exception.
+    """
     import streamlit as st
-    st.markdown(_CSS, unsafe_allow_html=True)
-    st.markdown('<div class="aicap">', unsafe_allow_html=True)
+    store = store or {}
+
+    # ── last weekend ──
+    if _last_weekend(st, store):
+        st.divider()
+        st.markdown('<div class="section-title">All time</div>', unsafe_allow_html=True)
 
     # ── KPIs ──
-    k = st.columns(4)
-    k[0].metric("Enrolled", f"{summary['enrolled']:,}")
-    k[1].metric("Active", f"{summary['active']:,}")
-    k[2].metric("Batches", summary["batches"])
-    k[3].metric("Sessions logged", summary["sessions"])
+    T.tiles([
+        {"label": "Enrolled", "value": f"{summary['enrolled']:,}"},
+        {"label": "Active", "value": f"{summary['active']:,}"},
+        {"label": "Batches", "value": summary["batches"]},
+        {"label": "Sessions logged", "value": summary["sessions"]},
+    ])
     if source_note:
         st.caption(source_note)
 
     if not DATA:
         st.warning("No batch tabs found in the sheet.")
-        st.markdown("</div>", unsafe_allow_html=True)
         return
 
     codes = list(DATA)
+    order = batch_order(codes)
+    default = newest_batch(DATA, store.get("sessions")) or order[0]
+    if st.session_state.get("aicap_batch") not in codes:
+        st.session_state["aicap_batch"] = default
+    sel = st.session_state["aicap_batch"]
 
-    # ── cross-batch comparison ──
-    st.markdown('<div class="panel-title">Average attendance by batch '
-                '<span class="dh-sub">· present % of strength</span></div>',
-                unsafe_allow_html=True)
-    st.plotly_chart(_comparison_bar(DATA), width="stretch",
-                    config={"displayModeBar": False})
+    # ── cross-batch comparison (click a bar to drill in) ──
+    # The click is read back from the chart's selection event and applied
+    # only when it is a NEW click. The chart's widget state keeps the last
+    # clicked bar across reruns (and re-registers it whenever the figure
+    # changes, e.g. when the accent moves), so an `on_select` callback would
+    # fire again with the stale click and override a pick in the selectbox.
+    _title(st, "Average attendance by batch",
+           "present % of strength, all time · click a bar to drill in")
+    ev = st.plotly_chart(_comparison_bar(DATA, sel), width="stretch",
+                         config={"displayModeBar": False}, key="aicap_bar",
+                         on_select="rerun", selection_mode="points")
+    pts = list(((ev or {}).get("selection") or {}).get("points") or [])
+    clicked = str(pts[0]["x"]) if pts and pts[0].get("x") is not None else None
+    if clicked in codes and clicked != st.session_state.get("_aicap_bar_applied"):
+        st.session_state["_aicap_bar_applied"] = clicked
+        if clicked != sel:
+            st.session_state["aicap_batch"] = clicked   # the selectbox follows
+            st.rerun(scope=rerun_scope)                 # and the bar re-paints
 
-    # ── batch selector (drives drill-down) ──
-    sel = st.segmented_control("Batch — pick to drill in", codes,
-                               default=codes[0], key="aicap_batch")
-    if sel is None:
-        sel = codes[0]
+    # ── batch selector (drives drill-down; kept in step with the bar) ──
+    sel = st.selectbox("Batch", order, key="aicap_batch")
     d = DATA[sel]
 
-    # ── POD filter (B35+ run domain PODs; earlier batches have none) ──
+    # ── domain filter (B35+ run domain PODs; earlier batches have none) ──
     plist = pod_names(d)
     pod_sel = None
     if plist:
@@ -497,12 +852,12 @@ def render(DATA: dict, summary: dict, source_note: str = "") -> None:
         # invisible - picking "Generalist" just finds no sessions.
         common = [s for s in d["sessions"] if s.get("pod") == _pods.COMMON]
         common_lbl = f"Common ({common[0]['total']:,})" if common else None
-        opts = (["All PODs"] + ([whole_lbl] if whole_lbl else [])
+        opts = (["All sessions"] + ([whole_lbl] if whole_lbl else [])
                 + ([common_lbl] if common_lbl else [])
                 + [f"{p} ({pinfo[p]['strength']:,})" for p in plist])
-        picked = st.segmented_control("POD", opts, default=opts[0],
+        picked = st.segmented_control("Domain", opts, default=opts[0],
                                       key="aicap_batch_pod")
-        if picked and picked != "All PODs":
+        if picked and picked != "All sessions":
             if whole_lbl and picked == whole_lbl:
                 # not a POD - the sessions the whole batch was invited to
                 pod_sel = _pods.WHOLE_BATCH
@@ -512,58 +867,78 @@ def render(DATA: dict, summary: dict, source_note: str = "") -> None:
                 pod_sel = plist[opts.index(picked)
                                 - 1 - bool(whole_lbl) - bool(common_lbl)]
         if d.get("pod_guessed"):
-            st.caption(f"{d['pod_guessed']} student(s) list more than one POD; the "
+            st.caption(f"{d['pod_guessed']} student(s) list more than one domain; the "
                        "last one in the cell was used.")
     d = pod_view(d, pod_sel)
+    scope_lbl = _SCOPE_LABEL.get(pod_sel, pod_sel) if pod_sel else None
 
     if not d["sessions"]:
-        st.info(f"No sessions logged for {pod_sel} yet."
+        st.info(f"No sessions logged for {scope_lbl} yet."
                 if pod_sel else "No sessions logged for this batch yet.")
-        st.markdown("</div>", unsafe_allow_html=True)
         return
 
-    scope = f" · {pod_sel}" if pod_sel else ""
-    st.markdown(
-        f'<div class="panel-title" style="font-size:18px">Batch {sel}{scope} '
-        f'<span class="dh-sub">· {d["n_sessions"]} sessions logged · '
-        f'strength {d["strength"]:,}</span></div>', unsafe_allow_html=True)
+    _title(st, f"Batch {html.escape(sel)}" + (f" · {html.escape(scope_lbl)}" if scope_lbl else ""),
+           f'{d["n_sessions"]} sessions logged · strength {d["strength"]:,}', size=18)
 
     # ── metric cards ── (intro-call rows excluded: they measure a different thing)
     real_sess = [s for s in d["sessions"] if not s.get("is_intro")] or d["sessions"]
     peak_s = max(real_sess, key=lambda s: s["pct"])
     low_s = min(real_sess, key=lambda s: s["pct"])
-    c = st.columns(4)
-    c[0].metric("Total strength", f"{d['strength']:,}",
-                "in this POD" if pod_sel else "all enrolled", delta_color="off")
-    c[1].metric("Active", f"{d['active']:,}", "excl. refund / unidentified", delta_color="off")
-    c[2].metric("Avg attendance", f"{d['avg_pct']:.1f}%",
-                "of POD strength" if pod_sel else "of batch strength, per week",
-                delta_color="off")
-    c[3].metric("Peak → lowest", f"{d['peak']:.0f}% → {d['low']:.0f}%",
-                f"{peak_s['date_lbl']} → {low_s['date_lbl']}", delta_color="off")
+    is_pod = pod_sel not in (None, _pods.WHOLE_BATCH, _pods.COMMON)
+    T.tiles([
+        {"label": "Total strength", "value": f"{d['strength']:,}",
+         "sub": ("in this domain" if is_pod else
+                 "invited to the common room" if pod_sel == _pods.COMMON else "all enrolled")},
+        {"label": "Active", "value": f"{d['active']:,}",
+         # data.is_active: a BLANK Payment is inactive too, and blanks are the
+         # majority of what this tile leaves out — saying only "refund or
+         # unidentified" made the gap between Enrolled and Active look like a
+         # refund count.
+         "help": "Enrolled students whose Payment is recorded and is not a "
+                 "refund or unidentified. A blank Payment counts as inactive "
+                 "as well: no payment recorded is not the same thing as a "
+                 "refund, but it is not active either."},
+        {"label": "Avg attendance", "value": f"{d['avg_pct']:.1f}%",
+         "sub": "of domain strength" if is_pod else "of batch strength, per week"},
+        {"label": "Peak → lowest", "value": f"{d['peak']:.0f}% → {d['low']:.0f}%",
+         "sub": f"{peak_s['date_lbl']} → {low_s['date_lbl']}"},
+    ])
 
-    # ── attendance by date ──
-    st.markdown('<div class="panel-title">Attendance by date</div>', unsafe_allow_html=True)
-    st.plotly_chart(_date_line(d), width="stretch", config={"displayModeBar": False})
+    # ── attendance by date ── (B41+: by weekend, each person counted once)
+    wk = d.get("weekends") if pod_sel is None else None
+    _title(st, "Attendance by weekend" if wk else "Attendance by date",
+           "Saturday and Sunday run the same session; each person counted once"
+           if wk else "")
+    st.plotly_chart(_date_line(d), width="stretch", config={"displayModeBar": False},
+                    key="aicap_line")
 
-    # ── closing types ──
-    st.markdown('<div class="panel-title">Closing types '
-                '<span class="dh-sub">· bar = share of batch · pill = that '
-                "channel's avg attendance</span></div>",
-                unsafe_allow_html=True)
-    st.markdown(closing_rows_html(d), unsafe_allow_html=True)
+    # ── closing types ── (whole-batch even in a domain view — `closing_title`)
+    _cl_title, _cl_sub = closing_title(pod_sel)
+    _title(st, _cl_title, _cl_sub)
+    _dash(st, closing_rows_html(d))
+
     # ── sessions table ──
-    st.markdown(f'<div class="panel-title">All sessions{sessions_subtitle(d)}</div>',
-                unsafe_allow_html=True)
-    st.markdown(sessions_table_html(d), unsafe_allow_html=True)
+    _title(st, f"All sessions{sessions_subtitle(d)}")
+    _dash(st, f'<div class="dash-scroll">{sessions_table_html(d)}</div>')
+
+    # ── one weekend, day by day and counted once (B41+) ──
+    if wk:
+        labels = [w["date_lbl"] for w in wk][::-1]          # newest first
+        pick = st.selectbox("Weekend", labels, key=f"aicap_wk_{sel}")
+        w = wk[len(wk) - 1 - labels.index(pick)]
+        _title(st, f"Weekend {html.escape(w['date_lbl'])}",
+               html.escape(w["topic"]))
+        _dash(st, f'<div class="dash-scroll">{weekend_table_html(w)}</div>')
+        pods_tbl = weekend_pods_html(w)
+        if pods_tbl:
+            _title(st, "By domain, both days",
+                   "each person counted once, present in either room")
+            _dash(st, f'<div class="dash-scroll">{pods_tbl}</div>')
 
     # ── who actually came, inside the sessions that mixed domains ──
     matrix = domain_matrix_html(d)
     if matrix:
-        st.markdown('<div class="panel-title">By domain '
-                    '<span class="dh-sub">· inside the All Domains and shared '
-                    'rooms above, which L2 records as one session each</span>'
-                    '</div>', unsafe_allow_html=True)
-        st.markdown(matrix, unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
+        _title(st, "By domain",
+               "inside the All Domains, compound and shared rooms above, which "
+               "the schedule records as one session each")
+        _dash(st, f'<div class="dash-scroll">{matrix}</div>')

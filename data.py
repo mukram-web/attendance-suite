@@ -275,6 +275,42 @@ def clean_l2_label(raw) -> str:
 
 
 # ── per-batch build ─────────────────────────────────────────────────────────
+PAIRED_FROM = 41      # AI CAP batch from which each session runs Sat AND Sun
+GENERAL = "General"   # the weekend room for everyone without a POD room of their own
+
+
+def paired(batch: str) -> bool:
+    """Does this batch repeat each session on both weekend days?"""
+    m = re.fullmatch(r"B(\d+)", str(batch or ""))
+    return bool(m) and int(m.group(1)) >= PAIRED_FROM
+
+
+def _weekend_groups(mms) -> list:
+    """'MM_DD' keys -> runs of consecutive days (a Sat+Sun weekend is one run)."""
+    import datetime as _d
+
+    def _day(mm):
+        mo, dd = (int(x) for x in mm.split("_"))
+        return _d.date(2000, mo, dd)        # leap year, so 29 Feb parses
+    out = []
+    for mm in sorted(set(mms)):
+        if out and len(out[-1]) < 2 and (_day(mm) - _day(out[-1][-1])).days == 1:
+            out[-1].append(mm)
+        else:
+            out.append([mm])
+    return out
+
+
+def span_label(days) -> str:
+    """['10_03', '10_04'] -> '3–4 Oct'; across a month end '31 Oct – 1 Nov'."""
+    a, b = date_label(days[0]), date_label(days[-1])
+    if len(days) == 1 or a == b:
+        return a
+    da, ma = a.split(" ", 1)
+    db, mb = b.split(" ", 1)
+    return f"{da}–{db} {ma}" if ma == mb else f"{a} – {b}"
+
+
 def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
                 l2_labels: dict | None = None, ratings: dict | None = None,
                 mentors: dict | None = None) -> dict | None:
@@ -654,6 +690,71 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
     dates = sorted(by_date.values(), key=lambda d: d["mm"] or "")
     dpcts = [d["pct"] for d in dates]
 
+    # From AI CAP B41 every session runs twice - Saturday and Sunday - and a
+    # learner picks ONE day. Per day the batch looks half-empty, so for these
+    # batches a weekend is the unit: each person counted once over both days,
+    # present in either room (a few join the other room's link).
+    weekends = []
+    if paired(batch):
+        def _here(r, c):
+            return str(_cell(r, c) or "").strip().lower() == "present"
+        for days in _weekend_groups(s["mm"] for s in sessions if s["mm"]):
+            ws = [s for s in sessions if s["mm"] in days]
+            rooms: dict = {}
+            pod_tot: dict = defaultdict(lambda: {"present": 0, "total": 0})
+            pres = tot = 0
+            for r in enrolled:
+                rp = row_pod.get(id(r), "")
+                inv = [s for s in ws
+                       if _invited(rp, s["pod"], frozenset(s.get("excl") or ()))]
+                if not inv:
+                    continue
+                room = next((s["pod"] for s in inv
+                             if s["pod"] and s["pod"] != pods.COMMON), GENERAL)
+                on = {mm: any(_here(r, s["col"]) for s in ws if s["mm"] == mm)
+                      for mm in days}
+                hit = any(on.values())
+                rm = rooms.setdefault(room, {"room": room, "present": 0, "total": 0,
+                                             "days": {mm: [0, 0] for mm in days}})
+                rm["total"] += 1
+                rm["present"] += hit
+                for mm in days:
+                    rm["days"][mm][0] += on[mm]
+                    rm["days"][mm][1] += 1
+                if pod_col is not None:
+                    pod_tot[rp or pods.UNKNOWN]["total"] += 1
+                    pod_tot[rp or pods.UNKNOWN]["present"] += hit
+                tot += 1
+                pres += hit
+            if not tot:
+                continue
+            room_list = sorted(rooms.values(),
+                               key=lambda x: (x["room"] != GENERAL, -x["total"]))
+            for rm in room_list:
+                rm["pct"] = round(rm["present"] / rm["total"] * 100, 1)
+                rm["days"] = [{"mm": mm, "date_lbl": date_label(mm),
+                               "present": p, "total": t,
+                               "pct": round(p / t * 100, 1) if t else 0.0}
+                              for mm, (p, t) in rm["days"].items()]
+            topics = list(dict.fromkeys(
+                re.sub(r"[\s:\-–]*slot\s*[a-z]\s*$", "", str(s["topic"]),
+                       flags=re.I).strip()
+                for s in sorted(ws, key=lambda s: (s["pod"] not in ("", pods.COMMON),
+                                                   s["mm"]))))
+            pod_list = {p: dict(v, pct=round(v["present"] / v["total"] * 100, 1))
+                        for p, v in sorted(pod_tot.items(),
+                                           key=lambda kv: -kv[1]["total"])}
+            weekends.append({
+                "mm": days[0], "days": list(days), "date_lbl": span_label(days),
+                "topic": " · ".join(topics), "n_pods": len(ws),
+                "present": pres, "total": tot,
+                "pct": round(pres / tot * 100, 1),
+                "rooms": room_list,
+                "pods": pod_list if len(pod_list) > 1 else {},
+            })
+    if weekends:
+        dpcts = [w["pct"] for w in weekends]
+
     return {
         "code": batch, "strength": strength, "active": active,
         "n_sessions": n_valid,
@@ -662,6 +763,7 @@ def build_batch(rows: list[list], batch: str, l2_lookup: dict | None,
         "sessions": sessions, "closing": closing,
         "hidden_no_l2": hidden_no_l2,
         "by_date": dates,
+        "weekends": weekends,
         "pods": {p: {"strength": pod_strength[p], "active": pod_active.get(p, 0)}
                  for p in sorted(pod_strength)},
         "pod_guessed": pod_guessed,
