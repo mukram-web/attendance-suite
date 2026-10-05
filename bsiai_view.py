@@ -110,6 +110,15 @@ def caption(store: dict) -> str:
 
 # ───────────────────────────── pages ─────────────────────────────────────────
 def page_dashboard(store: dict, key: str) -> None:
+    # A deploy that updates the main script in place can leave an ALREADY
+    # IMPORTED dash_view in memory — the one without `key_prefix` — while this
+    # module, imported for the first time, is new. Seen on Streamlit Cloud the
+    # day the tab shipped: TypeError at this call, no frame inside render.
+    # Re-executing the module from disk is the same thing a reboot does.
+    import importlib
+    import inspect
+    if "key_prefix" not in inspect.signature(dash_view.render).parameters:
+        importlib.reload(dash_view)
     dash_view.render(store["DATA"], store["summary"], "", store=store,
                      rerun_scope="fragment", key_prefix=key)
 
