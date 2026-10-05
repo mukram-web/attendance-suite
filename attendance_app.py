@@ -73,6 +73,11 @@ def _brand_title() -> None:
     import base64
     dark = str(st.get_option("theme.base") or "light").lower() == "dark"
     path = T.BRAND.get("logo_dark" if dark else "logo_light")
+    # Relative to THIS file, not the working directory: a server started from
+    # the parent folder (the local launcher) otherwise misses the asset and
+    # falls back to the plain title, so local and deployed headers differed.
+    if path and not _os.path.isabs(path):
+        path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), path)
     if not (path and _os.path.exists(path)):
         st.title("Be10X — AI CAP Attendance")
         return
@@ -114,6 +119,12 @@ def _password_ok() -> None:
     except Exception:            # no secrets file at all
         expected = ""
 
+    # The stylesheet is what crops the wordmark to its 140px window. The
+    # header below the gate injects it on every authenticated run, but this
+    # branch STOPS before reaching that line, so without it here the gate
+    # drew the raw 1080px file at full page width (seen on the deployed app,
+    # 2026-10-05). Once per run still holds: an unauthenticated run ends here.
+    T.inject_css()
     _brand_title()
     if not expected:
         st.error(
