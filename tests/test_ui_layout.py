@@ -63,7 +63,8 @@ def _string_literals(path):
 
 
 TAB_LABELS = ["📊 Dashboard", "📚 Sessions", "🎬 Weekend Recap",
-              "📋 Roster (marked attendance)", "🔮 Forecast", "➕ Add data"]
+              "📋 Roster (marked attendance)", "🔮 Forecast", "💼 BSIAI",
+              "➕ Add data"]
 SUB_TAB_LABELS = ["🔎 Browse", "🏆 This week", "🎓 Trainers"]
 
 
@@ -125,7 +126,7 @@ class TestPlainWords(unittest.TestCase):
         """Every string literal in the two UI files except docstrings, the
         CSV export's column keys, lower-case data keys and file names."""
         hits = []
-        for name in ("attendance_app.py", "dash_view.py"):
+        for name in ("attendance_app.py", "dash_view.py", "bsiai_view.py"):
             for lineno, text in _string_literals(os.path.join(ROOT, name)):
                 if text in _CSV_KEYS or _DATA_KEY.fullmatch(text):
                     continue
@@ -641,7 +642,7 @@ class TestSessionsTable(unittest.TestCase):
 # what proves the wrapping itself is this AST read of the source.
 _FRAGMENT_BODIES = {"_tab_dashboard", "_tab_roster", "_tab_forecast",
                     "_sub_browse", "_sub_this_week", "_sub_trainers",
-                    "_tab_weekend"}
+                    "_tab_weekend", "_tab_bsiai"}
 
 
 def _decorated_fragments(path):

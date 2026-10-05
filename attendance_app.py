@@ -37,6 +37,7 @@ import live_data
 import data as ddata          # new dashboard data layer (aliased; 'data' is used as a local below)
 import sheets as dsheets      # gspread / xlsx source adapter
 import dash_view              # Plotly drill-down dashboard UI
+import bsiai_view             # the BSIAI programme's pages, over its own store
 import ui_theme as T          # brand tokens, the one stylesheet, KPI tiles, plain-word labels
 
 # The tab icon is the wordmark's disc (ui_theme.BRAND["favicon"]). The emoji
@@ -714,6 +715,20 @@ if not store_mode and marked_bytes is None:
     else:
         source_label = "Manual upload — roster only"
 
+# ── the BSIAI programme's own store ──────────────────────────────────────────
+# A SEPARATE file (`bsiai.duckdb`, written by bsiai_build.py and uploaded with
+# `--upload`), read through the same loader as the AI CAP store so it refreshes
+# from Drive on the same TTL. It never joins the AI CAP numbers — §4b holds:
+# the tab below is the only place it is drawn. Absent on Drive or on disk
+# simply means the tab says so; nothing else on the page depends on it.
+_BSIAI_STORE_NAME = "bsiai.duckdb"
+_bsiai_available = _store_configured or (_DISK_CACHE / _BSIAI_STORE_NAME).exists()
+bsiai_store = None
+if _bsiai_available:
+    _b = _load_store(st.session_state.nonce, _BSIAI_STORE_NAME)
+    if _b and "df" in _b:
+        bsiai_store = _b
+
 if mark_error:
     st.error(f"Marking failed, showing the roster as-is: {mark_error}")
 
@@ -914,10 +929,10 @@ def _card(kicker: str, title: str, who: str, mentor: str, value: str,
 
 # ───────────────────────────── tabs ──────────────────────────────────────────
 (tab_dash, tab_sessions, tab_weekend, tab_roster, tab_fcst,
- tab_add) = st.tabs(
+ tab_bsiai, tab_add) = st.tabs(
     ["📊 Dashboard", "📚 Sessions", "🎬 Weekend Recap",
      "📋 Roster (marked attendance)", "🔮 Forecast",
-     "➕ Add data"]
+     "💼 BSIAI", "➕ Add data"]
 )
 
 # Browse / This week / Trainers are three views of the SAME thing — the session
@@ -2306,6 +2321,34 @@ def _tab_weekend():
 
 with tab_weekend:
     _tab_weekend()
+
+
+# ============================ TAB - BSIAI ====================================
+# The BSIAI programme (Build Side Income Using AI), from ITS OWN store. The
+# pages are bsiai_view's, the renderers are the same ones the tabs above use,
+# and every widget key carries the "bsiai" prefix so nothing collides with the
+# AI CAP Dashboard's or Roster's widgets in this one script.
+@st.fragment
+def _tab_bsiai():
+    _painted("bsiai")
+    if bsiai_store is None:
+        st.caption("No BSIAI data in this deployment yet.")
+        with st.expander("How to add it", expanded=False):
+            st.info(
+                "BSIAI is built separately from the AI CAP pipeline: run "
+                "`python bsiai_build.py --upload` on a machine with the LMS key "
+                "and the Drive service account. It writes `bsiai.duckdb` into the "
+                "same private Drive folder as the AI CAP store, and this tab picks "
+                "it up on the next refresh.")
+        return
+    if _viewing:
+        st.caption("BSIAI is not archived week by week - this is its latest build, "
+                   "whichever week is selected in the sidebar.")
+    bsiai_view.render(bsiai_store, key="bsiai")
+
+
+with tab_bsiai:
+    _tab_bsiai()
 
 
 # ======================== TAB 8 - ADD THIS WEEK'S DATA =======================

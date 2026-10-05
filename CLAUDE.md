@@ -63,6 +63,7 @@ The app picks a mode in this order (`attendance_app.py`, search `_store_availabl
 | `sheets.py` | L2 webinar→topic lookup. |
 | `ecap.py` | the ECAP roster graft: which tabs of the snapshot workbook join the CAP roster, and why an existing tab is never overwritten. See §4j. |
 | `ffa.py` | the FFA register: which hand-supplied (webinar, date) exports count, and for which batches. Data, not logic — see §4i. |
+| `bsiai_build.py`, `bsiai_view.py`, `bsiai_app.py` | the BSIAI programme: its own build and store (`bsiai.duckdb`), its pages (`bsiai_view`, drawn by the main app's **BSIAI** tab and by the standalone `bsiai_app.py`). Separate from the pipeline; never joins the AI CAP numbers. See §4l. |
 | `polls.py` | Zoom poll exports -> session/trainer/recommend ratings, the 1-5 histograms and NPS. `nps_from_dist` is the ONLY place the promoter/detractor split is written down. `parse_responses` + `split_by_roster` divide a shared webinar's poll between its batches (§4e). |
 | `sessionmeta.py` | duration, peak, the per-minute retention curve and stickiness, swept from the attendee report's own join/leave times. Pure, unit-tested. See §4e. |
 | `recap.py` | the week just gone, scored as a RESIDUAL against the decay curve. Pure, unit-tested. See §4e. |
@@ -937,6 +938,82 @@ published column, so nothing moves. The check runs BEFORE the date exemption
 on purpose (see the docstring): exempting by date would mark a Hackathon room
 for the one batch with no class that day. A webinar with a Hackathon row AND a
 class row keeps its class dates. `tests/test_not_a_session.py` pins all of it.
+
+### 4l. BSIAI — its own store, drawn as a tab of this app (added 2026-10-05)
+
+§4b still holds: the AI CAP **pipeline** does not report BSIAI and nothing
+BSIAI ever joins an AI CAP number. What was added, on the owner's ask
+("build dashboard of bsiai like the current app", then "add this app in our
+original app — one more tab"):
+
+- `bsiai_build.py` pulls the seven batches from the LMS API by **batch id**
+  (`Build Side Income Using AI B1 / B2 / B3-A / B3-B` and `Accelerator B41 /
+  B42 / B43`), writes the roster in the house format, downloads every
+  attendee report and poll export from the folders naming BSIAI on both
+  Shared Drives, marks Present/Absent, and writes `.cache/bsiai.duckdb` in
+  the SAME shape as `attendance.duckdb` (meta + compute + `grid_<code>`).
+  Deliverables are copied to `F:\` (`BSIAI_7_batches_roster_format_<date>.xlsx`,
+  `BSIAI_marked_attendance_<date>.xlsx`, `attendance_store\bsiai_<date>.duckdb`).
+  **`--upload`** puts `bsiai.duckdb` and both workbooks (fixed names
+  `BSIAI_roster_format.xlsx`, `BSIAI_marked_attendance.xlsx`) into the
+  private Drive store folder beside `attendance.duckdb`, and records their
+  Drive ids in the store's meta. It runs on a machine with the LMS key and
+  the service account — the owner's PC — not in Actions (`LMS_API_KEY` is
+  not a repo secret, §4h).
+- `bsiai_view.py` holds the pages: Dashboard (`dash_view.render`), Sessions,
+  This week, Trainers, Roster (marked grid, masked by default, both workbook
+  downloads — from disk where they exist, else fetched once from Drive by
+  id), Build notes (the rulings, every session marked, the warnings).
+- **The main app's `💼 BSIAI` tab** draws them. `attendance_app.py` loads
+  `bsiai.duckdb` through the SAME `_load_store` as the AI CAP store (so it
+  refreshes from Drive on the same TTL, and in local-only mode reads
+  `.cache/bsiai.duckdb`), at top level beside the AI CAP load — never inside
+  a fragment (`test_ui_layout` pins that). The tab body `_tab_bsiai` is a
+  fragment like every other tab. With no store on Drive or disk the tab
+  says so and nothing else on the page changes. An archived week
+  (`_viewing`) still shows the LATEST BSIAI build — BSIAI is not archived.
+- `bsiai_app.py` is the same pages on their own port (`bsiai-app`,
+  127.0.0.1:8520), with **no password gate** — do not deploy it; the tab
+  behind the main app's gate is the one to publish.
+
+**Two dashboards in one script: every widget key is prefixed.**
+`dash_view.render(..., key_prefix=...)` names its keys from the prefix
+(`aicap_batch`, `aicap_bar`, … by default — unchanged spelling), and
+`bsiai_view` passes `"bsiai"` to it and to every widget of its own; a
+literal key in `bsiai_view` fails `test_bsiai_tab`. Without this the second
+Dashboard's first selectbox raises a duplicate-key error.
+
+**It reuses, never re-implements:** `data.build_batch` computes each batch
+(so the denominator is strength and the validity gates are the same),
+`recap`/`trainers`/`sessionmeta`/`polls` build the sections,
+`dashboard_core.roster_grid`/`compute` the tables. **Accelerator batches are
+counted PER DAY** (owner's ruling 2026-10-05, over the AI CAP app's Sat+Sun
+weekend view) — `--weekend-view` widens `data.paired` to them for a
+comparison build only.
+
+**The rulings that shape its numbers** are in the module docstring and in the
+store's `rulings` key (shown on the Build notes page). The ones that are
+BSIAI-specific: Accelerator rooms are assigned by their AI CAP peer batch
+(the label `AI CAP B41 - Common , … Accelerator B41` is `Accelerator B41`,
+whatever BSIAI number the label carries — L2 and the folders have called the
+same cohort B1, B2, B41 and B42); Accelerator B41 weekends union the AI CAP
+B41 Techies room (its students sat in both); webinar 95403362407 is a
+mislabelled folder and is dropped; Attended = Yes only. Dashboard codes are
+short (`B1`, `B3-A`, `Accelerator B41`); workbook tabs carry the programme
+(`BSIAI B1`). **Never key on the bare number** — cohort B1 and Accelerator
+B1 (= LMS B40) are different people, and `extract_batches` collapses
+`B3 - A` and `B3 - B` to one key.
+
+Measured 2026-10-05: 78 (webinar, date) pairs on the drives, 77 in L2 (the
+78th is the dropped webinar); 3 L2 BSIAI webinars have no export anywhere
+(27 Jun, 9 Aug x2); every one of the 69 marked sessions has a poll.
+`tests/test_bsiai_build.py` pins the rules, `tests/test_bsiai_tab.py` runs
+the main app with both stores and checks the tab, the key prefixes, the
+masked grids and that the AI CAP batch list is untouched.
+
+**To refresh BSIAI:** `python bsiai_build.py --upload` on the owner's PC
+(about 3 minutes; `--skip-fetch` reuses the day's downloads). The deployed
+tab picks the new store up within the store TTL; 🔄 Refresh forces it.
 
 ## 5. Invariants — break these and the numbers go silently wrong
 

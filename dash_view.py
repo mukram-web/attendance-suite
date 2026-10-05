@@ -717,7 +717,7 @@ def _mini_list(items: list) -> str:
     return '<ul class="mini-list">' + "".join(lis) + "</ul>"
 
 
-def _last_weekend(st, store: dict) -> bool:
+def _last_weekend(st, store: dict, key_prefix: str = "aicap") -> bool:
     """The newest Sat/Sun in the store, in four small pieces. Every figure is
     one the Sessions / Recap tabs already show: per-batch attendance is
     `recap._agg` over that batch's weekend rows (the same pooled present ÷
@@ -748,7 +748,7 @@ def _last_weekend(st, store: dict) -> bool:
             per_batch.append((b, pct))
     _title(st, "Attendance by batch", "this weekend, present % of strength")
     st.plotly_chart(_weekend_bar(per_batch), width="stretch",
-                    config={"displayModeBar": False}, key="lw_bar")
+                    config={"displayModeBar": False}, key=f"{key_prefix}_lw_bar")
 
     indexed = sorted((r for r in rows if r.get("index") is not None),
                      key=lambda r: r["index"], reverse=True)
@@ -763,7 +763,7 @@ def _last_weekend(st, store: dict) -> bool:
         _title(st, "Weekly attendance", f"all batches, last {len(weeks)} weeks")
         if weeks:
             st.plotly_chart(_weeks_line(weeks), width="stretch",
-                            config={"displayModeBar": False}, key="lw_weeks")
+                            config={"displayModeBar": False}, key=f"{key_prefix}_lw_weeks")
         else:
             st.caption("No weekly rollup in this store yet.")
     with c2:
@@ -778,8 +778,15 @@ def _last_weekend(st, store: dict) -> bool:
 
 
 def render(DATA: dict, summary: dict, source_note: str = "",
-           store: dict | None = None, rerun_scope: str = "app") -> None:
+           store: dict | None = None, rerun_scope: str = "app",
+           key_prefix: str = "aicap") -> None:
     """Draw the dashboard.
+
+    `key_prefix` names every widget and session-state key this draws
+    ("aicap_batch", "aicap_bar", ...). A second programme's dashboard in the
+    SAME script (the BSIAI tab) passes its own prefix, or Streamlit raises a
+    duplicate-key error on the first shared widget. The default keeps every
+    existing key spelling unchanged.
 
     `rerun_scope` is what the bar-click rerun asks Streamlit to repaint. The
     app calls this from inside an `@st.fragment`, where "fragment" repaints
@@ -791,7 +798,7 @@ def render(DATA: dict, summary: dict, source_note: str = "",
     store = store or {}
 
     # ── last weekend ──
-    if _last_weekend(st, store):
+    if _last_weekend(st, store, key_prefix):
         st.divider()
         st.markdown('<div class="section-title">All time</div>', unsafe_allow_html=True)
 
@@ -812,9 +819,10 @@ def render(DATA: dict, summary: dict, source_note: str = "",
     codes = list(DATA)
     order = batch_order(codes)
     default = newest_batch(DATA, store.get("sessions")) or order[0]
-    if st.session_state.get("aicap_batch") not in codes:
-        st.session_state["aicap_batch"] = default
-    sel = st.session_state["aicap_batch"]
+    k_batch, k_applied = f"{key_prefix}_batch", f"_{key_prefix}_bar_applied"
+    if st.session_state.get(k_batch) not in codes:
+        st.session_state[k_batch] = default
+    sel = st.session_state[k_batch]
 
     # ── cross-batch comparison (click a bar to drill in) ──
     # The click is read back from the chart's selection event and applied
@@ -825,18 +833,18 @@ def render(DATA: dict, summary: dict, source_note: str = "",
     _title(st, "Average attendance by batch",
            "present % of strength, all time · click a bar to drill in")
     ev = st.plotly_chart(_comparison_bar(DATA, sel), width="stretch",
-                         config={"displayModeBar": False}, key="aicap_bar",
+                         config={"displayModeBar": False}, key=f"{key_prefix}_bar",
                          on_select="rerun", selection_mode="points")
     pts = list(((ev or {}).get("selection") or {}).get("points") or [])
     clicked = str(pts[0]["x"]) if pts and pts[0].get("x") is not None else None
-    if clicked in codes and clicked != st.session_state.get("_aicap_bar_applied"):
-        st.session_state["_aicap_bar_applied"] = clicked
+    if clicked in codes and clicked != st.session_state.get(k_applied):
+        st.session_state[k_applied] = clicked
         if clicked != sel:
-            st.session_state["aicap_batch"] = clicked   # the selectbox follows
+            st.session_state[k_batch] = clicked         # the selectbox follows
             st.rerun(scope=rerun_scope)                 # and the bar re-paints
 
     # ── batch selector (drives drill-down; kept in step with the bar) ──
-    sel = st.selectbox("Batch", order, key="aicap_batch")
+    sel = st.selectbox("Batch", order, key=k_batch)
     d = DATA[sel]
 
     # ── domain filter (B35+ run domain PODs; earlier batches have none) ──
@@ -856,7 +864,7 @@ def render(DATA: dict, summary: dict, source_note: str = "",
                 + ([common_lbl] if common_lbl else [])
                 + [f"{p} ({pinfo[p]['strength']:,})" for p in plist])
         picked = st.segmented_control("Domain", opts, default=opts[0],
-                                      key="aicap_batch_pod")
+                                      key=f"{key_prefix}_batch_pod")
         if picked and picked != "All sessions":
             if whole_lbl and picked == whole_lbl:
                 # not a POD - the sessions the whole batch was invited to
@@ -910,7 +918,7 @@ def render(DATA: dict, summary: dict, source_note: str = "",
            "Saturday and Sunday run the same session; each person counted once"
            if wk else "")
     st.plotly_chart(_date_line(d), width="stretch", config={"displayModeBar": False},
-                    key="aicap_line")
+                    key=f"{key_prefix}_line")
 
     # ── closing types ── (whole-batch even in a domain view — `closing_title`)
     _cl_title, _cl_sub = closing_title(pod_sel)
@@ -924,7 +932,7 @@ def render(DATA: dict, summary: dict, source_note: str = "",
     # ── one weekend, day by day and counted once (B41+) ──
     if wk:
         labels = [w["date_lbl"] for w in wk][::-1]          # newest first
-        pick = st.selectbox("Weekend", labels, key=f"aicap_wk_{sel}")
+        pick = st.selectbox("Weekend", labels, key=f"{key_prefix}_wk_{sel}")
         w = wk[len(wk) - 1 - labels.index(pick)]
         _title(st, f"Weekend {html.escape(w['date_lbl'])}",
                html.escape(w["topic"]))
