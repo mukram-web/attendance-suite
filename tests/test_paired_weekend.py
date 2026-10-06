@@ -52,6 +52,21 @@ class PairedWeekendTest(unittest.TestCase):
         self.assertEqual(w["pods"]["Generalist"]["total"], 3)
         self.assertEqual(self.b["avg_pct"], round(5 / 7 * 100, 1))
 
+    def test_one_room_batch_table_has_no_room_names(self):
+        # BSIAI Accelerator batches have no POD column: one room, so the rows
+        # are "Saturday (3 Oct)" not "General Saturday (3 Oct)", and the only
+        # bold line is the overall one.
+        import dash_view as V
+        w = {"days": ["10_03", "10_04"], "present": 3, "total": 6,
+             "rooms": [{"room": "General", "present": 3, "total": 6,
+                        "days": [{"mm": "10_03", "date_lbl": "3 Oct", "present": 3, "total": 6},
+                                 {"mm": "10_04", "date_lbl": "4 Oct", "present": 0, "total": 6}]}]}
+        html_ = V.weekend_table_html(w)
+        self.assertNotIn("General", html_)
+        self.assertIn("(3 Oct)", html_)
+        self.assertEqual(html_.count("font-weight:700"), 1)
+        self.assertIn("Unique overall both days", html_)
+
     def test_span_label(self):
         self.assertEqual(D.span_label(["10_31", "11_01"]), "31 Oct – 1 Nov")
         self.assertEqual(D._weekend_groups(["10_03", "10_04", "10_10"]),

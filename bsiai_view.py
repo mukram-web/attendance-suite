@@ -128,13 +128,13 @@ def page_sessions(store: dict, key: str) -> None:
     if not S:
         st.warning("No sessions in this store.")
         return
-    st.caption("Every logged session across the seven batches. Filter, then pick one for its breakdown.")
+    st.caption("Every logged session across every BSIAI batch. Filter, then pick one for its breakdown.")
     with st.expander("How this is calculated", expanded=False):
         st.markdown(
             "**Attendance % = present ÷ batch strength** (everyone enrolled with an email), the same "
             "denominator the AI CAP dashboard uses. **Present** counts a learner whose email or phone "
             "appears in the Zoom attendee report with *Attended = Yes*. **vs expected** compares the "
-            "session with the decay curve fitted on these seven batches: 1.00× is exactly what a cohort "
+            "session with the decay curve fitted on these BSIAI batches: 1.00× is exactly what a cohort "
             "of that age normally draws. Ratings come from the session's feedback poll; in a room shared "
             "with an AI CAP batch the figure is **this batch's own students' answers**, and *Whole room* "
             "is everyone who answered. **Duration** is first-join to last-leave; **Peak** is the most "
@@ -264,7 +264,7 @@ def page_this_week(store: dict, key: str) -> None:
     with st.expander("How this is calculated", expanded=False):
         st.markdown(
             "Every headline here is **attendance vs expected** — what a session drew over what the "
-            "decay curve (fitted on these seven BSIAI batches) says a cohort of that age should draw. "
+            "decay curve (fitted on these BSIAI batches) says a cohort of that age should draw. "
             f"1.00× expected is exactly on curve. Week of {lat['week']}; built {store['generated_at']}.")
     dl0 = lat["delta"]
     T.tiles([

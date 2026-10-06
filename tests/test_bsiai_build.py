@@ -40,15 +40,22 @@ class TestAssign(unittest.TestCase):
         # Reading the BSIAI number would credit cohort B2 with the room.
         self.assertEqual(bb.assign("AI CAP B41 - Common , BSIAI Accelerator B2"),
                          ["Accelerator B41"])
-        # And "Accelerator B1" = LMS B40, which this dashboard does not track.
-        self.assertEqual(bb.assign("AI CAP B40 - Common + BSIAI Accelerator B1"), [])
+        # And "Accelerator B1" = LMS B40, tracked since 2026-10-06 — the CAP peer
+        # names it, so the stale "B1" in the label is never read as cohort B1.
+        self.assertEqual(bb.assign("AI CAP B40 - Common + BSIAI Accelerator B1"),
+                         ["Accelerator B40"])
+        self.assertEqual(bb.assign("AI CAP B40 - Common , Build Side Income Using AI Accelerator B40"),
+                         ["Accelerator B40"])
 
     def test_b43_own_room(self):
         self.assertEqual(bb.assign("Build Side Income Using AI Accelerator B43"),
                          ["Accelerator B43"])
 
     def test_untracked_and_non_bsiai(self):
-        self.assertEqual(bb.assign("AI CAP B39 , B40 - Generalist, Build Side Income Using AI Accelerator B40"), [])
+        # A POD room shared by two CAP batches and Accelerator B40: only the CAP
+        # peer with an Accelerator cohort is credited (B39 has none).
+        self.assertEqual(bb.assign("AI CAP B39 , B40 - Generalist, Build Side Income Using AI Accelerator B40"),
+                         ["Accelerator B40"])
         self.assertEqual(bb.assign("AI CAP B16 + B17 + B18 11AM"), [])
         self.assertEqual(bb.assign(""), [])
 
@@ -138,12 +145,12 @@ class TestRosterRows(unittest.TestCase):
 
 class TestConstants(unittest.TestCase):
     def test_codes_tabs_and_ids_line_up(self):
-        self.assertEqual(len(bb.CODES), 7)
-        self.assertEqual(len(set(bb.LMS_ID.values())), 7)
+        self.assertEqual(len(bb.CODES), 8)
+        self.assertEqual(len(set(bb.LMS_ID.values())), 8)
         for c in bb.CODES:
             self.assertTrue(bb.TAB_OF[c].startswith("BSIAI "))
             self.assertEqual(bb.CODE_OF_TAB[bb.TAB_OF[c]], c)
-        self.assertNotIn(40, bb.ACCEL_BY_CAP)          # not requested; never credited silently
+        self.assertEqual(sorted(bb.ACCEL_BY_CAP), [40, 41, 42, 43])
         self.assertIn("95403362407", bb.DROP_WIDS)
 
 

@@ -17,7 +17,7 @@ Run:  .venv\\Scripts\\python.exe bsiai_build.py            (fetch everything, bu
       .venv\\Scripts\\python.exe bsiai_build.py --upload       (...and publish to the Drive store folder)
 
 Outputs (deliverables go to F:, the store stays in .cache/ -- both gitignored):
-    F:\\BSIAI_7_batches_roster_format_<date>.xlsx    the roster extract
+    F:\\BSIAI_<n>_batches_roster_format_<date>.xlsx    the roster extract
     F:\\BSIAI_marked_attendance_<date>.xlsx          roster + Present/Absent per session
     F:\\attendance_store\\bsiai_<date>.duckdb         the store the BSIAI pages read
     .cache\\bsiai.duckdb                             the same store, where both apps look first
@@ -91,7 +91,7 @@ import trainers as _trainers          # noqa: E402
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-# ── the seven batches ────────────────────────────────────────────────────────
+# ── the eight batches ────────────────────────────────────────────────────────
 # (dashboard code, workbook tab, LMS batch id). Resolved by ID, not by name:
 # the LMS renamed B3-A/B3-B between 28 Sep and 5 Oct ('...AI-B3-A' ->
 # '...AI B3-A'), and three product lines share batch numbers.
@@ -100,6 +100,9 @@ BATCHES = [
     ("B2",              "BSIAI B2",              "50080d12-7222-47cb-afea-df63f21ee1cb"),
     ("B3-A",            "BSIAI B3 - A",          "472e80ce-608c-40f2-8936-0179b2760161"),
     ("B3-B",            "BSIAI B3 - B",          "88ab8596-3970-47b2-90de-30f21fdee388"),
+    # LMS "Accelerator B40" = the team's older "Accelerator B1". Added 2026-10-06
+    # on the owner's ask ("BSIAI B40 is missing"); it shares AI CAP B40's rooms.
+    ("Accelerator B40", "BSIAI Accelerator B40", "8fb68dfd-3ac1-4f83-9765-b11a0e0e66a4"),
     ("Accelerator B41", "BSIAI Accelerator B41", "2e3a985d-7fdc-44a0-9a36-ea52e2f91fe2"),
     ("Accelerator B42", "BSIAI Accelerator B42", "e438d449-64fd-4d83-b116-921c90c3e0c2"),
     ("Accelerator B43", "BSIAI Accelerator B43", "6e62d435-a32a-4d15-a8e2-8d4422951b98"),
@@ -109,19 +112,23 @@ TAB_OF = {c: t for c, t, _i in BATCHES}
 CODE_OF_TAB = {t: c for c, t, _i in BATCHES}
 LMS_ID = {c: i for c, _t, i in BATCHES}
 
-# Ruling 2: a shared AI CAP Common room -> the Accelerator cohort of that CAP
-# batch. B40 (= the team's "Accelerator B1") is deliberately absent: not asked
-# for, and its rooms would otherwise be credited to nobody.
-ACCEL_BY_CAP = {41: "Accelerator B41", 42: "Accelerator B42", 43: "Accelerator B43"}
+# Ruling 2: a shared AI CAP room -> the Accelerator cohort of that CAP batch.
+# B40's rooms are labelled 'AI CAP B40 - Common , Build Side Income Using AI
+# Accelerator B40' (12-20 Sep) and 'AI CAP B39 , B40 - Generalist, Build Side
+# Income Using AI Accelerator B40' (4 Oct); both resolve to Accelerator B40.
+ACCEL_BY_CAP = {40: "Accelerator B40", 41: "Accelerator B41",
+                42: "Accelerator B42", 43: "Accelerator B43"}
 # Ruling 4.
 DROP_WIDS = frozenset({"95403362407"})
 # Ruling 3: {code: CAP batch whose Techies room is unioned into the same day}.
 CROSS_ROOM = {"Accelerator B41": 41}
 # The cohorts that run Sat+Sun pairs. The AI CAP app's weekend view
-# (data.paired) is OFF for them by the owner's ruling of 2026-10-05 — each day
-# is its own session; `--weekend-view` turns it on for a comparison build.
-PAIRED = frozenset({"Accelerator B41", "Accelerator B42", "Accelerator B43"})
-WEEKEND_VIEW = {"on": False}
+# (data.paired: one session per weekend, each person counted once over both
+# days) is ON for them — the owner's ruling of 2026-10-06 ("the unique thing we
+# have for AI CAP B41-B43 should also apply"), reversing the per-day ruling of
+# 2026-10-05. `--per-day` turns it off for a comparison build.
+PAIRED = frozenset({"Accelerator B40", "Accelerator B41", "Accelerator B42", "Accelerator B43"})
+WEEKEND_VIEW = {"on": True}
 
 RULINGS = [
     "Sessions: the L2 schedule is the register. A report L2 does not know is "
@@ -136,8 +143,9 @@ RULINGS = [
     "Attended = Yes only (owner, 2026-09-28).",
     "Denominator = batch strength (everyone enrolled with an email), exactly as "
     "the AI CAP dashboard counts; the 28 Sep local build divided by active only.",
-    "Accelerator batches are counted per day: Saturday and Sunday are separate "
-    "sessions (owner, 2026-10-05). The AI CAP app's Sat+Sun weekend view is off.",
+    "Accelerator batches are counted per WEEKEND, like AI CAP B41 onward: Saturday "
+    "and Sunday run the same class, each learner is counted once across both days "
+    "(owner, 2026-10-06, reversing the per-day ruling of 2026-10-05).",
     "A feedback poll in a shared AI CAP room is divided by roster: the batch's "
     "own figure is its own students' answers; 'Whole room' is everyone who answered.",
 ]
@@ -259,8 +267,8 @@ def write_roster_workbook(rows: dict, raw: dict, path: pathlib.Path, stamp: str)
     wb.remove(wb.active)
     ws = wb.create_sheet("Read me")
     lines = [
-        f"The 7 BSIAI batches in the Master-Batch-Roster column layout. Extracted {stamp} from the LMS API.",
-        f"{total:,} roster rows across 7 tabs ({rawtot:,} raw API rows before dedupe); {distinct:,} distinct people "
+        f"The {len(BATCHES)} BSIAI batches in the Master-Batch-Roster column layout. Extracted {stamp} from the LMS API.",
+        f"{total:,} roster rows across {len(BATCHES)} tabs ({rawtot:,} raw API rows before dedupe); {distinct:,} distinct people "
         f"— {total - distinct} re-enrolled into a second batch, so do not sum the tabs for a population.",
         "Rows built with attendance-suite/lms_roster.py customer_row(), so the phone concatenation and the",
         "Payment / Closing Type spellings are identical to what the pipeline writes. Deduped per batch on the",
@@ -272,9 +280,9 @@ def write_roster_workbook(rows: dict, raw: dict, path: pathlib.Path, stamp: str)
         "both key to ('BSIAI', 2), and 'B3 - A' / 'B3 - B' both key to ('BSIAI', 3). Group on the full 'batch",
         "name' column, never on a number.",
         "",
-        "*** WHICH 'ACCELERATOR B41 / B42 / B43' THIS IS ***",
-        "LMS-native numbering: 'Build Side Income Using AI Accelerator B41/B42/B43'. The team's older",
-        "'Accelerator B1 / B2' vocabulary means LMS B40 / B41. B40 is NOT in this file (not requested).",
+        "*** WHICH 'ACCELERATOR B40 / B41 / B42 / B43' THIS IS ***",
+        "LMS-native numbering: 'Build Side Income Using AI Accelerator B40/B41/B42/B43'. The team's older",
+        "'Accelerator B1 / B2' vocabulary means LMS B40 / B41. B40 was added on 6 Oct 2026.",
         "L2 and the Drive folders now carry the LMS numbering too ('AI CAP B41 - Common , Build Side",
         "Income Using AI Accelerator B41'), so the three naming systems finally agree.",
         "",
@@ -373,7 +381,7 @@ def write_roster_workbook(rows: dict, raw: dict, path: pathlib.Path, stamp: str)
     ws.auto_filter.ref = f"A1:{get_column_letter(len(head))}{ws.max_row}"
 
     ws = wb.create_sheet("Overlap")
-    ws.append(["People appearing in more than one of the seven batches (email, else last-10 phone)"])
+    ws.append(["People appearing in more than one of these batches (email, else last-10 phone)"])
     ws.cell(row=1, column=1).font = Font(bold=True, size=12)
     ws.append([])
     ws.append([""] + [TAB_OF[c] for c in CODES])
@@ -654,8 +662,8 @@ def collect_sessions(att_idx: list, tech_idx: list, l2_bytes: bytes) -> dict:
         codes = assign(label) or assign(rep["folder"])
         if not codes:
             # An AI CAP class whose TOPIC mentions side income is not BSIAI at
-            # all; a BSIAI room for a cohort outside the seven (Accelerator
-            # B40, B44…) is, and deserves a line.
+            # all; a BSIAI room for a cohort outside these eight (Accelerator
+            # B44, B45…) is, and deserves a line.
             if any(t == "BSIAI" for t, _n in keys) or re.search(r"(?i)bsi", label):
                 warnings.append(f"webinar {wid} ({label[:55]}, {stamp}): a BSIAI cohort this dashboard "
                                 f"does not track — skipped")
@@ -1018,11 +1026,11 @@ def main(argv=None) -> int:
     ap.add_argument("--upload", action="store_true",
                     help="publish the store and both workbooks to the Drive store folder "
                          "(STORE_FOLDER_ID / secrets drive.store_folder_id)")
-    ap.add_argument("--weekend-view", action="store_true",
-                    help="count Accelerator batches per Sat+Sun weekend (AI CAP B41+ style) "
-                         "instead of per day — a comparison build, not the owner's default")
+    ap.add_argument("--per-day", action="store_true",
+                    help="count Accelerator batches per day instead of per Sat+Sun weekend "
+                         "— a comparison build, not the owner's default (2026-10-06)")
     args = ap.parse_args(argv)
-    WEEKEND_VIEW["on"] = bool(args.weekend_view)
+    WEEKEND_VIEW["on"] = not args.per_day
     t0 = time.time()
     stamp = datetime.now(IST).strftime("%Y-%m-%d")
     today = datetime.now(IST).date()
@@ -1032,7 +1040,7 @@ def main(argv=None) -> int:
     rows = roster_rows(raw)
     log("   deduped: " + ", ".join(f"{c} {len(rows[c])}" for c in CODES))
     CACHE.mkdir(exist_ok=True)
-    roster_path = CACHE / f"BSIAI_7_batches_roster_format_{stamp}.xlsx"
+    roster_path = CACHE / f"BSIAI_{len(BATCHES)}_batches_roster_format_{stamp}.xlsx"
     write_roster_workbook(rows, raw, roster_path, stamp)
     log(f"   wrote {roster_path.name}")
     if args.roster_only:

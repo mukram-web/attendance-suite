@@ -987,9 +987,10 @@ Dashboard's first selectbox raises a duplicate-key error.
 (so the denominator is strength and the validity gates are the same),
 `recap`/`trainers`/`sessionmeta`/`polls` build the sections,
 `dashboard_core.roster_grid`/`compute` the tables. **Accelerator batches are
-counted PER DAY** (owner's ruling 2026-10-05, over the AI CAP app's Sat+Sun
-weekend view) — `--weekend-view` widens `data.paired` to them for a
-comparison build only.
+counted PER WEEKEND**, exactly like AI CAP B41 onward — `data.paired` is widened
+to them, so Sat+Sun is one session and each learner counts once across both
+days (owner's ruling 2026-10-06, reversing the per-day ruling of 2026-10-05).
+`--per-day` builds the per-day comparison instead.
 
 **The rulings that shape its numbers** are in the module docstring and in the
 store's `rulings` key (shown on the Build notes page). The ones that are

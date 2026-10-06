@@ -651,15 +651,21 @@ def weekend_table_html(w: dict) -> str:
                 f'<td class="num">{p:,}</td><td class="num">{t:,}</td>'
                 f'<td class="num">{pct}</td></tr>')
     trs = []
+    # A batch with one room (BSIAI: no Techies split) needs no room name on
+    # its rows, and its per-room "unique" line would just repeat the overall.
+    one = len(w["rooms"]) == 1
     for i, mm in enumerate(w["days"]):
         for rm in w["rooms"]:
             dd = rm["days"][i]
-            trs.append(_row(f'{rm["room"]} {_weekday(mm)} ({dd["date_lbl"]})',
+            who = "" if one else f'{rm["room"]} '
+            trs.append(_row(f'{who}{_weekday(mm)} ({dd["date_lbl"]})',
                             dd["present"], dd["total"]))
     both = "both days" if len(w["days"]) > 1 else "counted once"
-    for rm in w["rooms"]:
-        trs.append(_row(f'Unique {rm["room"]} {both}', rm["present"], rm["total"], True))
-    trs.append(_row("Unique overall", w["present"], w["total"], True))
+    if not one:
+        for rm in w["rooms"]:
+            trs.append(_row(f'Unique {rm["room"]} {both}', rm["present"], rm["total"], True))
+    trs.append(_row(f"Unique overall {both}" if one else "Unique overall",
+                    w["present"], w["total"], True))
     return ('<table class="sess"><thead><tr><th></th><th class="num">Attended</th>'
             '<th class="num">Enrolled</th><th class="num">% of enrolled</th>'
             '</tr></thead><tbody>' + "".join(trs) + "</tbody></table>")
